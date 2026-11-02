@@ -59,6 +59,13 @@ const MAX_KEPT: usize = 10_000;
 const MAX_LOGGED: usize = 200;
 /// How long a clean disconnect may take.
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
+/// Longest wait for the connection of a session without a timeout
+/// (`timeout_ms = 0`): a server that never answers (or a client that keeps
+/// reconnecting) must not hang the run.
+#[cfg(not(test))]
+const CONNECT_CAP: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const CONNECT_CAP: Duration = Duration::from_millis(300);
 /// Event names the Socket.IO client API refuses to emit.
 const RESERVED_EVENTS: [&str; 6] =
     ["connect", "connect_error", "disconnect", "disconnecting", "newListener", "removeListener"];
@@ -607,13 +614,31 @@ impl<'c, 'a> Session<'c, 'a> {
         }
     }
 
+    /// Waits for the connection: until the session timeout, or at most
+    /// [`CONNECT_CAP`] when the session has none.
+    async fn wait_connected(&mut self, vars: &mut VariableScopes, exec: &mut Execution) -> Result<(), Stop> {
+        let unbounded = self.deadline.is_none();
+        if unbounded {
+            self.deadline = Some(tokio::time::Instant::now() + CONNECT_CAP);
+        }
+        let result = self.wait_for(vars, exec, |s| s.connected_ms.is_some()).await;
+        if unbounded {
+            self.deadline = None;
+        }
+        result
+    }
+
     /// Reports a connection that did not come up.
     fn connect_failed(&self, stop: Stop, exec: &mut Execution) {
         let label = self.label();
         match stop {
             Stop::Cancelled => exec.error = Some(HttpError::cancelled()),
             Stop::Timeout => {
-                fail(exec, format!("{label}: not connected within {}", human(self.runner.timeout_ms)));
+                let limit = match self.runner.timeout_ms {
+                    0 => CONNECT_CAP.as_millis() as u64,
+                    ms => ms,
+                };
+                fail(exec, format!("{label}: not connected within {}", human(limit)));
             }
             Stop::Error(e) => fail(exec, format!("{label}: {e}")),
             Stop::Closed(reason) => fail(exec, format!("{label}: connection closed ({reason})")),
@@ -905,7 +930,7 @@ pub(crate) async fn websocket(ctx: &Ctx<'_>, r: &WsRequest, vars: &mut VariableS
             let _ = tx.send(ev);
         }
     });
-    if let Err(stop) = s.wait_for(vars, exec, |s| s.connected_ms.is_some()).await {
+    if let Err(stop) = s.wait_connected(vars, exec).await {
         return s.connect_failed(stop, exec);
     }
     let mut queued = 0;
@@ -1075,7 +1100,7 @@ pub(crate) async fn socketio(ctx: &Ctx<'_>, r: &SocketIoRequest, vars: &mut Vari
             let _ = tx.send(ev);
         }
     });
-    if let Err(stop) = s.wait_for(vars, exec, |s| s.connected_ms.is_some()).await {
+    if let Err(stop) = s.wait_connected(vars, exec).await {
         return s.connect_failed(stop, exec);
     }
     let mut queued = 0;
@@ -1239,7 +1264,7 @@ pub(crate) async fn mqtt(ctx: &Ctx<'_>, r: &MqttRequest, vars: &mut VariableScop
             let _ = tx.send(ev);
         }
     });
-    if let Err(stop) = s.wait_for(vars, exec, |s| s.connected_ms.is_some()).await {
+    if let Err(stop) = s.wait_connected(vars, exec).await {
         return s.connect_failed(stop, exec);
     }
     // Subscribe first so that replies to our publishes are not missed.
@@ -1327,6 +1352,57 @@ async fn mqtt_publish(
 mod tests {
     use super::*;
     use ternarywire_core::model::WsSavedMessage;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sessions_without_a_timeout_still_give_up_connecting() {
+        use ternarywire_core::model::{Collection, RequestItem, RequestKind};
+        // Accepts the connection but never answers the handshake.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let services = crate::Services {
+            http: std::sync::Arc::new(ternarywire_http::HttpEngine::new(
+                ternarywire_http::EngineConfig { proxy: Default::default(), ..Default::default() },
+                std::sync::Arc::new(ternarywire_http::CookieJar::new()),
+            )),
+            scripts: std::sync::Arc::new(ternarywire_core::script::NoopEngine),
+            tokens: std::sync::Arc::new(ternarywire_core::tokens::MemoryTokenStore::default()),
+            vault: None,
+            defaults: Default::default(),
+            script_timeout: Duration::from_secs(5),
+            runtime: tokio::runtime::Handle::current(),
+            packages: None,
+        };
+        let ws = WsRequest {
+            url: format!("ws://{addr}"),
+            runner: SessionRunner { timeout_ms: 0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut item = RequestItem::new("Hung", ternarywire_core::model::HttpRequest::new("GET", ""));
+        item.request = RequestKind::WebSocket(ws);
+        let id = item.id.clone();
+        let mut c = Collection::new("C");
+        c.items.push(item.into());
+        let input = crate::ExecuteInput {
+            collection: &c,
+            request_id: &id,
+            request_override: None,
+            iteration: 0,
+            iteration_count: 1,
+            base_dir: None,
+        };
+        let started = Instant::now();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let exec = crate::execute(&services, input, &mut VariableScopes::default(), &cancel).await;
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        let err = exec.error.expect("connect timeout");
+        assert!(err.message.contains("not connected within 300 ms"), "{}", err.message);
+    }
 
     #[test]
     fn topic_filters() {
