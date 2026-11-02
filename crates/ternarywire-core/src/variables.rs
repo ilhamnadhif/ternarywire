@@ -568,6 +568,8 @@ impl<'a> Resolver<'a> {
                         }
                         Some((value, _)) => out.push_str(&value),
                         None => {
+                            // Trimmed like the lookup (and `references`).
+                            let name = name.trim();
                             if let Some(list) = unresolved.as_mut()
                                 && !list.iter().any(|n| n == name)
                             {
@@ -691,6 +693,9 @@ mod tests {
         let mut missing = Vec::new();
         assert_eq!(r.resolve_tracking("a {{nope}} b {{ host }}", &mut missing), "a {{nope}} b env.test");
         assert_eq!(missing, vec!["nope"]);
+        // Reported by name, as `references` gives it, once.
+        assert_eq!(r.resolve_tracking("{{ nope }} {{other }}", &mut missing), "{{ nope }} {{other }}");
+        assert_eq!(missing, vec!["nope", "other"]);
         // Self reference terminates.
         assert!(r.resolve("{{loop}}").contains("{{loop}}"));
     }
