@@ -409,7 +409,11 @@ fn is_child_name(name: &str) -> bool {
 /// slug spelling goes to the same entry anyway) or a numbered variant of it.
 fn keeps_name(existing: &str, slug: &str) -> bool {
     let n = existing.to_lowercase();
-    (n == slug || n.starts_with(&format!("{slug}-"))) && !is_reserved_on_windows(&n)
+    let numbered = n
+        .strip_prefix(slug)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    (n == slug || numbered) && !is_reserved_on_windows(&n)
 }
 
 fn unique_name(base: &str, suffix: &str, used: &mut HashSet<String>) -> String {
@@ -1353,6 +1357,33 @@ mod tests {
         assert_eq!(ws.collections[0], c);
         store.delete_collection(&c.id, &secrets).unwrap();
         assert!(!dir.path().join("collections/renamed").exists());
+    }
+
+    #[test]
+    fn renaming_to_a_prefix_of_the_old_name_moves_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::memory();
+        let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+        let mut c = Collection::new("API v2");
+        store.save_collection(&c, &secrets).unwrap();
+        let mut env = Environment::new("Staging EU");
+        store.save_environment(&env, &secrets).unwrap();
+        c.name = "API".into();
+        store.save_collection(&c, &secrets).unwrap();
+        env.name = "Staging".into();
+        store.save_environment(&env, &secrets).unwrap();
+        assert!(dir.path().join("collections/api/collection.json").is_file());
+        assert!(!dir.path().join("collections/api-v2").exists());
+        assert!(dir.path().join("environments/staging.json").is_file());
+        assert!(!dir.path().join("environments/staging-eu.json").exists());
+        // A numbered name (the plain one was taken) still stays.
+        let mut other = Collection::new("API");
+        store.save_collection(&other, &secrets).unwrap();
+        assert!(dir.path().join("collections/api-2/collection.json").is_file());
+        other.description = "edited".into();
+        store.save_collection(&other, &secrets).unwrap();
+        assert!(dir.path().join("collections/api-2/collection.json").is_file());
+        assert_eq!(WorkspaceStore::open(dir.path(), &secrets).unwrap().1.collections.len(), 2);
     }
 
     #[test]
