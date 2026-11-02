@@ -34,9 +34,16 @@ fn js(s: &str) -> String {
 }
 
 /// A literal for a test's expected value: numbers and booleans stay typed.
+/// Numbers in JSON syntax only, which JS reads the same: Rust's `f64` parser
+/// also takes `inf`, `NaN`, `+1` and `010` (a legacy octal, a syntax error
+/// in strict mode).
 fn literal(v: &str) -> String {
     let t = v.trim();
-    if t.parse::<f64>().is_ok() || t == "true" || t == "false" || t == "null" { t.to_string() } else { js(v) }
+    if t.parse::<serde_json::Number>().is_ok() || t == "true" || t == "false" || t == "null" {
+        t.to_string()
+    } else {
+        js(v)
+    }
 }
 
 /// JS expression for a Thunder `json.a.b[0]` query.
@@ -460,5 +467,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cols[0].request_count(), 1);
+    }
+
+    #[test]
+    fn only_js_number_literals_stay_unquoted() {
+        for n in ["200", "-1", "0", "1.5", "-0.25", "1e3", "2E-7"] {
+            assert_eq!(literal(n), n);
+        }
+        assert_eq!(literal(" 42 "), "42");
+        for s in ["inf", "infinity", "Infinity", "NaN", "nan", "010", "+1", ".5", "5.", "1_000", "0x1f", "1e", "5abc"] {
+            assert_eq!(literal(s), js(s), "{s}");
+        }
     }
 }
