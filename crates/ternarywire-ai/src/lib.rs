@@ -528,6 +528,14 @@ struct RoundCtx<'a> {
     needs_separator: bool,
 }
 
+/// Whether the server refused the `stream_options` sent to get token usage
+/// with a stream (some OpenAI-compatible servers reject unknown fields).
+/// One the user set in the extra body is left alone.
+fn refuses_stream_options(e: &AiError, cfg: &AiConfig) -> bool {
+    let named = matches!(e, AiError::Provider { status: 400 | 422, body, .. } if body.contains("stream_options"));
+    named && cfg.extra.as_ref().is_none_or(|x| x.get("stream_options").is_none())
+}
+
 async fn send_round(
     cfg: &AiConfig,
     http: &reqwest::Client,
@@ -667,10 +675,27 @@ async fn run_inner(
     let mut first_token_ms = None;
     let (mut input_total, mut output_total) = (None::<u64>, None::<u64>);
     let mut rounds = 0;
+    // Set once the server refused `stream_options` (see `refuses_stream_options`).
+    let mut skip_stream_options = false;
     loop {
-        let req = provider.build(cfg, &messages, &specs, cfg.stream);
+        let build = |skip: bool| {
+            let mut req = provider.build(cfg, &messages, &specs, cfg.stream);
+            if skip && let Some(body) = req.body.as_object_mut() {
+                body.remove("stream_options");
+            }
+            req
+        };
+        let req = build(skip_stream_options);
+        let sent_stream_options = req.body.get("stream_options").is_some();
         let ctx = RoundCtx { on_event, start, first_token_ms: &mut first_token_ms, needs_separator: !text.is_empty() };
-        let round = send_round(cfg, http, provider.as_ref(), req, cancel, ctx).await?;
+        let mut result = send_round(cfg, http, provider.as_ref(), req, cancel, ctx).await;
+        if sent_stream_options && result.as_ref().err().is_some_and(|e| refuses_stream_options(e, cfg)) {
+            skip_stream_options = true;
+            let ctx =
+                RoundCtx { on_event, start, first_token_ms: &mut first_token_ms, needs_separator: !text.is_empty() };
+            result = send_round(cfg, http, provider.as_ref(), build(true), cancel, ctx).await;
+        }
+        let round = result?;
         if !round.text.is_empty() {
             if !text.is_empty() {
                 text.push_str("\n\n");

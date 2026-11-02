@@ -289,6 +289,19 @@ async fn google_models(State(m): State<Arc<Mock>>, headers: HeaderMap, RawQuery(
     .into_response()
 }
 
+/// An OpenAI-compatible server that refuses the `stream_options` field.
+async fn strict_chat(State(m): State<Arc<Mock>>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    m.record("/strict/v1/chat/completions", None, &headers, &body);
+    if body.get("stream_options").is_some() {
+        let err = json!({"error": {"message": "Unrecognized request argument supplied: stream_options", "type": "invalid_request_error"}});
+        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+    }
+    data_only(vec![
+        json!({"id": "s1", "model": "strict-1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "strict ok"}}]}),
+        json!({"id": "s1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ])
+}
+
 /// A body sent in `parts`, `gap` apart.
 fn paced(content_type: &'static str, parts: Vec<String>, gap: Duration) -> Response {
     let chunks = stream::iter(parts.into_iter().enumerate()).then(move |(i, part)| async move {
@@ -351,6 +364,7 @@ async fn spawn_mock() -> (String, Arc<Mock>) {
         .route("/google/v1beta/models", get(google_models))
         .route("/google/v1beta/models/{*rest}", post(google_generate))
         .route("/flood/v1/chat/completions", post(flood))
+        .route("/strict/v1/chat/completions", post(strict_chat))
         .route("/slow/v1/chat/completions", post(slow_chat))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -507,6 +521,25 @@ async fn a_json_answer_to_a_streaming_request_has_no_first_token_time() {
     assert_eq!(r.text, "Hello from openai");
     assert_eq!(r.first_token_ms, None);
     assert_eq!(deltas(&events), ["Hello from openai"]);
+}
+
+#[tokio::test]
+async fn stream_options_are_left_out_for_a_server_that_refuses_them() {
+    let (base, mock) = spawn_mock().await;
+    let mut cfg = config(AiProvider::OpenAiCompatible, &base, true);
+    cfg.base_url = format!("{base}/strict/v1");
+    let (r, _) = go(cfg.clone(), vec![]).await;
+    assert_eq!(r.unwrap().text, "strict ok");
+    let reqs = mock.take();
+    assert_eq!(reqs.len(), 2);
+    assert!(reqs[0].body.get("stream_options").is_some());
+    assert!(reqs[1].body.get("stream_options").is_none());
+    assert_eq!(reqs[1].body["stream"], true);
+    // One the user set in the extra body stays.
+    cfg.extra = Some(json!({"stream_options": {"include_usage": false}}));
+    let (r, _) = go(cfg, vec![]).await;
+    assert!(matches!(r.unwrap_err(), AiError::Provider { status: 400, .. }));
+    assert_eq!(mock.take().len(), 1);
 }
 
 #[tokio::test]

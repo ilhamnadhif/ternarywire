@@ -86,6 +86,7 @@ impl Provider for OpenAi {
         }
         if stream {
             body["stream"] = json!(true);
+            // For token usage; left out again for a server that refuses it.
             body["stream_options"] = json!({"include_usage": true});
         }
         if !tools.is_empty() {
