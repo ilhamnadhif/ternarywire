@@ -436,6 +436,66 @@ const LONG_WITH_ARG: &[&str] = &[
     "create-file-mode",
     "ech",
     "ipfs-gateway",
+    "alt-svc",
+    "continue-at",
+    "crlfile",
+    "curves",
+    "delegation",
+    "dns-interface",
+    "dns-ipv4-addr",
+    "dns-ipv6-addr",
+    "egd-file",
+    "engine",
+    "ftp-account",
+    "ftp-alternative-to-user",
+    "ftp-method",
+    "ftp-ssl-ccc-mode",
+    "haproxy-clientip",
+    "hostpubsha256",
+    "hsts",
+    "httpsig-algo",
+    "httpsig-headers",
+    "httpsig-key",
+    "httpsig-keyid",
+    "ip-tos",
+    "keepalive-cnt",
+    "knownhosts",
+    "krb4",
+    "libcurl",
+    "login-options",
+    "parallel-max-host",
+    "proto",
+    "proto-default",
+    "proto-redir",
+    "proxy-cacert",
+    "proxy-capath",
+    "proxy-cert",
+    "proxy-cert-type",
+    "proxy-ciphers",
+    "proxy-crlfile",
+    "proxy-key",
+    "proxy-key-type",
+    "proxy-pass",
+    "proxy-pinnedpubkey",
+    "proxy-service-name",
+    "proxy-tls13-ciphers",
+    "proxy-tlsauthtype",
+    "proxy-tlspassword",
+    "proxy-tlsuser",
+    "proxy1.0",
+    "pubkey",
+    "random-file",
+    "rate",
+    "sigalgs",
+    "socks5-gssapi-service",
+    "ssl-sessions",
+    "tls13-ciphers",
+    "tlsauthtype",
+    "tlspassword",
+    "tlsuser",
+    "trace-config",
+    "upload-flags",
+    "vlan-priority",
 ];
 
 #[derive(Debug)]
@@ -467,7 +527,8 @@ impl DataKind {
 #[derive(Default)]
 struct Parsed {
     method: Option<String>,
-    url: Option<String>,
+    /// Every URL in order; curl requests each of them.
+    urls: Vec<String>,
     url_queries: Vec<String>,
     headers: Vec<KeyValue>,
     data: Vec<(DataKind, String)>,
@@ -494,7 +555,12 @@ fn apply_option(p: &mut Parsed, name: &str, value: Option<String>) -> Result<(),
         "X" | "request" => p.method = Some(v().to_uppercase()),
         "H" | "header" => {
             let h = v();
-            if let Some((k, val)) = h.split_once(':') {
+            if let Some(file) = h.strip_prefix('@') {
+                p.warnings.push(format!(
+                    "-H @{file}: curl reads headers from {} when it runs; they were not imported",
+                    file_label(file)
+                ));
+            } else if let Some((k, val)) = h.split_once(':') {
                 let val = val.trim();
                 // `Name:` alone removes an internal header in curl; nothing to import.
                 if !val.is_empty() {
@@ -519,6 +585,12 @@ fn apply_option(p: &mut Parsed, name: &str, value: Option<String>) -> Result<(),
             let c = v();
             if c.contains('=') {
                 p.cookies.push(c);
+            } else if !c.is_empty() {
+                // Without `=` the argument names a cookie file.
+                p.warnings.push(format!(
+                    "-b {c}: curl reads cookies from {} when it runs; they were not imported",
+                    file_label(&c)
+                ));
             }
         }
         "A" | "user-agent" => p.headers.push(KeyValue::new("User-Agent", v())),
@@ -530,11 +602,7 @@ fn apply_option(p: &mut Parsed, name: &str, value: Option<String>) -> Result<(),
         "L" | "location" | "location-trusted" => p.location = true,
         "max-redirs" => p.max_redirs = v().trim().parse().ok(),
         "m" | "max-time" => p.max_time_ms = v().trim().parse::<f64>().ok().map(|s| (s * 1000.0).round() as u64),
-        "url" => {
-            if p.url.is_none() {
-                p.url = Some(v());
-            }
-        }
+        "url" => p.urls.push(v()),
         "url-query" => p.url_queries.push(v()),
         "http1.0" | "0" | "http1.1" => p.http_version = Some(HttpVersion::Http1),
         "http2" | "http2-prior-knowledge" => p.http_version = Some(HttpVersion::Http2),
@@ -720,9 +788,7 @@ pub fn parse_with_warnings(cmd: &str) -> Result<(HttpRequest, Vec<String>), Conv
         let w = &words[i];
         i += 1;
         if end_of_options || !w.starts_with('-') || w == "-" {
-            if p.url.is_none() {
-                p.url = Some(w.clone());
-            }
+            p.urls.push(w.clone());
             continue;
         }
         if w == "--" {
@@ -734,6 +800,9 @@ pub fn parse_with_warnings(cmd: &str) -> Result<(HttpRequest, Vec<String>), Conv
                 Some((n, v)) if LONG_WITH_ARG.contains(&n) => (n, Some(v.to_string())),
                 _ => (long, None),
             };
+            // `--expand-<option>` is <option> with `{{variables}}` expanded
+            // (curl 8.3), which TernaryWire reads as its own variables.
+            let name = name.strip_prefix("expand-").filter(|n| LONG_WITH_ARG.contains(n)).unwrap_or(name);
             let value = if LONG_WITH_ARG.contains(&name) {
                 match inline {
                     Some(v) => Some(v),
@@ -771,7 +840,14 @@ pub fn parse_with_warnings(cmd: &str) -> Result<(HttpRequest, Vec<String>), Conv
         }
     }
 
-    let mut url = p.url.clone().ok_or_else(|| ConvertError::Parse("no URL in curl command".into()))?;
+    let mut url = p.urls.first().cloned().ok_or_else(|| ConvertError::Parse("no URL in curl command".into()))?;
+    if p.urls.len() > 1 {
+        p.warnings.push(format!(
+            "curl requests {} URLs; only the first was imported (skipped: {})",
+            p.urls.len(),
+            p.urls[1..].join(", ")
+        ));
+    }
     for q in &p.url_queries {
         // `+` sends the rest as is; otherwise the same rules as --data-urlencode.
         let piece = match q.strip_prefix('+') {
@@ -802,6 +878,11 @@ pub fn parse_with_warnings(cmd: &str) -> Result<(HttpRequest, Vec<String>), Conv
         }
     }
 
+    if !p.data.is_empty() && (!p.form.is_empty() || p.upload.is_some()) && !p.get {
+        // curl refuses the command ("You can only select one HTTP request method").
+        let other = if p.form.is_empty() { "--upload-file" } else { "--form" };
+        p.warnings.push(format!("curl does not combine --data with {other}; the data was not imported"));
+    }
     if !p.form.is_empty() {
         body.mode = BodyMode::FormData;
         body.form_data = p.form.clone();
@@ -1052,6 +1133,41 @@ mod tests {
         let r = parse("curl --aws-sigv4 'aws:amz:eu-west-1:s3' -u AK:SK https://h").unwrap();
         assert_eq!(r.auth.kind, AuthType::AwsV4);
         assert_eq!(r.auth.get("region"), "eu-west-1");
+    }
+
+    #[test]
+    fn long_options_with_values_do_not_take_the_url() {
+        for opt in [
+            "--continue-at 100",
+            "--proto =https",
+            "--proto-redir -all,https",
+            "--proxy-cacert ca.pem",
+            "--alt-svc cache.txt",
+            "--hsts hsts.txt",
+            "--rate 2/s",
+            "--tls13-ciphers TLS_AES_128_GCM_SHA256",
+            "--expand-header 'X-A: {{a}}'",
+        ] {
+            let r = parse(&format!("curl {opt} https://h.test/a")).unwrap_or_else(|e| panic!("{opt}: {e}"));
+            assert_eq!(r.url, "https://h.test/a", "{opt}");
+        }
+        let r = parse("curl --expand-data '{\"a\": \"{{a}}\"}' https://h.test/").unwrap();
+        assert_eq!(r.body.raw, "{\"a\": \"{{a}}\"}");
+    }
+
+    #[test]
+    fn unsupported_input_is_reported() {
+        let warned = |cmd: &str, needle: &str| {
+            let (_, w) = parse_with_warnings(cmd).unwrap();
+            assert!(w.iter().any(|w| w.contains(needle)), "{cmd}: {w:?}");
+        };
+        warned("curl -b cookies.txt https://h.test/", "-b cookies.txt");
+        warned("curl -H @headers.txt https://h.test/", "-H @headers.txt");
+        warned("curl -d a=1 -F f=@x.png https://h.test/", "--data with --form");
+        warned("curl -d a=1 -T x.bin https://h.test/", "--data with --upload-file");
+        warned("curl https://h.test/a https://h.test/b --url https://h.test/c", "https://h.test/b, https://h.test/c");
+        let (r, w) = parse_with_warnings("curl -b 'a=1' -G -d q=1 https://h.test/a").unwrap();
+        assert!(w.is_empty() && r.header("cookie") == Some("a=1") && r.url == "https://h.test/a?q=1", "{w:?}");
     }
 
     #[test]
