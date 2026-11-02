@@ -44,6 +44,21 @@ const FOLDER_FILE: &str = "folder.json";
 const REQUEST_SUFFIX: &str = ".request.json";
 pub const GLOBALS_OWNER: &str = "globals";
 
+/// Creates the workspace's local folder (`.ternarywire/`) if needed, with a
+/// `.gitignore` of `*` in it, so the folder ignores itself even in a Git
+/// repository whose own `.gitignore` does not list it (one made before the
+/// workspace, say). An existing `.gitignore` there is left alone.
+pub fn ensure_local_dir(root: &Path) -> std::io::Result<PathBuf> {
+    let dir = root.join(LOCAL_DIR);
+    std::fs::create_dir_all(&dir)?;
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(".gitignore")) {
+        Ok(mut f) => std::io::Write::write_all(&mut f, b"*\n")?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    Ok(dir)
+}
+
 /// Writes via a temporary file and rename so a crash of the app never leaves
 /// a half-written file behind. There is deliberately no fsync per file: it
 /// made saving a 10,000-request collection take ~45 s, and the rename already
@@ -456,6 +471,7 @@ impl WorkspaceStore {
         if !gitignore.exists() {
             std::fs::write(&gitignore, format!("{LOCAL_DIR}/\n")).map_err(|e| Error::io(&gitignore, e))?;
         }
+        ensure_local_dir(root).map_err(|e| Error::io(root.join(LOCAL_DIR), e))?;
         let store = WorkspaceStore { root: root.to_path_buf(), id: manifest.id.clone(), index: Mutex::default() };
         let ws = Workspace {
             root: root.to_path_buf(),
@@ -489,6 +505,9 @@ impl WorkspaceStore {
 
     pub fn open(root: &Path, secrets: &SecretStore) -> Result<(WorkspaceStore, Workspace)> {
         let manifest = Self::read_manifest(root)?;
+        // Before anything (state, secrets file, history) is written into
+        // it. A read-only checkout still opens.
+        let _ = ensure_local_dir(root);
         let mut index = Index::default();
         let mut load_errors = Vec::new();
 
@@ -619,7 +638,8 @@ impl WorkspaceStore {
     }
 
     fn write_state(&self, state: &LocalState) -> Result<()> {
-        let path = self.local_dir().join("state.json");
+        let dir = ensure_local_dir(&self.root).map_err(|e| Error::io(self.local_dir(), e))?;
+        let path = dir.join("state.json");
         write_atomic(&path, &to_pretty(state)).map_err(|e| Error::io(path, e))
     }
 
@@ -1166,6 +1186,31 @@ mod tests {
         assert_eq!(ws.environments[0], env);
         assert_eq!(ws.active_environment.as_deref(), Some(env.id.as_str()));
         assert_eq!(ws.globals[0].value, "1");
+    }
+
+    #[test]
+    fn the_local_folder_ignores_itself() {
+        let ignored = |root: &Path| std::fs::read_to_string(root.join(LOCAL_DIR).join(".gitignore")).ok();
+        // Created inside a repository that has its own `.gitignore`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        let secrets = SecretStore::memory();
+        let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join(".gitignore")).unwrap(), "target/\n");
+        assert_eq!(ignored(dir.path()).as_deref(), Some("*\n"));
+        // Removed (or never made, by an older version): back on open and
+        // before the state is written.
+        std::fs::remove_dir_all(dir.path().join(LOCAL_DIR)).unwrap();
+        WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ignored(dir.path()).as_deref(), Some("*\n"));
+        std::fs::remove_dir_all(dir.path().join(LOCAL_DIR)).unwrap();
+        store.set_active_environment(None).unwrap();
+        assert_eq!(ignored(dir.path()).as_deref(), Some("*\n"));
+        // One of the user's own is kept.
+        std::fs::write(dir.path().join(LOCAL_DIR).join(".gitignore"), "state.json\n").unwrap();
+        store.save_globals(&[Variable::new("g", "1")], &secrets).unwrap();
+        WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ignored(dir.path()).as_deref(), Some("state.json\n"));
     }
 
     #[test]
