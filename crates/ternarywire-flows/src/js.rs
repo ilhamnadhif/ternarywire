@@ -12,7 +12,7 @@ use ternarywire_core::script::{ScriptError, ScriptJob, ScriptOutcome};
 use ternarywire_runner::Services;
 use tokio_util::sync::CancellationToken;
 
-/// Data-scope key holding `{ blocks, labels, inputs, vars, loop, input, flow }`.
+/// Data-scope key holding `{ blocks, labels, index, inputs, vars, loop, input, flow }`.
 pub const CONTEXT_KEY: &str = "__ternarywire_flow";
 /// Local variable carrying the JSON-encoded return value.
 pub const RESULT_KEY: &str = "__ternarywire_result";
@@ -20,6 +20,25 @@ pub const RESULT_KEY: &str = "__ternarywire_result";
 pub const VARS_KEY: &str = "__ternarywire_vars";
 /// Prefix of internal keys that never become flow variables.
 pub const INTERNAL_PREFIX: &str = "__ternarywire_";
+
+/// `blocks`: the records of the blocks that ran by id, with their labels as
+/// extra keys; any other key finds its block the way templates do
+/// ([`Flow::find_block`](crate::model::Flow::find_block): id, label, label
+/// ignoring ASCII case, then slug) through `__mf.index` (`[id, label, slug]`
+/// of every block, in flow order). One line, like the rest of the prelude.
+const BLOCKS: &str = concat!(
+    r#"const __mb = Object.assign({}, __mf.blocks || {}); "#,
+    r#"for (const [k, v] of Object.entries(__mf.labels || {})) { if (!(k in __mb) && __mb[v] !== undefined) __mb[k] = __mb[v]; } "#,
+    r#"const __mk = (k) => { const key = k.trim(), ix = __mf.index || [], lo = (s) => s.replace(/[A-Z]/g, (c) => c.toLowerCase()); "#,
+    r#"const hit = ix.find((b) => b[0] === key) || ix.find((b) => b[1] === key) || ix.find((b) => lo(b[1]) === lo(key)); "#,
+    r#"if (hit) return hit[0]; let s = "", n = 0, dash = false; "#,
+    r#"for (const c of key) { if (/[\p{Alphabetic}\p{N}]/u.test(c)) { const l = c.toLowerCase(); s += l; dash = false; "#,
+    r#"for (const x of l) { const p = x.codePointAt(0); n += p < 0x80 ? 1 : p < 0x800 ? 2 : p < 0x10000 ? 3 : 4; } } "#,
+    r#"else if (!dash && s !== "") { s += "-"; n += 1; dash = true; } if (n >= 60) break; } "#,
+    r#"s = s.replace(/-+$/, "") || "untitled"; const slug = ix.find((b) => b[1] !== "" && b[2] === s); return slug && slug[0]; }; "#,
+    r#"const blocks = new Proxy(__mb, { get: (t, k) => { if (typeof k !== "string" || k in t) return t[k]; const id = __mk(k); return id === undefined ? undefined : t[id]; }, "#,
+    r#"has: (t, k) => { if (typeof k !== "string" || k in t) return k in t; const id = __mk(k); return id !== undefined && id in t; } }); "#,
+);
 
 /// True when `code` uses `await` as a word outside of comments and string
 /// literals. When the scan gets lost (an unterminated string or comment,
@@ -111,9 +130,7 @@ pub fn wrap(body: &str) -> String {
     let is_async = uses_await(body);
     let (open, close) = if is_async { ("await (async function () {", "})()") } else { ("(function () {", "})()") };
     format!(
-        "const __mf = pm.iterationData.get(\"{CONTEXT_KEY}\") || {{}}; \
-         const blocks = Object.assign({{}}, __mf.blocks || {{}}); \
-         for (const [k, v] of Object.entries(__mf.labels || {{}})) {{ if (!(k in blocks) && blocks[v] !== undefined) blocks[k] = blocks[v]; }} \
+        "const __mf = pm.iterationData.get(\"{CONTEXT_KEY}\") || {{}}; {BLOCKS}\
          const inputs = __mf.inputs || {{}}, vars = __mf.vars || {{}}, flow = __mf.flow || {{}}; \
          const loop = __mf.loop === undefined ? null : __mf.loop, input = __mf.input === undefined ? null : __mf.input; \
          const __mr = {open}{body}\n{close}; \

@@ -158,7 +158,8 @@
 //!
 //! In JavaScript (Script, Condition expressions, Template expressions,
 //! Loop item expressions) the same data is available as `blocks` (keyed by
-//! id and label: `blocks["Get users"].output.json`), `inputs`, `vars`,
+//! id and label, and matched like templates: `blocks["Get users"].output.json`,
+//! `blocks["get-users"]`), `inputs`, `vars`,
 //! `loop`, `input` and `flow`, next to the `pm` API. Assigning
 //! `vars.x = ...` sets a flow variable.
 

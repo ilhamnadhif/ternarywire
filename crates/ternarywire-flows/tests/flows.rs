@@ -2467,3 +2467,49 @@ async fn await_in_a_comment_does_not_change_the_result() {
     assert_eq!(r.outputs["awaited"], json!(5));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn scripts_find_blocks_like_templates() {
+    let (base, _) = server().await;
+    let mut users = template("u", "x");
+    users.label = "Get users".into();
+    let mut cafe = template("cafe", "y");
+    cafe.label = "Café Ünïcode".into();
+    // Two blocks share a label; the first one never runs.
+    let mut dup1 = template("d1", "first");
+    dup1.label = "Dup".into();
+    let mut dup2 = template("d2", "second");
+    dup2.label = "Dup".into();
+    let f = flow(
+        vec![
+            users,
+            cafe,
+            dup1,
+            dup2,
+            script(
+                "js",
+                "return [blocks['Get users'].output, blocks['get USERS'].output, blocks['get-users'].output, \
+                 blocks[' Get users '].output, blocks.u.output, 'get-users' in blocks, blocks['CAFÉ_ÜNÏCODE'].output, \
+                 blocks.Dup === undefined, blocks.nope === undefined, 'nope' in blocks];",
+            ),
+            output("js_out", "js", "{{blocks.js.output}}"),
+            output("tpl", "tpl", "{{blocks.get-users.output}} {{blocks.CAFÉ_ÜNÏCODE.output}}"),
+            output("dup", "dup", "{{blocks.Dup.output}}"),
+        ],
+        &[
+            ("start", "next", "u"),
+            ("u", "success", "cafe"),
+            ("cafe", "success", "d2"),
+            ("d2", "success", "js"),
+            ("js", "success", "js_out"),
+            ("js_out", "next", "tpl"),
+            ("tpl", "next", "dup"),
+        ],
+    );
+    let r = run(&f, &base, &[]).await.result;
+    assert!(r.failures.is_empty(), "{r:#?}");
+    assert_eq!(r.outputs["js"], json!(["x", "x", "x", "x", "x", true, "y", true, true, false]));
+    assert_eq!(r.outputs["tpl"], json!("x y"));
+    // Templates mean the first "Dup", which did not run; so do scripts.
+    assert_eq!(r.outputs["dup"], Value::Null);
+}
+

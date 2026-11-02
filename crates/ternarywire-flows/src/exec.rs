@@ -1857,17 +1857,25 @@ impl<'r, 'a> Run<'r, 'a> {
     /// Runs wrapped JavaScript (see [`js::wrap`]) for a block.
     async fn run_js(&mut self, block: &Block, act: &Activation, code: &str) -> JsOutcome {
         let flow = self.flow();
+        // `blocks[label]` is the block `{{blocks.label}}` means (the first
+        // one with that label), when it ran; `index` finds the rest.
         let mut labels = serde_json::Map::new();
-        for b in &flow.blocks {
-            if !b.label.is_empty() && self.records.contains_key(&b.id) && !labels.contains_key(&b.label) {
-                labels.insert(b.label.clone(), Value::String(b.id.clone()));
+        for b in flow.blocks.iter().filter(|b| !b.label.is_empty()) {
+            if let Some(target) = flow.find_block(&b.label)
+                && self.records.contains_key(&target.id)
+                && !labels.contains_key(&b.label)
+            {
+                labels.insert(b.label.clone(), Value::String(target.id.clone()));
             }
         }
+        let index: Vec<Value> =
+            flow.blocks.iter().map(|b| json!([b.id, b.label, ternarywire_core::util::slugify(&b.label)])).collect();
         let ctx = {
             let refs = self.ref_ctx(&act.payload);
             json!({
                 "blocks": refs.blocks_value(),
                 "labels": labels,
+                "index": index,
                 "inputs": Value::Object(self.sh.inputs.clone().into_iter().collect()),
                 "vars": Value::Object(self.flow_vars.clone().into_iter().collect()),
                 "loop": refs.loop_ctx.cloned().unwrap_or(Value::Null),
