@@ -1380,3 +1380,15 @@ structure Big { message: String }
     // `as u16` made 4664 and 4464 of them.
     assert_eq!(statuses, [200, 500]);
 }
+
+#[test]
+fn invalid_surrogate_escapes_are_errors() {
+    for (esc, message) in [
+        ("\\ud83d\\u0041", "invalid low surrogate `\\u0041`"),
+        ("\\ud83d x", "unpaired surrogate `\\ud83d`"),
+        ("\\ude00", "unpaired surrogate `\\ude00`"),
+    ] {
+        let d = syntax_error(&format!("namespace a.b\n@documentation(\"{esc}\")\nstring A\n"));
+        assert_eq!(d.message, message, "{esc}");
+    }
+}

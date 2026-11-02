@@ -289,9 +289,16 @@ impl Lexer {
                             None => return Err(Diagnostic::error(pos, "invalid unicode escape")),
                         }
                     }
-                    code = 0x10000 + ((code - 0xD800) << 10) + (low.wrapping_sub(0xDC00) & 0x3FF);
+                    if !(0xDC00..0xE000).contains(&low) {
+                        return Err(Diagnostic::error(pos, format!("invalid low surrogate `\\u{low:04x}`")));
+                    }
+                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
                 }
-                out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                // A surrogate left unpaired is no character.
+                match char::from_u32(code) {
+                    Some(c) => out.push(c),
+                    None => return Err(Diagnostic::error(pos, format!("unpaired surrogate `\\u{code:04x}`"))),
+                }
             }
             other => return Err(Diagnostic::error(pos, format!("invalid escape `\\{other}`"))),
         }
