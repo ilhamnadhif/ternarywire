@@ -179,6 +179,9 @@ impl HttpEngine {
         &self.cookies
     }
 
+    /// The config in use, with the proxy password itself where the settings
+    /// hold a `{{vault:name}}` reference: for connections only, never to be
+    /// saved back to the settings.
     pub fn config(&self) -> EngineConfig {
         self.config.read().config.clone()
     }
