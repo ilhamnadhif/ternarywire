@@ -1332,3 +1332,32 @@ fn maven_dependencies_come_from_the_local_repository() {
     assert!(build_config_maven_dependencies(r#"{"maven": {"dependencies": "x"}}"#).unwrap_err().contains("array"));
     assert!(build_config_maven_dependencies(r#"{"maven": {"dependencies": [1]}}"#).unwrap_err().contains("strings"));
 }
+
+#[test]
+fn traits_are_found_by_their_own_namespace() {
+    // A model's own `http` trait is not `smithy.api#http`, nor its `restJson1` the AWS protocol.
+    let mut t = Traits::new();
+    t.insert("example.custom#http".into(), json!({"method": "PUT", "uri": "/x"}));
+    t.insert("example.custom#restJson1".into(), json!({}));
+    t.insert("example.custom#audited".into(), json!({}));
+    assert!(find_trait(&t, "http").is_none());
+    assert!(find_trait(&t, "restJson1").is_none());
+    assert!(find_trait(&t, "audited").is_some(), "other names still match by local name");
+    t.insert("smithy.api#http".into(), json!({"method": "GET", "uri": "/y"}));
+    t.insert("aws.protocols#restJson1".into(), json!({}));
+    assert_eq!(find_trait(&t, "http").unwrap()["method"], "GET");
+    assert!(find_trait(&t, "restJson1").is_some());
+
+    let text = r#"$version: "2"
+namespace example.custom
+use aws.protocols#restJson1
+@trait
+structure http { method: String, uri: String }
+@restJson1
+service S { version: "1", operations: [Op] }
+@http(method: "PUT", uri: "/custom")
+operation Op {}
+"#;
+    let m = parse_idl(text).unwrap();
+    assert!(m.shape("example.custom#Op").unwrap().get_trait("http").is_none());
+}

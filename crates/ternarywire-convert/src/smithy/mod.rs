@@ -229,15 +229,21 @@ impl ShapeKind {
 /// Traits keyed by absolute shape id (`smithy.api#http`).
 pub type Traits = IndexMap<String, Value>;
 
-/// Looks up a trait by name: `http` means `smithy.api#http`; an absolute id
-/// is matched exactly. Traits from other namespaces are also found by their
-/// local name (`restJson1` finds `aws.protocols#restJson1`).
+/// Looks up a trait by name: a prelude trait name (`http`) means
+/// `smithy.api#http` only, so a model's own `x#http` is not read as it, and
+/// a well-known one (`restJson1`) its known ids (`aws.protocols#restJson1`);
+/// an absolute id is matched exactly. Other names are found by their local
+/// name.
 pub fn find_trait<'a>(traits: &'a Traits, name: &str) -> Option<&'a Value> {
     if name.contains('#') {
         return traits.get(name);
     }
-    if let Some(v) = traits.get(&format!("smithy.api#{name}")) {
-        return Some(v);
+    if resolve::PRELUDE_TRAITS.contains(&name) {
+        return traits.get(&format!("smithy.api#{name}"));
+    }
+    let mut known = resolve::KNOWN_EXTERNAL_TRAITS.iter().filter(|id| local_name(id) == name).peekable();
+    if known.peek().is_some() {
+        return known.find_map(|id| traits.get(*id));
     }
     traits.iter().find(|(k, _)| local_name(k) == name).map(|(_, v)| v)
 }
