@@ -431,7 +431,12 @@ pub(crate) async fn execute_keeping_locals(
         let mut job = ScriptJob::new(ScriptEvent::PreRequest, pre, script_request(&item.id, &item.name, &request));
         job.info = info.clone();
         job.variables = before.clone();
-        job.cookies = services.http.cookies().for_url(&Resolver::new(vars).resolve(&request.url));
+        // The URL as it will be sent: folder variables and vault included.
+        let mut url_resolver = Resolver::new(&before);
+        if let Some(v) = &services.vault {
+            url_resolver = url_resolver.with_vault(v.as_ref());
+        }
+        job.cookies = services.http.cookies().for_url(&url_resolver.resolve(&request.url));
         job.http = Some(Arc::new(script_http(services, input.base_dir, cancel)));
         job.packages = services.packages.clone();
         let mut outcome = run_scripts(services, job, cancel).await;
@@ -658,6 +663,7 @@ pub async fn rerun_post_response(
     };
     job.variables = before.clone();
     job.response = Some(script_response(response));
+    job.cookies = services.http.cookies().for_url(&prepared.url);
     job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(services.clone()).with_cancel(cancel.clone())));
     let mut outcome = run_scripts(services, job, cancel).await;
     exec.absorb(ScriptEvent::PostResponse, &mut outcome);

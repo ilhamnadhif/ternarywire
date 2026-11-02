@@ -28,7 +28,7 @@ use ternarywire_runner::{ExecuteInput, RunOptions, Services, execute, run_collec
 
 /// Script lines: `env.set k v`, `col.set k v`, `local.set k v`, `header.add k v`,
 /// `capture k <json field>`, `test.status N`, `next NAME|null`, `skip`, `log MSG`, `throw MSG`,
-/// `body.file PATH`, `form.file KEY PATH`, `send URL`, `send.file URL PATH`.
+/// `body.file PATH`, `form.file KEY PATH`, `send URL`, `send.file URL PATH`, `cookies`.
 struct DslEngine;
 
 impl ScriptEngine for DslEngine {
@@ -103,6 +103,13 @@ impl ScriptEngine for DslEngine {
                             Err(e) => format!("error {e}"),
                         };
                         out.console.push(ConsoleEntry { level: LogLevel::Log, message });
+                    }
+                    ["cookies"] => {
+                        let names: Vec<&str> = job.cookies.iter().map(|c| c.name.as_str()).collect();
+                        out.console.push(ConsoleEntry {
+                            level: LogLevel::Log,
+                            message: format!("cookies {}", names.join(",")),
+                        });
                     }
                     other => panic!("unknown dsl line {other:?}"),
                 }
@@ -769,4 +776,40 @@ async fn send_request_stops_with_the_run_and_the_script_timeout() {
     let exec = execute(&s, input(&c, &id), &mut scopes(&base), &CancellationToken::new()).await;
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
     assert!(exec.console.iter().any(|l| l.message.contains("before the script timed out")), "{:?}", exec.console);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scripts_see_the_cookies_of_the_resolved_url() {
+    let base = server().await;
+    let services = services();
+    let host = reqwest::Url::parse(&base).unwrap().host_str().unwrap().to_string();
+    services.http.cookies().set(&host, "sid=1; Path=/").unwrap();
+    let mut c = Collection::new("Cookies");
+    let mut f = Folder::new("F");
+    f.variables.push(Variable::new("fbase", &base));
+    let mut r = req("R", "GET", "{{fbase}}/echo");
+    r.scripts.pre_request = "cookies".into();
+    r.scripts.post_response = "cookies".into();
+    let id = r.id.clone();
+    f.items.push(r.into());
+    c.items.push(f.into());
+    let mut vars = VariableScopes::default();
+    let exec = execute(&services, input(&c, &id), &mut vars, &CancellationToken::new()).await;
+    let logs: Vec<&str> = exec.console.iter().filter(|l| l.phase != "network").map(|l| l.message.as_str()).collect();
+    assert_eq!(logs, ["cookies sid", "cookies sid"]);
+
+    // Re-running the tests against the response sees them too.
+    let (prepared, response) = (exec.prepared.unwrap(), exec.response.unwrap());
+    let exec = ternarywire_runner::pipeline::rerun_post_response(
+        &services,
+        &c,
+        &id,
+        &prepared,
+        &response,
+        &mut vars,
+        &CancellationToken::new(),
+    )
+    .await;
+    let logs: Vec<&str> = exec.console.iter().map(|l| l.message.as_str()).collect();
+    assert_eq!(logs, ["cookies sid"]);
 }
