@@ -402,6 +402,9 @@ pub struct BoxStyle {
     pub align_self: Option<ItemAlign>,
     pub justify_self: Option<ItemAlign>,
     pub grid_area: GridPlacement,
+    /// `visibility: hidden`: laid out, but its background and borders are
+    /// not painted.
+    pub hidden: bool,
 }
 
 impl Default for BoxStyle {
@@ -440,6 +443,7 @@ impl Default for BoxStyle {
             align_self: None,
             justify_self: None,
             grid_area: GridPlacement::default(),
+            hidden: false,
         }
     }
 }
@@ -530,6 +534,8 @@ pub struct TextStyle {
     pub valign: VAlign,
     /// Line height as a multiple of `size` (`None`: `normal`).
     pub line_height: Option<f32>,
+    /// `visibility: hidden`: takes its space, but is not painted.
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -545,6 +551,8 @@ pub struct ImageRef {
     pub mime: Option<String>,
     /// Hash of `data`, its image cache key (hashed once, not every frame).
     pub data_hash: u64,
+    /// `visibility: hidden`: takes its space, but is not painted.
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -810,3 +810,31 @@ fn inline_blocks_with_large_negative_margins() {
     let l = Laid::new(html, 400.0);
     assert_eq!(l.rect("b").2, 50.0);
 }
+
+#[test]
+fn visibility_hidden_keeps_its_space_unpainted() {
+    let html = "<style>body { margin: 0 } p { margin: 0; height: 20px } \
+        .h { visibility: hidden; background: #ff0000; border: 2px solid #00ff00 } .v { visibility: visible } \
+        img { width: 30px; height: 10px }</style>\
+        <p class=a>first</p><p class=h>gone <span class=v>shown</span> <img alt=pic></p><p class=b>last</p>";
+    let l = Laid::new(html, 300.0);
+    assert_eq!((l.rect("h").1, l.rect("h").3, l.rect("b").1), (20.0, 24.0, 44.0));
+    let shapes = painted(html, 300.0);
+    let red = Color32::from_rgb(255, 0, 0);
+    let green = Color32::from_rgb(0, 255, 0);
+    assert!(!shapes.iter().any(|s| matches!(s, Shape::Rect(r) if r.fill == red)));
+    assert!(!shapes.iter().any(|s| matches!(s, Shape::LineSegment { stroke, .. } if stroke.color == green)));
+    assert!(!shapes.iter().any(|s| matches!(s, Shape::Text(t) if t.galley.text().contains("[pic]"))));
+    // The text keeps its place; only the visible span inside is painted.
+    let Some(Shape::Text(t)) = shapes.iter().find(|s| matches!(s, Shape::Text(t) if t.galley.text().contains("gone")))
+    else {
+        panic!("no hidden text laid out")
+    };
+    let color = |word: &str| {
+        let job = &t.galley.job;
+        let at = job.text.find(word).unwrap();
+        job.sections.iter().find(|s| (s.byte_range.start.0..s.byte_range.end.0).contains(&at)).unwrap().format.color
+    };
+    assert_eq!(color("gone"), Color32::TRANSPARENT);
+    assert_ne!(color("shown"), Color32::TRANSPARENT);
+}

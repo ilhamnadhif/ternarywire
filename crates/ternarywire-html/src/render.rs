@@ -1590,6 +1590,9 @@ impl<'d> Renderer<'_, 'd> {
 
     fn box_shapes(&self, r: Rect, s: &BoxStyle) -> Vec<Shape> {
         let mut out = Vec::new();
+        if s.hidden {
+            return out;
+        }
         let radius =
             if s.radius_percent > 0.0 { r.size().min_elem() * s.radius_percent / 100.0 } else { self.px(s.radius) };
         if let Some(bg) = s.background {
@@ -1791,6 +1794,7 @@ impl<'d> Renderer<'_, 'd> {
         };
         let bg = s.background.map(|b| over(self.current_bg(), b)).unwrap_or(self.current_bg());
         let color = match s.color {
+            _ if s.hidden => Color32::TRANSPARENT,
             Some(c) => self.readable_on(c, bg),
             None if link => self.link_color_on(bg),
             None => self.default_text_on(bg),
@@ -1799,10 +1803,10 @@ impl<'d> Renderer<'_, 'd> {
         if let Some(bg) = s.background {
             f.background = bg;
         }
-        if s.underline {
+        if s.underline && !s.hidden {
             f.underline = Stroke::new((size / 14.0).max(1.0), color);
         }
-        if s.strike {
+        if s.strike && !s.hidden {
             f.strikethrough = Stroke::new((size / 14.0).max(1.0), color);
         }
         f.valign = match s.valign {
@@ -1821,7 +1825,7 @@ impl<'d> Renderer<'_, 'd> {
     }
 
     fn faux_bold(&self, s: &TextStyle) -> bool {
-        s.bold && (s.monospace || self.bold_family.is_none())
+        s.bold && !s.hidden && (s.monospace || self.bold_family.is_none())
     }
 
     /// Builds the layout job of a run of text items; returns the link ranges
@@ -2093,7 +2097,7 @@ impl<'d> Renderer<'_, 'd> {
                 let size = want(img.width, img.height, texture.size);
                 let sense = if img.link.is_some() { Sense::click() } else { Sense::hover() };
                 let (rect, response) = ui.allocate_exact_size(size, sense);
-                if ui.is_rect_visible(rect) {
+                if ui.is_rect_visible(rect) && !img.hidden {
                     image.paint_at(ui, rect);
                 }
                 if let Some(link) = &img.link {
@@ -2126,6 +2130,9 @@ impl<'d> Renderer<'_, 'd> {
                 size.max(vec2(self.px(w), self.px(h)).min(vec2(ui.available_size_before_wrap().x.max(16.0), 4000.0)));
         }
         let (rect, response) = ui.allocate_exact_size(size, sense);
+        if img.hidden {
+            return;
+        }
         let painter = ui.painter();
         painter.rect_stroke(rect, 2.0, Stroke::new(1.0, color.gamma_multiply(0.5)), egui::StrokeKind::Inside);
         painter.galley(rect.left_top() + vec2(4.0, 2.0), galley, color);

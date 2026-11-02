@@ -243,7 +243,8 @@ fn box_style(c: &Computed) -> BoxStyle {
         margin: c.margin,
         padding: c.padding,
         border,
-        background: c.background,
+        background: c.background.filter(|_| !c.hidden),
+        hidden: c.hidden,
         width: c.width,
         min_width: c.min_width,
         max_width: c.max_width,
@@ -301,6 +302,7 @@ fn text_style(c: &Computed, ictx: &InlineCtx) -> TextStyle {
         monospace: c.monospace,
         valign: ictx.valign,
         line_height: c.line_height.factor(c.font_size),
+        hidden: c.hidden,
     }
 }
 
@@ -604,9 +606,6 @@ impl Builder<'_> {
     }
 
     fn push_text(&mut self, raw: &str, c: &Computed, ictx: &InlineCtx, flow: &mut Flow, word_start: &mut bool) {
-        if c.hidden {
-            return;
-        }
         let ws = c.white_space;
         let text = if ws.preserves_spaces() {
             raw.replace("\r\n", "\n").replace('\t', "    ")
@@ -622,15 +621,17 @@ impl Builder<'_> {
         let text = transform(&text, c.text_transform, word_start);
         let style = text_style(c, ictx);
         let collapse = !ws.preserves_spaces();
-        if let Some(Pending::Text { text: prev, style: ps, link, collapse: pc }) = flow.inline.last_mut()
+        // Hidden text keeps its space but is no link.
+        let link = ictx.link.clone().filter(|_| !c.hidden);
+        if let Some(Pending::Text { text: prev, style: ps, link: pl, collapse: pc }) = flow.inline.last_mut()
             && *ps == style
-            && *link == ictx.link
+            && *pl == link
             && *pc == collapse
         {
             prev.push_str(&text);
             return;
         }
-        flow.inline.push(Pending::Text { text, style, link: ictx.link.clone(), collapse });
+        flow.inline.push(Pending::Text { text, style, link, collapse });
     }
 
     fn flow_node(&mut self, id: NodeId, parent: &Computed, ictx: &InlineCtx, flow: &mut Flow, ws: &mut bool) {
@@ -664,9 +665,6 @@ impl Builder<'_> {
                 return;
             }
             "img" => {
-                if c.hidden {
-                    return;
-                }
                 let img = self.image(id, &c, ictx);
                 if is_block_level(c.display) || out_of_flow {
                     if !out_of_flow {
@@ -701,7 +699,8 @@ impl Builder<'_> {
                     "password" => "•".repeat(dom.attr(id, "value").map(|v| v.chars().count()).unwrap_or(0)),
                     _ => dom.attr(id, "value").or(dom.attr(id, "placeholder")).unwrap_or("").to_string(),
                 };
-                let ictx = InlineCtx { background: c.background.or(ictx.background), ..ictx.clone() };
+                let own = c.background.filter(|_| !c.hidden);
+                let ictx = InlineCtx { background: own.or(ictx.background), ..ictx.clone() };
                 self.push_text(
                     &format!(" {text} "),
                     &Computed { white_space: style::WhiteSpace::Pre, ..c.clone() },
@@ -728,9 +727,6 @@ impl Builder<'_> {
             .flatten()
             .filter(|h| !h.to_ascii_lowercase().starts_with("javascript:"));
         if out_of_flow {
-            if c.hidden {
-                return;
-            }
             let c = blockify(c);
             let mut block = self.element_block(id, &c);
             if let Some(link) = own_link.or(ictx.link.as_deref()) {
@@ -743,9 +739,6 @@ impl Builder<'_> {
         let inline_block_box =
             display == Display::InlineBlock && (c.inner != Inner::Flow || self.has_block_content(id, &c));
         if display == Display::InlineBlock && !inline_block_box && self.boxed_inline(id, &c) {
-            if c.hidden {
-                return;
-            }
             let mut block = self.element_block(id, &c);
             if let Some(link) = own_link.or(ictx.link.as_deref()) {
                 set_link(&mut block, link);
@@ -755,9 +748,6 @@ impl Builder<'_> {
         }
         if is_block_level(display) || inline_block_box {
             self.flush(flow, parent);
-            if c.hidden {
-                return;
-            }
             let mut block = self.element_block(id, &c);
             if display == Display::ListItem {
                 let n = match self.lists.last_mut() {
@@ -771,7 +761,7 @@ impl Builder<'_> {
                     }
                     None => 1,
                 };
-                block.marker = marker(c.list_style, n);
+                block.marker = marker(c.list_style, n).filter(|_| !c.hidden);
             }
             // `<a>` wrapping blocks: the link applies to the text inside.
             if let Some(link) = own_link.or(ictx.link.as_deref()) {
@@ -791,7 +781,7 @@ impl Builder<'_> {
                 inner.link = Some(href.to_string());
             }
         }
-        if let Some(bg) = c.background {
+        if let Some(bg) = c.background.filter(|_| !c.hidden) {
             inner.background = Some(bg);
         }
         if matches!(c.vertical_align, VAlign::Sub | VAlign::Super) {
@@ -861,7 +851,8 @@ impl Builder<'_> {
             std::hash::Hasher::finish(&h)
         });
         let (width, height) = (size(c.width), size(c.height));
-        ImageRef { src, alt, width, height, link: ictx.link.clone(), data, mime, data_hash }
+        let (link, hidden) = (ictx.link.clone().filter(|_| !c.hidden), c.hidden);
+        ImageRef { src, alt, width, height, link, data, mime, data_hash, hidden }
     }
 
     fn table(&mut self, el: NodeId, c: &Computed) -> Table {
@@ -908,7 +899,7 @@ impl Builder<'_> {
                         let rs = style::compute(dom, tr, &cs, &self.sheet);
                         if rs.display == Display::TableRow {
                             let mut row = self.row(tr, &rs, &mut occupied);
-                            row.background = row.background.or(cs.background);
+                            row.background = row.background.or(cs.background.filter(|_| !cs.hidden));
                             row.head = section == 0;
                             rows_in_order.push((section, row));
                         }
@@ -941,7 +932,7 @@ impl Builder<'_> {
 
     fn row(&mut self, tr: NodeId, rs: &Computed, occupied: &mut Vec<usize>) -> Row {
         let dom = self.dom;
-        let mut row = Row { background: rs.background, ..Default::default() };
+        let mut row = Row { background: rs.background.filter(|_| !rs.hidden), ..Default::default() };
         let mut col = 0usize;
         let mut taken: Vec<(usize, usize, usize)> = Vec::new(); // (col, colspan, rowspan)
         for cell in dom.element_children(tr).collect::<Vec<_>>() {
