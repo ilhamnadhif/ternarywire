@@ -571,7 +571,12 @@ impl<'a> Converter<'a> {
     /// Response examples: from `@examples` when present, otherwise skeletons
     /// of the output and of each error.
     fn examples(&mut self, op: &Shape, req: &HttpRequest, wire: Wire) -> Vec<Example> {
-        let code = op.get_trait("http").and_then(|h| h.get("code")).and_then(Value::as_u64).unwrap_or(200) as u16;
+        let code = op
+            .get_trait("http")
+            .and_then(|h| h.get("code"))
+            .and_then(Value::as_u64)
+            .and_then(|c| u16::try_from(c).ok())
+            .unwrap_or(200);
         let output = op.output.as_ref().and_then(|r| self.shape(&r.id)).filter(|s| s.kind == ShapeKind::Structure);
         let mut out = Vec::new();
         if let Some(Value::Array(list)) = op.get_trait("examples") {
@@ -900,8 +905,9 @@ fn prelude_kind(id: &str) -> Option<ShapeKind> {
 
 /// HTTP status of an error shape: `@httpError`, else 400/500 from `@error`.
 fn error_status(s: &Shape) -> u16 {
-    if let Some(code) = s.get_trait("httpError").and_then(Value::as_u64) {
-        return code as u16;
+    // Out of range (`as u16` would wrap 70000 to 4464): fall back like a missing one.
+    if let Some(code) = s.get_trait("httpError").and_then(Value::as_u64).and_then(|c| u16::try_from(c).ok()) {
+        return code;
     }
     match s.get_trait("error").and_then(Value::as_str) {
         Some("server") => 500,

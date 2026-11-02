@@ -1361,3 +1361,22 @@ operation Op {}
     let m = parse_idl(text).unwrap();
     assert!(m.shape("example.custom#Op").unwrap().get_trait("http").is_none());
 }
+
+#[test]
+fn out_of_range_status_codes_are_not_wrapped() {
+    let text = r#"$version: "2"
+namespace example.codes
+use aws.protocols#restJson1
+@restJson1
+service S { version: "1", operations: [Op] }
+@http(method: "GET", uri: "/op", code: 70200)
+operation Op { output := { a: String }, errors: [Big] }
+@error("server")
+@httpError(70000)
+structure Big { message: String }
+"#;
+    let (c, _) = import(text).unwrap();
+    let statuses: Vec<u16> = req(&c, "Op").examples.iter().map(|e| e.status).collect();
+    // `as u16` made 4664 and 4464 of them.
+    assert_eq!(statuses, [200, 500]);
+}
