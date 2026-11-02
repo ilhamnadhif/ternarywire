@@ -31,7 +31,7 @@ use crate::auth::Auth;
 use crate::environment::Environment;
 use crate::error::{Error, Result};
 use crate::model::*;
-use crate::secrets::SecretStore;
+use crate::secrets::{OAUTH_KEY_PREFIX, SecretStore};
 use crate::util::{new_id, slugify};
 use crate::variables::{Variable, is_pure_reference};
 
@@ -173,6 +173,12 @@ struct Index {
     collection_dirs: HashMap<Id, PathBuf>,
     env_files: HashMap<Id, PathBuf>,
     state: LocalState,
+    /// Collection id -> its secret owners (see [`secret_owners`]) as last
+    /// loaded or saved, to find the secrets of items removed since.
+    owners: HashMap<Id, HashSet<String>>,
+    /// OAuth tokens of removed items, for this session only: an item moved
+    /// to a collection that is saved later gets its token back.
+    dropped_tokens: HashMap<String, String>,
 }
 
 /// Persists a workspace. Cheap to share between threads; all methods take
@@ -222,12 +228,42 @@ fn var_slots(vars: &[Variable]) -> Vec<String> {
         .collect()
 }
 
+/// Secret owners of a collection: itself, its folders and its requests
+/// (the secrets of examples are nested under their request's).
+fn secret_owners(c: &Collection) -> HashSet<String> {
+    fn walk(items: &[Item], out: &mut HashSet<String>) {
+        for item in items {
+            out.insert(item.id().to_string());
+            if let Item::Folder(f) = item {
+                walk(&f.items, out);
+            }
+        }
+    }
+    let mut out = HashSet::from([c.id.clone()]);
+    walk(&c.items, &mut out);
+    out
+}
+
+/// Whether `key` is an `auth:`, `var:`, `cur:` or `oauth2:` secret of one
+/// of `owners` (or of something nested under one, like an example).
+fn owned_by(key: &str, owners: &HashSet<&str>) -> bool {
+    if let Some(owner) = key.strip_prefix(OAUTH_KEY_PREFIX) {
+        return owners.contains(owner);
+    }
+    let Some((kind, rest)) = key.split_once(':') else { return false };
+    matches!(kind, "auth" | "var" | "cur") && rest.match_indices(':').any(|(i, _)| owners.contains(&rest[..i]))
+}
+
 /// Collects secrets out of a model while rendering it to files.
 #[derive(Default)]
 struct SecretSink {
     owners: Vec<String>,
     secrets: Vec<(String, String)>,
     current: IndexMap<String, IndexMap<String, String>>,
+    /// Owners that no longer exist: all their secrets go, OAuth tokens too.
+    dropped: Vec<String>,
+    /// OAuth tokens to put back (`oauth2:` key, token), unless replaced since.
+    tokens: Vec<(String, String)>,
 }
 
 impl SecretSink {
@@ -270,21 +306,38 @@ impl SecretSink {
         }
     }
 
-    fn commit(self, store: &SecretStore, state: &mut LocalState) {
+    fn commit(self, store: &SecretStore, idx: &mut Index) {
+        let dropped: HashSet<&str> = self.dropped.iter().map(String::as_str).collect();
+        let mut tokens = Vec::new();
         store.update(|map| {
             for owner in &self.owners {
                 let prefixes = owner_prefixes(owner);
                 map.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p.as_str())));
             }
+            if !dropped.is_empty() {
+                map.retain(|k, v| {
+                    if !owned_by(k, &dropped) {
+                        return true;
+                    }
+                    if let Some(owner) = k.strip_prefix(OAUTH_KEY_PREFIX) {
+                        tokens.push((owner.to_string(), std::mem::take(v)));
+                    }
+                    false
+                });
+            }
             for (k, v) in &self.secrets {
                 map.insert(k.clone(), v.clone());
             }
+            for (k, v) in &self.tokens {
+                map.entry(k.clone()).or_insert_with(|| v.clone());
+            }
         });
-        for owner in &self.owners {
-            state.current_values.shift_remove(owner);
+        idx.dropped_tokens.extend(tokens);
+        for owner in self.owners.iter().chain(&self.dropped) {
+            idx.state.current_values.shift_remove(owner);
         }
         for (owner, vals) in self.current {
-            state.current_values.insert(owner, vals);
+            idx.state.current_values.insert(owner, vals);
         }
     }
 }
@@ -507,6 +560,7 @@ impl WorkspaceStore {
                         }
                         let rel = d.strip_prefix(root).unwrap_or(&d).to_path_buf();
                         index.collection_dirs.insert(c.id.clone(), rel);
+                        index.owners.insert(c.id.clone(), secret_owners(&c));
                         collections.push(c);
                     }
                     Err(e) => load_errors.push(e.to_string()),
@@ -695,7 +749,20 @@ impl WorkspaceStore {
             self.prune(&mut idx, &old, &HashSet::new())?;
         }
         idx.collection_dirs.insert(c.id.clone(), dir);
-        sink.commit(secrets, &mut idx.state);
+        // Items removed since the last save leave no secrets behind, unless
+        // they moved to another collection (saved before this one; one saved
+        // after gets the OAuth token back, the rest is in its model).
+        let owners = secret_owners(c);
+        let old = idx.owners.remove(&c.id).unwrap_or_default();
+        sink.dropped =
+            old.difference(&owners).filter(|o| !idx.owners.values().any(|s| s.contains(*o))).cloned().collect();
+        for o in owners.difference(&old) {
+            if let Some(t) = idx.dropped_tokens.remove(o) {
+                sink.tokens.push((format!("{OAUTH_KEY_PREFIX}{o}"), t));
+            }
+        }
+        idx.owners.insert(c.id.clone(), owners);
+        sink.commit(secrets, &mut idx);
         let state = idx.state.clone();
         drop(idx);
         self.write_state(&state)
@@ -706,10 +773,14 @@ impl WorkspaceStore {
         if let Some(dir) = idx.collection_dirs.remove(id) {
             self.prune(&mut idx, &dir, &HashSet::new())?;
         }
-        let prefix_owner = format!(":{id}:");
-        secrets.update(|m| m.retain(|k, _| !k.contains(&prefix_owner)));
-        idx.state.current_values.shift_remove(id);
-        Ok(())
+        // The secrets of everything in it, except items moved elsewhere.
+        let mut owners = idx.owners.remove(id).unwrap_or_default();
+        owners.insert(id.to_string());
+        let dropped = owners.into_iter().filter(|o| !idx.owners.values().any(|s| s.contains(o))).collect();
+        SecretSink { dropped, ..Default::default() }.commit(secrets, &mut idx);
+        let state = idx.state.clone();
+        drop(idx);
+        self.write_state(&state)
     }
 
     pub fn save_environment(&self, env: &Environment, secrets: &SecretStore) -> Result<()> {
@@ -750,7 +821,7 @@ impl WorkspaceStore {
             idx.written.remove(&o);
         }
         idx.env_files.insert(env.id.clone(), rel);
-        sink.commit(secrets, &mut idx.state);
+        sink.commit(secrets, &mut idx);
         let state = idx.state.clone();
         drop(idx);
         self.write_state(&state)
@@ -783,7 +854,7 @@ impl WorkspaceStore {
         sink.variables(GLOBALS_OWNER, &mut model);
         let file = GlobalsFile { variables: model };
         self.write_files(&mut idx, &[(PathBuf::from("globals.json"), to_pretty(&file))])?;
-        sink.commit(secrets, &mut idx.state);
+        sink.commit(secrets, &mut idx);
         let state = idx.state.clone();
         drop(idx);
         self.write_state(&state)
@@ -1139,6 +1210,121 @@ mod tests {
         c2.auth = Auth::basic("user", "{{pw}}");
         store.save_collection(&c2, &secrets).unwrap();
         assert!(secrets.get(&auth_secret_key(&c.id, "password")).is_none());
+    }
+
+    /// A collection with secrets and current values at every level: its
+    /// auth and variables, a folder's, a request's and an example's auth.
+    fn secretive(name: &str) -> (Collection, Vec<String>) {
+        let mut c = Collection::new(name);
+        c.auth = Auth::basic("user", format!("{name}-col-pw"));
+        let mut cv = Variable::secret("cv", format!("{name}-col-var"));
+        cv.current = Some(format!("{name}-col-cur"));
+        c.variables.push(cv);
+        let mut f = Folder::new("F");
+        f.auth = Auth::bearer(format!("{name}-folder-tok"));
+        let mut fv = Variable::new("plain", "x");
+        fv.current = Some(format!("{name}-folder-cur"));
+        f.variables.extend([fv, Variable::secret("fs", format!("{name}-folder-var"))]);
+        let mut req = HttpRequest::new("GET", "http://x");
+        req.auth = Auth::bearer(format!("{name}-req-tok"));
+        let mut r = RequestItem::new("R", req.clone());
+        r.examples.push(Example { request: Some(req), ..Default::default() });
+        let ids = vec![c.id.clone(), f.id.clone(), r.id.clone()];
+        f.items.push(r.into());
+        c.items.push(f.into());
+        (c, ids)
+    }
+
+    fn set_token(secrets: &SecretStore, owner: &str) {
+        let t = crate::tokens::OAuth2Token { access_token: format!("oauth-{owner}"), ..Default::default() };
+        crate::tokens::TokenStore::set(secrets, owner, Some(t));
+    }
+
+    fn secret_values(secrets: &SecretStore) -> String {
+        secrets.keys_with_prefix("").iter().map(|k| format!("{k}={}\n", secrets.get(k).unwrap())).collect()
+    }
+
+    fn state_text(root: &Path) -> String {
+        std::fs::read_to_string(root.join(LOCAL_DIR).join("state.json")).unwrap_or_default()
+    }
+
+    #[test]
+    fn deleting_a_collection_removes_the_secrets_of_everything_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::memory();
+        let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+        let (doomed, ids) = secretive("doomed");
+        let (kept, kept_ids) = secretive("kept");
+        store.save_collection(&doomed, &secrets).unwrap();
+        store.save_collection(&kept, &secrets).unwrap();
+        for id in ids.iter().chain(&kept_ids) {
+            set_token(&secrets, id);
+        }
+        secrets.vault_set("doomed-vault", "v");
+        store.delete_collection(&doomed.id, &secrets).unwrap();
+        let left = secret_values(&secrets);
+        assert!(left.lines().filter(|l| !l.starts_with("vault:")).all(|l| !l.contains("doomed-")), "{left}");
+        assert!(ids.iter().all(|id| !left.contains(id.as_str())), "{left}");
+        assert_eq!(secrets.vault_get("doomed-vault").as_deref(), Some("v"));
+        // Written to disk, not only changed in memory.
+        let state = state_text(dir.path());
+        assert!(!state.contains("doomed-") && state.contains("kept-folder-cur"), "{state}");
+        let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ws.collections, vec![kept.clone()]);
+        assert!(kept_ids.iter().all(|id| secrets.get(&format!("oauth2:{id}")).is_some()));
+    }
+
+    #[test]
+    fn removed_items_leave_no_secrets_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::memory();
+        let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+        let (mut c, ids) = secretive("c");
+        store.save_collection(&c, &secrets).unwrap();
+        for id in &ids {
+            set_token(&secrets, id);
+        }
+        // Remove the folder, and with it the request inside.
+        c.remove(&ids[1]);
+        store.save_collection(&c, &secrets).unwrap();
+        let left = secret_values(&secrets);
+        for gone in ["c-folder-", "c-req-", ids[1].as_str(), ids[2].as_str()] {
+            assert!(!left.contains(gone), "{gone} left in\n{left}");
+        }
+        assert!(left.contains("c-col-pw") && left.contains(&format!("oauth2:{}", ids[0])), "{left}");
+        assert!(!state_text(dir.path()).contains("c-folder-cur"));
+        let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ws.collections, vec![c]);
+    }
+
+    #[test]
+    fn items_moved_to_another_collection_keep_their_secrets() {
+        for source_saved_first in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let secrets = SecretStore::memory();
+            let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+            let (mut a, ids) = secretive("a");
+            let mut b = Collection::new("B");
+            store.save_collection(&a, &secrets).unwrap();
+            store.save_collection(&b, &secrets).unwrap();
+            set_token(&secrets, &ids[1]);
+            set_token(&secrets, &ids[2]);
+            let folder = a.remove(&ids[1]).unwrap();
+            b.items.push(folder);
+            if source_saved_first {
+                store.save_collection(&a, &secrets).unwrap();
+                store.save_collection(&b, &secrets).unwrap();
+            } else {
+                store.save_collection(&b, &secrets).unwrap();
+                store.save_collection(&a, &secrets).unwrap();
+            }
+            for id in &ids[1..] {
+                assert!(secrets.get(&format!("oauth2:{id}")).is_some(), "token of {id} lost ({source_saved_first})");
+            }
+            let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
+            assert_eq!(ws.collection(&b.id), Some(&b), "{source_saved_first}");
+            assert_eq!(ws.collection(&a.id), Some(&a));
+        }
     }
 
     #[test]
