@@ -186,6 +186,19 @@ impl McpTab {
         }
     }
 
+    /// Cancel while connecting: ends the OAuth login and the handshake (a
+    /// server that never answers would keep the tab connecting).
+    fn cancel_connect(&mut self) {
+        if let Some(l) = self.login.take() {
+            l.cancel();
+        }
+        if self.connecting {
+            self.connecting = false;
+            self.epoch = crate::app::next_epoch();
+            self.log.system(tr("Cancelled"));
+        }
+    }
+
     fn state(&self) -> Conn {
         if self.client.is_some() {
             Conn::Live
@@ -341,6 +354,7 @@ fn connect(
     tab.log.system(trf("Connecting to {}…", &[&connecting_target(req)]));
     let login = tokio_util::sync::CancellationToken::new();
     tab.login = Some(login.clone());
+    let cancel = login.clone();
     let http = app.http.default_client().ok();
     let storage: std::sync::Arc<dyn ternarywire_mcp::OAuthStorage> =
         std::sync::Arc::new(SecretOAuth(app.ws.secrets.clone()));
@@ -401,8 +415,12 @@ fn connect(
                 Vec::new()
             };
             Ok::<_, String>((client, Box::new(Catalog { info, tools, resources, templates, prompts })))
-        }
-        .await;
+        };
+        let result = tokio::select! {
+            r = result => r,
+            // Cancel: the half-open connection (a started server) is dropped.
+            _ = cancel.cancelled() => return,
+        };
         let _ = tx.send(Msg::Mcp { tab: tab_id, epoch, event: McpMsg::Connected(result) });
         ctx.request_repaint();
     });
@@ -899,11 +917,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut McpTab
     tab.slot.store(app, &original, item);
     match action {
         Some(ConnAction::Connect) => connect(app, tab_id, tab, &item_now.id, &req_clone, collection.as_deref()),
-        Some(ConnAction::Cancel) => {
-            if let Some(l) = &tab.login {
-                l.cancel();
-            }
-        }
+        Some(ConnAction::Cancel) => tab.cancel_connect(),
         Some(ConnAction::Disconnect) => {
             if let Some(c) = tab.client.take() {
                 app.rt.spawn(async move { c.close().await });
@@ -1700,6 +1714,28 @@ mod tests {
         let args: Vec<String> = ["-y", "a b", "it's", ""].map(String::from).into();
         let line = shell_join("npx", &args);
         assert_eq!(shell_split(&line), [vec!["npx".to_string()], args].concat(), "{line}");
+    }
+
+    /// Cancel ends a handshake that does not finish (a STDIO server that
+    /// never answers); it used to stop only an OAuth login.
+    #[test]
+    fn cancel_ends_a_hanging_handshake() {
+        use ternarywire_core::protocols::{McpRequest, McpTransport};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let transport = McpTransport::Stdio {
+            command: "sleep".into(),
+            args: vec!["30".into()],
+            env: Vec::new(),
+            cwd: String::new(),
+        };
+        let req = McpRequest { transport, ..Default::default() };
+        let mut tab = McpTab::new(ItemSlot::default());
+        connect(&mut app, 1, &mut tab, "server", &req, None);
+        assert_eq!(tab.state(), Conn::Busy);
+        tab.cancel_connect();
+        assert_eq!(tab.state(), Conn::Idle);
+        assert!(tab.login.is_none());
     }
 
     /// The STDIO command line keeps what is typed: the space after `npx`
