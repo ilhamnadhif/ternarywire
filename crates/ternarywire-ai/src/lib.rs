@@ -22,8 +22,7 @@ use ternarywire_mcp::{McpClient, Tool};
 pub use ternarywire_mcp;
 pub use tokio_util::sync::CancellationToken;
 
-/// Default overall timeout for one model call (also the idle timeout between
-/// streamed chunks).
+/// Default [`AiConfig::timeout`].
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Tool-call rounds per run before giving up.
 pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 5;
@@ -71,6 +70,9 @@ pub struct AiConfig {
     /// JSON object deep-merged into the provider request body (a `null`
     /// value removes the key).
     pub extra: Option<Value>,
+    /// For each model call: how long a streamed answer may stay silent
+    /// (until it starts, then between chunks; it may take longer in all), or
+    /// the limit for a whole answer that is not streamed.
     pub timeout: Duration,
     /// Model → tool → model rounds allowed in one [`run`].
     pub max_tool_rounds: u32,
@@ -502,9 +504,19 @@ async fn cancellable<T>(
     limit: Duration,
     fut: impl Future<Output = T>,
 ) -> Result<T, AiError> {
+    cancellable_until(cancel, tokio::time::Instant::now() + limit, limit, fut).await
+}
+
+/// Like [`cancellable`] with a deadline; `limit` is the timeout reported.
+async fn cancellable_until<T>(
+    cancel: &CancellationToken,
+    deadline: tokio::time::Instant,
+    limit: Duration,
+    fut: impl Future<Output = T>,
+) -> Result<T, AiError> {
     tokio::select! {
         _ = cancel.cancelled() => Err(AiError::Cancelled),
-        r = tokio::time::timeout(limit, fut) => r.map_err(|_| AiError::Timeout(limit)),
+        r = tokio::time::timeout_at(deadline, fut) => r.map_err(|_| AiError::Timeout(limit)),
     }
 }
 
@@ -529,21 +541,26 @@ async fn send_round(
     if cfg.stream {
         rb = rb.header(ACCEPT, "text/event-stream");
     }
+    // A stream is timed by its silences; anything else, as a whole.
+    let deadline = tokio::time::Instant::now() + cfg.timeout;
     let resp = cancellable(cancel, cfg.timeout, rb.send()).await?.map_err(|e| network_error(&e, &req.url))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = cancellable(cancel, cfg.timeout, body_prefix(resp, MAX_ERROR_BODY)).await?;
+        let body = cancellable_until(cancel, deadline, cfg.timeout, body_prefix(resp, MAX_ERROR_BODY)).await?;
         return Err(AiError::Provider { status: status.as_u16(), message: error_message(&body), body });
     }
     let content_type =
         resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    let is_sse = content_type.starts_with("text/event-stream");
+    let is_ndjson = content_type.contains("ndjson");
+    // The server may answer a streaming request with plain JSON.
+    let streamed = cfg.stream && (is_sse || is_ndjson);
     let mut first_in_round = true;
-    let stream = cfg.stream;
     let mut delta = |t: &str| {
         if t.is_empty() {
             return;
         }
-        if stream && first_token_ms.is_none() {
+        if streamed && first_token_ms.is_none() {
             *first_token_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
         }
         if first_in_round && needs_separator {
@@ -552,9 +569,7 @@ async fn send_round(
         first_in_round = false;
         on_event(AiEvent::Delta(t.to_string()));
     };
-    let is_sse = content_type.starts_with("text/event-stream");
-    let is_ndjson = content_type.contains("ndjson");
-    if cfg.stream && (is_sse || is_ndjson) {
+    if streamed {
         let mut acc = provider.stream();
         let mut parser = SseParser::new();
         let mut line_buf: Vec<u8> = Vec::new();
@@ -599,7 +614,7 @@ async fn send_round(
         }
         return acc.finish();
     }
-    let body = cancellable(cancel, cfg.timeout, body_within(resp, MAX_RESPONSE_BYTES))
+    let body = cancellable_until(cancel, deadline, cfg.timeout, body_within(resp, MAX_RESPONSE_BYTES))
         .await?
         .map_err(|e| network_error(&e, &req.url))?
         .ok_or_else(too_large)?;

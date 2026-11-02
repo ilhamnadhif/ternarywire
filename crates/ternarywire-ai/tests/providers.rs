@@ -109,7 +109,8 @@ async fn openai_chat(State(m): State<Arc<Mock>>, headers: HeaderMap, Json(body):
     }
     let result = tool_result_text(&body);
     let wants_tool = body.get("tools").is_some() && (result.is_none() || model == "always-tool");
-    let stream = body["stream"] == true;
+    // `plain-json` answers a streaming request without streaming.
+    let stream = body["stream"] == true && model != "plain-json";
     let text = match &result {
         Some(r) => format!("The sum is {r}"),
         None => "Hello from openai".to_string(),
@@ -288,6 +289,33 @@ async fn google_models(State(m): State<Arc<Mock>>, headers: HeaderMap, RawQuery(
     .into_response()
 }
 
+/// A body sent in `parts`, `gap` apart.
+fn paced(content_type: &'static str, parts: Vec<String>, gap: Duration) -> Response {
+    let chunks = stream::iter(parts.into_iter().enumerate()).then(move |(i, part)| async move {
+        if i > 0 {
+            tokio::time::sleep(gap).await;
+        }
+        Ok::<_, Infallible>(part.into_bytes())
+    });
+    ([(header::CONTENT_TYPE, content_type)], Body::from_stream(chunks)).into_response()
+}
+
+/// A slow server (`model` = `json` or `sse`): every wait is 700 ms, the
+/// headers' and each one between parts of the body.
+async fn slow_chat(Json(body): Json<Value>) -> Response {
+    let gap = Duration::from_millis(700);
+    tokio::time::sleep(gap).await;
+    if body["model"] == "json" {
+        let text = json!({"choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "slow json"}}]})
+            .to_string();
+        let (a, b) = text.split_at(20);
+        return paced("application/json", vec![a.to_string(), b.to_string()], gap);
+    }
+    let event = |delta: Value| format!("data: {}\n\n", json!({"choices": [{"index": 0, "delta": delta}]}));
+    let parts = vec![event(json!({"content": "slow "})), event(json!({"content": "sse"})), "data: [DONE]\n\n".into()];
+    paced("text/event-stream", parts, gap)
+}
+
 /// A misbehaving endpoint (`model` picks how): an endless SSE stream, an
 /// endless NDJSON line, or a 65 MiB JSON body.
 async fn flood(Json(body): Json<Value>) -> Response {
@@ -323,6 +351,7 @@ async fn spawn_mock() -> (String, Arc<Mock>) {
         .route("/google/v1beta/models", get(google_models))
         .route("/google/v1beta/models/{*rest}", post(google_generate))
         .route("/flood/v1/chat/completions", post(flood))
+        .route("/slow/v1/chat/completions", post(slow_chat))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -466,6 +495,18 @@ async fn openai_streaming() {
     assert_eq!(req.body["stream"], true);
     assert_eq!(req.body["seed"], 7);
     assert!(req.body.get("stream_options").is_none(), "extra null removes a key");
+}
+
+#[tokio::test]
+async fn a_json_answer_to_a_streaming_request_has_no_first_token_time() {
+    let (base, _) = spawn_mock().await;
+    let mut cfg = config(AiProvider::OpenAi, &base, true);
+    cfg.model = "plain-json".into();
+    let (r, events) = go(cfg, vec![]).await;
+    let r = r.unwrap();
+    assert_eq!(r.text, "Hello from openai");
+    assert_eq!(r.first_token_ms, None);
+    assert_eq!(deltas(&events), ["Hello from openai"]);
 }
 
 #[tokio::test]
@@ -711,6 +752,22 @@ async fn timeouts_are_reported() {
     cfg.timeout = Duration::from_millis(200);
     let (r, _) = go(cfg, vec![]).await;
     assert!(matches!(r.unwrap_err(), AiError::Timeout(_)));
+}
+
+#[tokio::test]
+async fn the_timeout_bounds_silences_of_a_stream_and_the_whole_of_other_answers() {
+    let (base, _) = spawn_mock().await;
+    let mut cfg = config(AiProvider::OpenAiCompatible, &base, true);
+    cfg.base_url = format!("{base}/slow/v1");
+    cfg.timeout = Duration::from_secs(1);
+    // 2.1 s in all, never 1 s without data.
+    cfg.model = "sse".into();
+    assert_eq!(go(cfg.clone(), vec![]).await.0.unwrap().text, "slow sse");
+    // 1.4 s for one JSON answer.
+    cfg.model = "json".into();
+    cfg.stream = false;
+    let err = go(cfg, vec![]).await.0.unwrap_err();
+    assert!(matches!(err, AiError::Timeout(t) if t == Duration::from_secs(1)), "{err:?}");
 }
 
 #[tokio::test]
