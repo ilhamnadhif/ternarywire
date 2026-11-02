@@ -103,12 +103,14 @@ fn net_err(e: &reqwest::Error, host: &str) -> McpError {
     McpError::Transport(ternarywire_http::error::classify(e, host, None).message)
 }
 
-/// Opens the event stream (authorizing on 401).
+/// Opens the event stream (authorizing on 401); each GET must be answered
+/// within `timeout`.
 async fn open_stream(
     client: &reqwest::Client,
     url: &Url,
     headers: &HeaderMap,
     auth: Option<&Arc<AuthManager>>,
+    timeout: Duration,
 ) -> Result<reqwest::Response, McpError> {
     let host = url.host_str().unwrap_or("server").to_string();
     let mut attempt = 0;
@@ -120,7 +122,12 @@ async fn open_stream(
         let rb = with_auth(client.get(url.clone()), headers, token.as_deref())
             .header(ACCEPT, "text/event-stream")
             .header(CACHE_CONTROL, "no-cache");
-        let resp = rb.send().await.map_err(|e| net_err(&e, &host))?;
+        let resp = tokio::time::timeout(timeout, rb.send())
+            .await
+            .map_err(|_| {
+                McpError::Transport(format!("no answer from the server within {} s", timeout.as_secs_f64().round()))
+            })?
+            .map_err(|e| net_err(&e, &host))?;
         let status = resp.status().as_u16();
         let www = www_authenticate(&resp);
         if let Some(a) = auth
@@ -179,7 +186,7 @@ pub(crate) async fn start(
     mut outbox: mpsc::UnboundedReceiver<Outbound>,
     timeout: Duration,
 ) -> Result<Arc<SseConn>, McpError> {
-    let resp = open_stream(&client, &url, &headers, auth.as_ref()).await?;
+    let resp = open_stream(&client, &url, &headers, auth.as_ref(), timeout).await?;
     let host = url.host_str().unwrap_or("server").to_string();
     let mut stream = resp.bytes_stream();
     let mut parser = SseParser::new();
@@ -234,9 +241,10 @@ pub(crate) async fn start(
             };
             let (conn, cancel) = (poster.clone(), cancel.clone());
             let mut post = tokio::spawn(async move {
+                // Paused while the client waits for the user (a browser login for a 401).
                 let result = tokio::select! {
                     _ = cancel.cancelled() => return,
-                    r = tokio::time::timeout(timeout, conn.post(&msg)) => r.unwrap_or_else(|_| {
+                    r = conn.shared.within(timeout, conn.post(&msg)) => r.unwrap_or_else(|| {
                         Err(McpError::Transport(format!(
                             "no answer from the server within {} s",
                             timeout.as_secs_f64().round()

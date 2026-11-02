@@ -335,9 +335,10 @@ impl HttpConn {
                 _ = self.settled(id) => return,
                 r = self.post_inner(&msg) => r,
             },
+            // A browser login for a 401 pauses the limit.
             None => tokio::select! {
                 _ = cancel.cancelled() => return,
-                r = tokio::time::timeout(self.timeout, self.post_inner(&msg)) => r.unwrap_or_else(|_| {
+                r = self.shared.within(self.timeout, self.post_inner(&msg)) => r.unwrap_or_else(|| {
                     Err(McpError::Transport(format!(
                         "no answer from the server within {} s",
                         self.timeout.as_secs_f64().round()

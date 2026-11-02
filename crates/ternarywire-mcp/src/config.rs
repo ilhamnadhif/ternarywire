@@ -29,7 +29,9 @@ pub struct McpConfig {
     pub transport: Transport,
     /// Per-request timeout. Paused while the client waits for the user
     /// (browser login, sampling or elicitation dialogs). Over HTTP it also
-    /// limits each POST of a notification or response.
+    /// limits each POST of a notification or response (every POST over
+    /// HTTP+SSE), paused the same way, and the wait for the answer to the
+    /// GET opening an HTTP+SSE stream.
     pub timeout: Duration,
     /// Wire protocol for [`Transport::Http`].
     pub http_transport: McpHttpTransport,

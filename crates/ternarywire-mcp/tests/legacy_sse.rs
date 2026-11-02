@@ -109,6 +109,11 @@ async fn post_message(
             Some("echo") => {
                 let _ = tx.send(reply(json!({"content": [{"type": "text", "text": params["arguments"]["text"]}]})));
             }
+            // The POST takes a second to be accepted.
+            Some("slow") => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let _ = tx.send(reply(json!({"content": [{"type": "text", "text": "slow done"}]})));
+            }
             Some("sample") => {
                 let rid = format!("srv-{}", st.next.fetch_add(1, Ordering::SeqCst));
                 st.waiting.lock().insert(rid.clone(), call_id.clone());
@@ -191,6 +196,58 @@ async fn explicit_sse_session() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(state.stream_dropped.load(Ordering::SeqCst), "closing drops the event stream");
+}
+
+#[tokio::test]
+async fn post_limits_pause_while_the_user_is_busy() {
+    let (url, _state) = spawn(SseState::default()).await;
+    let mut cfg = config(&url, McpHttpTransport::Sse);
+    cfg.timeout = Duration::from_millis(300);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let client = McpClient::builder(cfg)
+        .sampling(move |_req: SamplingRequest| {
+            let (started, gate) = (started_tx.clone(), gate.clone());
+            async move {
+                let _ = started.send(());
+                gate.notified().await;
+                Ok(SamplingResult::text("m", "answered"))
+            }
+        })
+        .connect()
+        .await
+        .expect("connect");
+    let c = client.clone();
+    let sample = tokio::spawn(async move { c.call_tool("sample", json!({})).await });
+    started_rx.recv().await.unwrap();
+    // This POST takes longer than the timeout, but a sampling dialog is open.
+    let r = client.call_tool("slow", json!({})).await.expect("not cut off while the user is busy");
+    assert_eq!(r.text(), "slow done");
+    release.notify_one();
+    assert_eq!(sample.await.unwrap().unwrap().text(), "answered");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn a_silent_sse_endpoint_times_out() {
+    ternarywire_http::tls::install_provider();
+    // Accepts connections but never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = listener.accept().await {
+            held.push(s);
+        }
+    });
+    let mut cfg = config(&format!("http://{addr}/sse"), McpHttpTransport::Sse);
+    cfg.timeout = Duration::from_millis(300);
+    let err = tokio::time::timeout(Duration::from_secs(5), McpClient::connect(cfg, |_| {}))
+        .await
+        .expect("the stream GET is not waited for forever")
+        .unwrap_err();
+    assert!(matches!(&err, McpError::Transport(m) if m.contains("no answer")), "{err:?}");
 }
 
 #[tokio::test]

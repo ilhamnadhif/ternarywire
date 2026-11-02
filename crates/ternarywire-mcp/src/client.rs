@@ -198,6 +198,16 @@ impl Shared {
         self.pending.lock().contains_key(id)
     }
 
+    /// Runs `fut` for at most `timeout`, paused like request timeouts while
+    /// the client waits for the user; `None` when the time ran out.
+    pub async fn within<F: Future>(&self, timeout: Duration, fut: F) -> Option<F::Output> {
+        let start = Instant::now();
+        tokio::select! {
+            r = fut => Some(r),
+            _ = self.busy.timer(start, timeout) => None,
+        }
+    }
+
     /// Completes a waiting request with an error (transport failures).
     pub fn fail(&self, id: &str, err: McpError) {
         if let Some(tx) = self.pending.lock().remove(id) {
