@@ -248,6 +248,12 @@ async fn unary_error_status_and_bad_input() {
     assert!(matches!(err, GrpcError::InvalidJson { .. }), "{err:?}");
     let err = invoke_unary(&t, &schema, SVC, "LotsOfReplies", "{}").await.unwrap_err();
     assert!(matches!(err, GrpcError::NotUnary { .. }), "{err:?}");
+    // Single-request methods refuse a second message instead of sending it.
+    for method in ["SayHello", "LotsOfReplies"] {
+        let two = [r#"{"name": "a"}"#.to_string(), r#"{"name": "b"}"#.to_string()];
+        let err = invoke(&t, &schema, SVC, method, &two).await.unwrap_err();
+        assert!(matches!(err, GrpcError::NotClientStreaming(_)), "{method}: {err:?}");
+    }
     let err = invoke_unary(&t, &schema, "helloworld.Nope", "SayHello", "{}").await.unwrap_err();
     assert_eq!(err.to_string(), "Unknown service \"helloworld.Nope\"");
     let mut bad_md = t.clone();

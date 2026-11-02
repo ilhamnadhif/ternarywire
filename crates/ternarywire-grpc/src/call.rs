@@ -380,9 +380,10 @@ pub struct UnaryResponse {
 }
 
 /// Runs a call of any kind with a fixed list of request messages (all sent,
-/// then the stream is half-closed) and collects the responses. A non-OK
-/// status is reported in the result; `Err` means the call could not be
-/// made (bad input, connection or TLS failure, ...).
+/// then the stream is half-closed; unary and server-streaming methods take
+/// at most one) and collects the responses. A non-OK status is reported in
+/// the result; `Err` means the call could not be made (bad input,
+/// connection or TLS failure, ...).
 pub async fn invoke(
     target: &Target,
     schema: &GrpcSchema,
@@ -392,11 +393,15 @@ pub async fn invoke(
 ) -> Result<CallResult, GrpcError> {
     let spec = prepare(target, schema, service, method)?;
     let input = spec.method.input();
+    let client_streaming = method_kind(&spec.method).is_client_streaming();
+    if messages.len() > 1 && !client_streaming {
+        return Err(GrpcError::NotClientStreaming(spec.method.full_name().to_string()));
+    }
     let (tx, rx) = mpsc::unbounded_channel();
     for json in messages {
         let _ = tx.send(parse_message(&input, json)?);
     }
-    if messages.is_empty() && !method_kind(&spec.method).is_client_streaming() {
+    if messages.is_empty() && !client_streaming {
         let _ = tx.send(DynamicMessage::new(input));
     }
     drop(tx);
