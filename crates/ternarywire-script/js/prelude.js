@@ -1422,6 +1422,8 @@
     return value;
   }
 
+  const RUN_CJS = Symbol('run');
+
   function requirePackage(spec, parent) {
     const r = jsonParse(host.pkgResolve(spec, parent || ''));
     if (r.kind === 'remote') {
@@ -1447,7 +1449,15 @@
         module.exports = interop(loaded);
       } else {
         const dirname = r.id.replace(/[\\/][^\\/]*$/, '');
-        loaded.call(module.exports, module.exports, (s) => requireModule(s, r.id), module, r.id, dirname);
+        // A method call, not `loaded.call(...)`: native calls leave the
+        // budgeted VM loop, so the timeout could not stop the file's code.
+        const exp = module.exports;
+        exp[RUN_CJS] = loaded;
+        try {
+          exp[RUN_CJS](exp, (s) => requireModule(s, r.id), module, r.id, dirname);
+        } finally {
+          delete exp[RUN_CJS];
+        }
       }
     } catch (e) {
       delete cache[r.id];

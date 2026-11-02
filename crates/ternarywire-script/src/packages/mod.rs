@@ -95,15 +95,34 @@ fn resolve(session: &mut Session, spec: &str, parent: Option<&Path>) -> Result<R
     let Some(lib) = session.library_dir().cloned() else { return Err(not_found(spec, session)) };
     match spec::local_file(&lib, spec, parent)? {
         Some((path, guess)) => {
-            let source = read_local(&path)?;
+            let source = read_local(&path, session.limits.module_bytes)?;
             Ok(Resolved::Local(path.clone(), spec::sniff_kind(&path, &source, guess)))
         }
         None => Err(not_found(spec, session)),
     }
 }
 
-fn read_local(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| format!("could not read {}: {e}", path.display()))
+/// Reads a Package Library file, at most `limit` bytes like a fetched module.
+fn read_local(path: &Path, limit: u64) -> Result<String, String> {
+    use std::io::Read;
+    let failed = |e: std::io::Error| format!("could not read {}: {e}", path.display());
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(failed)?.take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("{} is larger than the {} limit for a module", path.display(), store::size_text(limit)));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8 JavaScript", path.display()))
+}
+
+/// A library file to load by id: only files of the job's package library.
+fn library_file(id: &str, ctx: &Context) -> JsResult<(PathBuf, u64)> {
+    let session = session_of(ctx).map_err(err)?;
+    let s = session.borrow();
+    let path = PathBuf::from(id);
+    match s.library_dir() {
+        Some(lib) if spec::in_library(lib, &path) => Ok((path, s.limits.module_bytes)),
+        _ => Err(err(format!("Cannot find module '{id}'"))),
+    }
 }
 
 impl PackageLoader {
@@ -160,7 +179,8 @@ impl PackageLoader {
         if let Some(m) = self.local.borrow().get(path) {
             return Ok(m.clone());
         }
-        let text = read_local(path).map_err(err)?;
+        let limit = session_of(ctx).map_err(err)?.borrow().limits.module_bytes;
+        let text = read_local(path, limit).map_err(err)?;
         let module = Module::parse(Source::from_bytes(text.as_bytes()).with_path(path), None, ctx)?;
         self.local.borrow_mut().insert(path.to_path_buf(), module.clone());
         Ok(module)
@@ -388,10 +408,13 @@ pub(crate) fn host_pkg_load(_: &JsValue, args: &[JsValue], ctx: &mut Context) ->
             }
             Ok(ns.into())
         }
-        "esm" => loader.load_local(Path::new(&id), ctx).map(JsValue::from).map_err(|e| wrap(e, ctx)),
+        "esm" => {
+            let (path, _) = library_file(&id, ctx)?;
+            loader.load_local(&path, ctx).map(JsValue::from).map_err(|e| wrap(e, ctx))
+        }
         _ => {
-            let path = PathBuf::from(&id);
-            let text = read_local(&path).map_err(err)?;
+            let (path, limit) = library_file(&id, ctx)?;
+            let text = read_local(&path, limit).map_err(err)?;
             let wrapped = format!("(function (exports, require, module, __filename, __dirname) {{{text}\n}})");
             let script = Script::parse(Source::from_bytes(wrapped.as_bytes()).with_path(&path), None, ctx)?;
             script.evaluate(ctx)

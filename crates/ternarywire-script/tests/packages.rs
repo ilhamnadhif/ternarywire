@@ -655,3 +655,29 @@ fn real_intl_and_streams_packages() {
     let out = BoaEngine::new().run(job(code, Some(offline)));
     assert!(out.tests.iter().all(|t| t.passed), "{:?}", out.tests);
 }
+
+#[test]
+fn package_library_files_are_limited_and_interruptible() {
+    let ws = Workspace::new();
+    ws.write("big.js", &format!("module.exports = '{}';", "x".repeat(2000)));
+    // The outer loop does few iterations per frame, so only the timeout stops it.
+    ws.write(
+        "spin.js",
+        "function spin() { for (let i = 0; i < 1000; i++) {} }\nwhile (true) spin();\nmodule.exports = 1;",
+    );
+    let e = BoaEngine::with_config(EngineConfig { package_module_limit: 1024, ..Default::default() });
+    let out = e.run(job(
+        "pm.test('big', () => pm.expect(() => pm.require('big')).to.throw(/larger than the 1 KB limit/));",
+        Some(ws.ctx("https://esm.sh")),
+    ));
+    assert!(out.errors.is_empty() && out.tests.iter().all(|t| t.passed), "{:?} {:?}", out.errors, out.tests);
+
+    let mut j = job("pm.require('spin');", Some(ws.ctx("https://esm.sh")));
+    j.timeout = Duration::from_millis(300);
+    let out = e.run(j);
+    // Stopped by the worker itself (not abandoned by the watchdog, whose
+    // error is the engine's).
+    assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
+    assert_eq!(out.errors[0].location, "request \"t\"");
+    assert!(out.errors[0].message.contains("timed out"), "{:?}", out.errors);
+}

@@ -249,6 +249,15 @@ pub(crate) fn local_file(
         return Ok(None);
     };
     let Ok(root) = lib.canonicalize() else { return Ok(None) };
+    // Before looking at the file system, with one message whether the file
+    // exists or not: otherwise `require('../../x')` tells scripts which
+    // files exist anywhere on the machine.
+    let outside = || format!("Cannot find module '{spec}': it resolves outside the package library");
+    let lexical = normalize(&base);
+    if !lexical.starts_with(normalize(lib)) && !lexical.starts_with(&root) {
+        return Err(outside());
+    }
+    let base = lexical;
     let name = base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut candidates = vec![base.clone()];
     for ext in ["js", "mjs", "cjs"] {
@@ -263,7 +272,7 @@ pub(crate) fn local_file(
         }
         let Ok(real) = c.canonicalize() else { continue };
         if !real.starts_with(&root) {
-            return Err(format!("Cannot find module '{spec}': it resolves outside the package library"));
+            return Err(outside());
         }
         let kind = match real.extension().and_then(|e| e.to_str()) {
             Some("mjs") => LocalKind::Esm,
@@ -273,6 +282,29 @@ pub(crate) fn local_file(
         return Ok(Some((real, kind)));
     }
     Ok(None)
+}
+
+/// `path` with `.` and `..` resolved without touching the file system.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether `path` (canonical) is a file of the package library `lib`.
+pub(crate) fn in_library(lib: &Path, path: &Path) -> bool {
+    match (lib.canonicalize(), path.canonicalize()) {
+        (Ok(root), Ok(real)) => real == path && real.starts_with(root),
+        _ => false,
+    }
 }
 
 /// `.js` files are ES modules when they contain top-level `import`/`export`
@@ -341,6 +373,26 @@ mod tests {
         assert_eq!(remote_import(&r, "/node/buffer.mjs", from).unwrap(), "https://esm.sh/node/buffer.mjs");
         assert!(remote_import(&r, "node:net", from).is_err());
         assert!(remote_import(&r, "react", from).unwrap_err().contains("bare import"));
+    }
+
+    #[test]
+    fn files_outside_the_library_look_the_same_whether_they_exist_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("ws/packages");
+        std::fs::create_dir_all(lib.join("team")).unwrap();
+        std::fs::write(lib.join("team/a.js"), "module.exports = 1;").unwrap();
+        std::fs::write(dir.path().join("ws/secret.js"), "s").unwrap();
+        let parent = lib.join("team/a.js").canonicalize().unwrap();
+        let find = |spec: &str| local_file(&lib, spec, Some(&parent)).map(|f| f.map(|(p, _)| p));
+        let existing = find("../../secret.js").unwrap_err();
+        let missing = find("../../missing.js").unwrap_err();
+        assert!(existing.contains("outside the package library"), "{existing}");
+        assert_eq!(existing.replace("secret", "missing"), missing);
+        assert_eq!(find("./a").unwrap(), Some(parent.clone()));
+        assert_eq!(find("../team/a.js").unwrap(), Some(parent.clone()));
+        assert!(in_library(&lib, &parent));
+        assert!(!in_library(&lib, &dir.path().join("ws/secret.js").canonicalize().unwrap()));
+        assert!(!in_library(&lib, &lib.join("team/../team/a.js")));
     }
 
     #[test]
