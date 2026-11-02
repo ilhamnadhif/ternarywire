@@ -516,7 +516,10 @@ pub(crate) fn compute(dom: &Dom, el: NodeId, parent: &Computed, author: &Stylesh
             "font" => {
                 for t in tokens(&d.value) {
                     let size = t.split('/').next().unwrap_or(t);
-                    if size.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.') || is_size_keyword(size) {
+                    // A bare number is a weight (`font: 700 12px Arial`): a size has a unit.
+                    let number = size.parse::<f32>().is_ok();
+                    if !number && size.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.') || is_size_keyword(size)
+                    {
                         apply_font_size(&mut c, size, parent);
                         break;
                     }
@@ -1403,6 +1406,16 @@ mod tests {
         assert_eq!(style_of(html, "y").color, Some(Color32::BLUE));
         assert_eq!(style_of(html, "d").color, Some(Color32::from_rgb(128, 0, 128)));
         assert_eq!(style_of(html, "e").color, Some(Color32::from_rgb(255, 165, 0)));
+    }
+
+    #[test]
+    fn font_shorthand_weight_is_not_the_size() {
+        let html = "<style>#a { font: 700 12px Arial } #b { font: italic 600 1.5em/2 serif }                     #c { font: bold 14px/1.2 sans-serif }</style><div id=a></div><div id=b></div><div id=c></div>";
+        let a = style_of(html, "a");
+        assert_eq!((a.font_size, a.bold), (12.0, true));
+        let b = style_of(html, "b");
+        assert_eq!((b.font_size, b.bold, b.italic), (24.0, true, true));
+        assert_eq!(style_of(html, "c").font_size, 14.0);
     }
 
     #[test]
