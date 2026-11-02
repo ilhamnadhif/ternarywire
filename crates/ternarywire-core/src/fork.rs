@@ -118,7 +118,7 @@ pub fn apply_pull(link: &mut ForkLink, plan: &Plan, parent: &Collection, fork: &
     let mut target = to_parent_ids(fork, link);
     apply(plan, parent, &mut target);
     *fork = from_parent_ids(target, fork, link);
-    link.base = scrub(parent);
+    link.base = next_base(&link.base, plan, parent);
 }
 
 /// Applies the chosen entries of a [`plan_merge`] to the parent.
@@ -143,7 +143,20 @@ pub fn apply_merge(link: &mut ForkLink, plan: &Plan, fork: &Collection, parent: 
         }
     }
     rename(&mut parent.items, &local, &mut link.ids);
-    link.base = scrub(parent);
+    link.base = next_base(&link.base, plan, parent);
+}
+
+/// The base after a sync: the parent as it is now, except for the entries
+/// not applied, which keep their old base version. Otherwise a declined
+/// change would vanish from the next pull, and the next merge would offer
+/// the fork's older version as a fork change (reverting the parent).
+fn next_base(base: &Collection, plan: &Plan, parent: &Collection) -> Collection {
+    let entries = plan.entries.iter().filter(|e| !e.apply);
+    let skipped =
+        Plan { entries: entries.map(|e| PlanEntry { apply: true, take_source: true, ..e.clone() }).collect() };
+    let mut next = scrub(parent);
+    apply(&skipped, base, &mut next);
+    next
 }
 
 // ---------------------------------------------------------------------------
@@ -251,8 +264,10 @@ fn plan(base: &Collection, source: &Collection, target: &Collection) -> Plan {
                 Some(tn) if tn.key() == sn.key() => continue,
                 Some(_) => ChangeKind::Conflict,
             },
+            // A folder goes with everything in it, so what the target
+            // added or changed inside makes its removal a conflict too.
             (Some(bn), None, Some(tn)) => {
-                if tn.key() == bn.key() {
+                if tn.key() == bn.key() && !changed_inside(id, &b, &t) {
                     ChangeKind::Removed
                 } else {
                     ChangeKind::Conflict
@@ -273,6 +288,20 @@ fn plan(base: &Collection, source: &Collection, target: &Collection) -> Plan {
         });
     }
     Plan { entries }
+}
+
+/// Whether `t` has an item inside folder `id` that `b` does not have as is.
+fn changed_inside(id: &str, b: &HashMap<Id, Node>, t: &HashMap<Id, Node>) -> bool {
+    t.iter().any(|(item, n)| {
+        let mut up = n.parent.as_deref();
+        while let Some(p) = up {
+            if p == id {
+                return b.get(item).is_none_or(|bn| bn.key() != n.key());
+            }
+            up = t.get(p).and_then(|n| n.parent.as_deref());
+        }
+        false
+    })
 }
 
 fn apply(plan: &Plan, source: &Collection, target: &mut Collection) {
@@ -671,6 +700,77 @@ mod tests {
         assert!(!serde_json::to_string(&link.base).unwrap().contains("s3cret"));
         assert!(plan_pull(&link, &parent, &fork).is_empty());
         assert!(plan_merge(&link, &parent, &fork).is_empty());
+    }
+
+    fn users_mut(c: &mut Collection) -> &mut Folder {
+        match &mut c.items[0] {
+            Item::Folder(f) => f,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn removing_a_folder_does_not_take_what_the_other_side_added_inside() {
+        let mut parent = sample();
+        let (mut fork, mut link) = create_fork(&parent, "Fork", 1);
+        parent.items.remove(0);
+        users_mut(&mut fork).items.push(RequestItem::new("Mine", HttpRequest::new("GET", "{{baseUrl}}/me")).into());
+        let mut plan = plan_pull(&link, &parent, &fork);
+        let users = plan.entries.iter().position(|e| e.name == "Users").unwrap();
+        assert_eq!(plan.entries[users].kind, ChangeKind::Conflict, "{plan:?}");
+        // Not applied: the folder and the fork's request stay (the parent's
+        // removed requests in it have entries of their own).
+        let mut kept = fork.clone();
+        apply_pull(&mut link.clone(), &plan, &parent, &mut kept);
+        assert_eq!(names(&kept), ["Login", "Mine"]);
+        assert_eq!(users_mut(&mut kept).name, "Users");
+        (plan.entries[users].apply, plan.entries[users].take_source) = (true, true);
+        apply_pull(&mut link, &plan, &parent, &mut fork);
+        assert_eq!(names(&fork), ["Login"]);
+
+        // Merging a fork that removed the folder the parent added to.
+        let mut parent = sample();
+        let (mut fork, link) = create_fork(&parent, "Fork", 1);
+        fork.items.remove(0);
+        users_mut(&mut parent).items.push(RequestItem::new("New", HttpRequest::new("GET", "{{baseUrl}}/new")).into());
+        let plan = plan_merge(&link, &parent, &fork);
+        assert!(plan.entries.iter().any(|e| e.name == "Users" && e.kind == ChangeKind::Conflict), "{plan:?}");
+        // Unchanged inside, the removal is a plain one.
+        let parent = sample();
+        let (mut fork, link) = create_fork(&parent, "Fork", 1);
+        fork.items.remove(0);
+        let plan = plan_merge(&link, &parent, &fork);
+        assert!(plan.entries.iter().all(|e| e.kind == ChangeKind::Removed), "{plan:?}");
+    }
+
+    #[test]
+    fn declined_changes_come_up_again() {
+        let mut parent = sample();
+        let (mut fork, mut link) = create_fork(&parent, "Fork", 1);
+        request_mut(&mut parent, "List").request.as_http_mut().unwrap().url = "{{baseUrl}}/v2/users".into();
+        request_mut(&mut parent, "Get").description = "One user".into();
+        parent.items.push(RequestItem::new("Health", HttpRequest::new("GET", "{{baseUrl}}/health")).into());
+        let mut plan = plan_pull(&link, &parent, &fork);
+        for e in &mut plan.entries {
+            e.apply = e.name == "Get";
+        }
+        apply_pull(&mut link, &plan, &parent, &mut fork);
+        assert_eq!(request_mut(&mut fork, "Get").description, "One user");
+        let again: Vec<_> = plan_pull(&link, &parent, &fork).entries.into_iter().map(|e| (e.name, e.kind)).collect();
+        assert_eq!(again, [("Health".to_string(), ChangeKind::Added), ("List".to_string(), ChangeKind::Modified)]);
+        // The fork's older List is not a fork change that would revert the parent.
+        assert!(plan_merge(&link, &parent, &fork).is_empty(), "{:?}", plan_merge(&link, &parent, &fork));
+
+        // A conflict left unresolved in a merge stays a conflict both ways.
+        request_mut(&mut parent, "Login").description = "parent".into();
+        request_mut(&mut fork, "Login").description = "fork".into();
+        let plan = plan_merge(&link, &parent, &fork);
+        let login = |p: &Plan| p.entries.iter().find(|e| e.name == "Login").map(|e| e.kind);
+        assert_eq!(login(&plan), Some(ChangeKind::Conflict));
+        apply_merge(&mut link, &plan, &fork, &mut parent);
+        assert_eq!(login(&plan_merge(&link, &parent, &fork)), Some(ChangeKind::Conflict));
+        assert_eq!(login(&plan_pull(&link, &parent, &fork)), Some(ChangeKind::Conflict));
+        assert!(!serde_json::to_string(&link.base).unwrap().contains("s3cret"));
     }
 
     #[test]
