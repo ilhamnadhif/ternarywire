@@ -4,6 +4,7 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{HttpRequest, Id};
@@ -52,11 +53,14 @@ impl HistoryEntry {
 pub struct HistoryStore {
     path: PathBuf,
     limit: usize,
+    /// Lines in the file: counted on the first append, then kept up to
+    /// date, so that an append does not read the whole file.
+    lines: Mutex<Option<usize>>,
 }
 
 impl HistoryStore {
     pub fn new(path: impl Into<PathBuf>, limit: usize) -> Self {
-        HistoryStore { path: path.into(), limit: limit.max(1) }
+        HistoryStore { path: path.into(), limit: limit.max(1), lines: Mutex::new(None) }
     }
 
     pub fn path(&self) -> &Path {
@@ -84,13 +88,21 @@ impl HistoryStore {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let mut lines = self.lines.lock();
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
         f.write_all(&to_line(entry)?)?;
         drop(f);
+        let count = match *lines {
+            Some(n) => n + 1,
+            None => self.line_count(),
+        };
+        *lines = Some(count);
         // Compact when the file grows well past the limit.
         let len = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
-        if len > 64 * 1024 && self.line_count() > self.limit * 2 {
-            self.compact()?;
+        if len > 64 * 1024 && count > self.limit * 2 {
+            // Counted again next time if this fails half way.
+            *lines = None;
+            *lines = Some(self.compact()?);
         }
         Ok(())
     }
@@ -99,31 +111,41 @@ impl HistoryStore {
         std::fs::File::open(&self.path).map(|f| std::io::BufReader::new(f).lines().count()).unwrap_or(0)
     }
 
-    fn compact(&self) -> std::io::Result<()> {
-        let mut entries = self.load();
+    /// Rewrites the file with the newest `limit` entries; returns how many.
+    fn compact(&self) -> std::io::Result<usize> {
+        let entries = self.load();
+        self.write(entries)
+    }
+
+    /// Writes `entries` (newest first) as the whole file; returns how many.
+    fn write(&self, mut entries: Vec<HistoryEntry>) -> std::io::Result<usize> {
         entries.reverse();
         let mut out = Vec::new();
         for e in &entries {
             out.extend_from_slice(&to_line(e)?);
         }
-        crate::storage::write_atomic(&self.path, &out)
+        crate::storage::write_atomic(&self.path, &out)?;
+        Ok(entries.len())
     }
 
     pub fn remove(&self, id: &str) -> std::io::Result<()> {
+        let mut lines = self.lines.lock();
+        *lines = None;
         let mut entries = self.load();
         entries.retain(|e| e.id != id);
-        entries.reverse();
-        let mut out = Vec::new();
-        for e in &entries {
-            out.extend_from_slice(&to_line(e)?);
-        }
-        crate::storage::write_atomic(&self.path, &out)
+        *lines = Some(self.write(entries)?);
+        Ok(())
     }
 
     pub fn clear(&self) -> std::io::Result<()> {
+        let mut lines = self.lines.lock();
+        *lines = None;
         match std::fs::remove_file(&self.path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+            _ => {
+                *lines = Some(0);
+                Ok(())
+            }
         }
     }
 }
@@ -174,6 +196,32 @@ mod tests {
         assert_eq!(store.load().len(), 2);
         store.clear().unwrap();
         assert!(store.load().is_empty());
+    }
+
+    #[test]
+    fn appends_keep_count_of_the_lines_instead_of_rereading_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.jsonl");
+        // Lines already there are counted once, on the first append.
+        HistoryStore::new(&path, 1000).append(&entry("http://h/before")).unwrap();
+        let store = HistoryStore::new(&path, 100);
+        let long = format!("http://h/{}", "x".repeat(300));
+        for _ in 0..150 {
+            store.append(&entry(&long)).unwrap();
+        }
+        assert_eq!(*store.lines.lock(), Some(151));
+        assert_eq!(store.line_count(), 151);
+        // Past twice the limit (and 64 KiB) the file is compacted.
+        for _ in 0..50 {
+            store.append(&entry(&long)).unwrap();
+        }
+        assert_eq!((*store.lines.lock(), store.line_count()), (Some(100), 100));
+        let id = store.load()[0].id.clone();
+        store.remove(&id).unwrap();
+        assert_eq!((*store.lines.lock(), store.line_count()), (Some(99), 99));
+        store.clear().unwrap();
+        store.append(&entry("http://h/after")).unwrap();
+        assert_eq!((*store.lines.lock(), store.load().len()), (Some(1), 1));
     }
 
     #[test]
