@@ -2013,8 +2013,16 @@ impl<'r, 'a> Run<'r, 'a> {
                 (&holder.0, holder.1.clone(), scope)
             }
         };
-        let names = self.request_refs(block, collection, &request_id);
+        let mut names = self.request_refs(block, collection, &request_id);
         let mut scopes = self.scopes(scope_id.as_deref());
+        // Variables can hold flow references too (an environment value
+        // `Bearer {{blocks.login.json.token}}`); the request pipeline only
+        // finds them in the data scope.
+        for v in scopes.globals.values().chain(scopes.environment.values()).chain(scopes.collection.values()) {
+            if v.contains("{{") {
+                collect_refs(&Value::String(v.clone()), &mut names);
+            }
+        }
         {
             let refs = self.ref_ctx(&act.payload);
             for n in &names {

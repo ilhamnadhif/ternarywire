@@ -2513,3 +2513,31 @@ async fn scripts_find_blocks_like_templates() {
     assert_eq!(r.outputs["dup"], Value::Null);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn flow_references_inside_variables_reach_requests() {
+    let (base, _) = server().await;
+    let mut me = get("me", "{{baseUrl}}/me");
+    if let BlockConfig::Request(RequestConfig { source: RequestSource::Inline { request, .. }, .. }) = &mut me.config {
+        request.headers.push(KeyValue::new("Authorization", "{{auth}}"));
+    }
+    let f = flow(
+        vec![
+            post_json("login", "{{baseUrl}}/login", r#"{"username": "ada", "password": "secret"}"#),
+            me,
+            output("user", "user", "{{blocks.me.json.user}}"),
+        ],
+        &[("start", "next", "login"), ("login", "success", "me"), ("me", "success", "user")],
+    );
+    let env = FlowEnv { services: services(), collections: Vec::new(), base_dir: None };
+    for (scope, mut vars) in [("environment", scopes(&base)), ("globals", scopes(&base))] {
+        let value = "Bearer {{blocks.login.output.json.token}}".to_string();
+        match scope {
+            "environment" => vars.environment.insert("auth".into(), value),
+            _ => vars.globals.insert("auth".into(), value),
+        };
+        let mut sink = |_: FlowEvent| {};
+        let r = run_flow(&env, &f, &mut vars, FlowRunOptions::default(), &mut sink, &CancellationToken::new()).await;
+        assert!(r.success, "{scope}: {r:#?}");
+        assert_eq!(r.outputs["user"], json!("ada"), "{scope}");
+    }
+}
