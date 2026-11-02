@@ -14,8 +14,10 @@ pub(crate) type NodeId = usize;
 /// tags repeated in a loop would overflow the UI thread's stack. Like
 /// Chrome's parser (which stops at 512), deeper content is kept but
 /// flattened into the last allowed level; the limit is lower here because
-/// each level costs far more stack while painting.
-const MAX_DEPTH: usize = 256;
+/// each level costs far more stack: building the layout takes ~10 KiB a
+/// level in release builds and ~26 KiB in debug builds, so 256 levels used
+/// 6.6 of the main thread's 8 MiB in debug. 128 keeps half of it free.
+const MAX_DEPTH: usize = 128;
 
 #[derive(Debug)]
 pub(crate) enum NodeData {

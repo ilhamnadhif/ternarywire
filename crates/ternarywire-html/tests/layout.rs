@@ -783,8 +783,51 @@ fn deeply_nested_markup_does_not_overflow_the_stack() {
         let doc = Document::from_html(&"<ul><li>y".repeat(2_000));
         assert!(doc.outline().contains('y'));
     };
-    // Debug builds use several times the stack of release builds per level.
-    std::thread::Builder::new().stack_size(64 << 20).spawn(run).unwrap().join().unwrap();
+    // A main (egui) thread's 8 MiB less 2 MiB for the app's own frames, also
+    // in debug builds.
+    std::thread::Builder::new().stack_size(6 << 20).spawn(run).unwrap().join().unwrap();
+}
+
+#[test]
+fn the_deepest_documents_of_every_kind_render_on_a_main_thread_stack() {
+    // Nested past the DOM's depth cap with every kind of box, then built,
+    // laid out and painted (in a scroll area, as the app does) on a main
+    // thread's 8 MiB stack less 2 MiB for the app's own frames, in a debug
+    // build: it uses 2-3 times the stack of a release build.
+    let kinds = [
+        "<div>x",
+        "<span>x",
+        "<b><i>x",
+        "<a href=#>x",
+        "<ul><li>y",
+        "<table><tr><td>x",
+        "<div style='display:flex'>x",
+        "<div style='display:flex; flex-direction:column'>x",
+        "<div style='display:grid; grid-template-columns: 1fr 1fr'>x",
+        "<div style='display:inline-block; padding: 1px'>x",
+        "<div style='float:left'>x",
+        "<div style='position:relative; z-index: 1'>x",
+        "<div style='position:absolute; top: 1px'>x",
+        "<div style='position:sticky; top: 0'>x",
+        "<div style='overflow:hidden; border: 1px solid red'>x",
+        "<span style='display:inline-table'><span style='display:table-cell'>x",
+        "<blockquote><p>x",
+    ];
+    let run = move || {
+        for kind in kinds {
+            let doc = Document::from_html(&kind.repeat(400));
+            assert!(!doc.layout_boxes(vec2(800.0, 600.0), &opts()).is_empty(), "{kind}");
+            let ctx = Context::default();
+            for _ in 0..2 {
+                let screen = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+                let mut out = ctx.run_ui(RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| doc.show_with(ui, &mut |_: &str| {}, &opts()));
+                });
+                out.textures_delta.clear();
+            }
+        }
+    };
+    std::thread::Builder::new().stack_size(6 << 20).spawn(run).unwrap().join().unwrap();
 }
 
 #[test]
