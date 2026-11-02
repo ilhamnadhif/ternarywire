@@ -420,7 +420,8 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 while i < chars.len()
                     && !(chars[i] == '"' && chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"'))
                 {
-                    i += 1;
+                    // `\"""` is an escaped delimiter.
+                    i += if chars[i] == '\\' && chars[i + 1..].starts_with(&['"', '"', '"']) { 4 } else { 1 };
                 }
                 i += 3;
             } else {
@@ -670,6 +671,54 @@ fn field_suggestions(schema: &Schema, ty: Option<&str>, out: &mut Vec<Suggestion
     });
 }
 
+/// Whether `src` ends inside a `#` comment or a string, with the lexical
+/// rules of [`tokenize`] (a `#` inside a string starts no comment).
+fn ends_in_comment_or_string(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'#' {
+            match b[i..].iter().position(|&c| c == b'\n') {
+                Some(n) => i += n + 1,
+                None => return true,
+            }
+        } else if b[i..].starts_with(b"\"\"\"") {
+            i += 3;
+            loop {
+                if i >= b.len() {
+                    return true;
+                }
+                if b[i..].starts_with(b"\\\"\"\"") {
+                    i += 4;
+                } else if b[i..].starts_with(b"\"\"\"") {
+                    i += 3;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if b[i] == b'"' {
+            i += 1;
+            loop {
+                match b.get(i) {
+                    None => return true,
+                    // A string cannot span lines.
+                    Some(b'\n' | b'\r') => break,
+                    Some(b'"') => {
+                        i += 1;
+                        break;
+                    }
+                    Some(b'\\') => i += 2,
+                    Some(_) => i += 1,
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Suggestions valid at byte offset `cursor` of `query`.
 pub fn suggest(schema: &Schema, query: &str, cursor: usize) -> Vec<Suggestion> {
     let mut cursor = cursor.min(query.len());
@@ -681,9 +730,7 @@ pub fn suggest(schema: &Schema, query: &str, cursor: usize) -> Vec<Suggestion> {
     let prefix = &before[before.len() - prefix_len..];
     let context = &before[..before.len() - prefix_len];
     // Inside a string or comment: nothing to suggest.
-    if let Some(line) = context.rsplit('\n').next()
-        && line.contains('#')
-    {
+    if ends_in_comment_or_string(context) {
         return Vec::new();
     }
     let toks = tokenize(context);
@@ -1018,6 +1065,17 @@ mod tests {
         assert_eq!(labels(&out), vec!["mutation"]);
         let q = "{ viewer { # comment lo";
         assert!(suggest(&s, q, q.len()).is_empty());
+        // A `#` inside a string starts no comment.
+        let q = "{ repository(owner: \"#a\", name: \"b\") { owner { lo";
+        assert_eq!(labels(&suggest(&s, q, q.len())), vec!["login"]);
+        let q = "{ search(query: \"\"\"x # \\\"\"\" y\"\"\", type: ";
+        assert_eq!(labels(&suggest(&s, q, q.len())), vec!["REPOSITORY", "USER"]);
+        for q in ["{ repository(owner: \"lo", "{ search(query: \"\"\"a\n b", "{ viewer { # a \"b\" lo"] {
+            assert!(suggest(&s, q, q.len()).is_empty(), "{q}");
+        }
+        // A comment ends at the line; an unterminated string too.
+        let q = "{ viewer { # note\n lo";
+        assert_eq!(labels(&suggest(&s, q, q.len())), vec!["login"]);
         let q = "fragment F on Repository { na";
         assert_eq!(labels(&suggest(&s, q, q.len())), vec!["name"]);
         let q = "{ viewer { ...on User { log";
