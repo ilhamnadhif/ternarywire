@@ -19,7 +19,7 @@ use ternarywire_core::model::{Collection, HttpRequest, Item, KeyValue, RequestIt
 use ternarywire_core::protocols::{AiMessage, AiProvider, AiRequest};
 use ternarywire_core::settings::RequestDefaults;
 use ternarywire_core::tokens::MemoryTokenStore;
-use ternarywire_core::variables::{VarType, Variable, VariableScopes};
+use ternarywire_core::variables::{VarType, Variable, VariableScopes, VaultLookup};
 use ternarywire_flows::validate::has_errors;
 use ternarywire_flows::*;
 use ternarywire_http::{CookieJar, EngineConfig, HttpEngine};
@@ -2349,5 +2349,89 @@ async fn loop_reached_again_from_its_done_path_is_a_cycle() {
     assert!(r.success, "{r:#?}");
     assert_eq!(step(&r, "a").len(), 4);
     assert_eq!(step(&r, "end").len(), 1);
+}
+
+/// A vault whose first lookup of a name takes 300 ms, like a linked secret
+/// fetched from a provider; later lookups hit its cache.
+#[derive(Default)]
+struct SlowVault {
+    cache: Mutex<std::collections::HashMap<String, String>>,
+    fetching: AtomicUsize,
+    most_at_once: AtomicUsize,
+    fetches: AtomicUsize,
+}
+
+impl VaultLookup for SlowVault {
+    fn get(&self, key: &str) -> Option<String> {
+        if let Some(v) = self.cache.lock().unwrap().get(key) {
+            return Some(v.clone());
+        }
+        let now = self.fetching.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_at_once.fetch_max(now, Ordering::SeqCst);
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(300));
+        self.fetching.fetch_sub(1, Ordering::SeqCst);
+        let v = format!("secret-{key}");
+        self.cache.lock().unwrap().insert(key.to_string(), v.clone());
+        Some(v)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vault_secrets_are_fetched_before_the_run_and_together() {
+    let (base, _) = server().await;
+    // A saved request with a vault reference in a header.
+    let mut collection = Collection::new("Vaulted");
+    let mut r = HttpRequest::new("GET", "{{baseUrl}}/hit");
+    r.headers.push(KeyValue::new("X-Key", "{{vault:d}}"));
+    let mut item = RequestItem::new("Hit", r);
+    item.id = "hit".into();
+    collection.items.push(Item::Request(item));
+    let saved = Block::with_id(
+        "saved",
+        "saved",
+        BlockConfig::Request(RequestConfig {
+            source: RequestSource::Saved(ItemRef { collection_id: String::new(), request_id: "hit".into() }),
+            ..Default::default()
+        }),
+    );
+    let f = flow(
+        vec![
+            parallel("p"),
+            template("a", "{{vault:a}}"),
+            template("b", "{{vault:b}}"),
+            // Through an environment variable.
+            template("c", "{{token}}"),
+            saved,
+            join("j"),
+            output("out", "out", "{{blocks.a.output}} {{blocks.b.output}} {{blocks.c.output}}"),
+        ],
+        &[
+            ("start", "next", "p"),
+            ("p", "branches", "a"),
+            ("p", "branches", "b"),
+            ("p", "branches", "c"),
+            ("p", "branches", "saved"),
+            ("a", "success", "j"),
+            ("b", "success", "j"),
+            ("c", "success", "j"),
+            ("saved", "success", "j"),
+            ("j", "next", "out"),
+        ],
+    );
+    let vault = Arc::new(SlowVault::default());
+    let mut svc = services();
+    svc.vault = Some(vault.clone() as Arc<dyn VaultLookup>);
+    let env = FlowEnv { services: svc, collections: vec![collection], base_dir: None };
+    let mut vars = scopes(&base);
+    vars.environment.insert("token".into(), "{{vault:c}}".into());
+    let mut sink = |_: FlowEvent| {};
+    let r = run_flow(&env, &f, &mut vars, FlowRunOptions::default(), &mut sink, &CancellationToken::new()).await;
+    assert!(r.success, "{r:#?}");
+    assert_eq!(r.outputs["out"], json!("secret-a secret-b secret-c"));
+    // Each secret was fetched once, all at the same time; none while the
+    // branches ran (that would hold up every branch).
+    assert_eq!(vault.fetches.load(Ordering::SeqCst), 4);
+    assert_eq!(vault.most_at_once.load(Ordering::SeqCst), 4);
 }
 

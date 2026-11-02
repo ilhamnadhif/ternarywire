@@ -36,7 +36,9 @@ use ternarywire_core::auth::Auth;
 use ternarywire_core::model::{Collection, HttpRequest, Item, RequestItem, RequestKind, Scripts};
 use ternarywire_core::protocols::{AiMessage, AiRequest};
 use ternarywire_core::script::{LogLevel, ScriptEvent, ScriptInfo, ScriptJob, ScriptRequest, ScriptSource, TestResult};
-use ternarywire_core::variables::{self, ScopeTypes, VarType, VariableScopes, value_to_string};
+use ternarywire_core::variables::{
+    self, ScopeTypes, VAULT_PREFIX, VarType, VariableScopes, VaultLookup, references, value_to_string,
+};
 use ternarywire_runner::{ConsoleKind, ExecuteInput, Execution, Services};
 use tokio_util::sync::CancellationToken;
 
@@ -637,6 +639,9 @@ pub async fn run_flow(
             run.fatal(None, e);
         }
     } else if let Some(start) = flow.start() {
+        if let Some(vault) = &env.services.vault {
+            prefetch_vault(vault, vault_names(flow, env, vars), cancel).await;
+        }
         run.frames.push(Frame {
             kind: FrameKind::Root,
             stack: vec![Activation::new(&start.id, PORT_IN, Arc::new(Value::Null), None)],
@@ -647,6 +652,109 @@ pub async fn run_flow(
     }
     *vars = std::mem::take(&mut run.vars);
     run.finish(started)
+}
+
+/// The saved request `r` points to, with its collection.
+fn find_saved<'c>(collections: &'c [Collection], r: &ItemRef) -> Option<(&'c Collection, &'c RequestItem)> {
+    if !r.collection_id.is_empty() {
+        let c = collections.iter().find(|c| c.id == r.collection_id)?;
+        return c.find_request(&r.request_id).map(|i| (c, i));
+    }
+    collections.iter().find_map(|c| c.find_request(&r.request_id).map(|i| (c, i)))
+}
+
+/// `{{vault:...}}` names in any string inside `v`.
+fn vault_refs(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => {
+            for r in references(s) {
+                if let Some(name) = r.strip_prefix(VAULT_PREFIX).map(str::trim)
+                    && !name.is_empty()
+                    && !out.iter().any(|n| n == name)
+                {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| vault_refs(x, out)),
+        Value::Object(m) => m.values().for_each(|x| vault_refs(x, out)),
+        _ => {}
+    }
+}
+
+/// Vault names a run may look up: in the flow, in the variables it starts
+/// with, and in the saved requests its blocks use (with their folders and
+/// collection, and the MCP servers of AI requests).
+fn vault_names(flow: &Flow, env: &FlowEnv, vars: &VariableScopes) -> Vec<String> {
+    let mut names = Vec::new();
+    vault_refs(&serde_json::to_value(flow).unwrap_or_default(), &mut names);
+    for v in vars.globals.values().chain(vars.environment.values()).chain(vars.collection.values()) {
+        vault_refs(&Value::String(v.clone()), &mut names);
+    }
+    let scan = |c: &Collection, id: &str, names: &mut Vec<String>| {
+        if let Some(item) = c.find_request(id) {
+            vault_refs(&serde_json::to_value(item).unwrap_or_default(), names);
+        }
+        for a in c.ancestors(id).unwrap_or_default() {
+            vault_refs(&serde_json::to_value(a.auth()).unwrap_or_default(), names);
+            vault_refs(&serde_json::to_value(a.scripts()).unwrap_or_default(), names);
+            vault_refs(&serde_json::to_value(a.variables()).unwrap_or_default(), names);
+        }
+    };
+    for b in &flow.blocks {
+        match &b.config {
+            BlockConfig::Request(RequestConfig { source: RequestSource::Saved(r), .. }) => {
+                if let Some((c, item)) = find_saved(&env.collections, r) {
+                    scan(c, &item.id, &mut names);
+                }
+            }
+            BlockConfig::Request(RequestConfig { source: RequestSource::Inline { collection_id, .. }, .. }) => {
+                if let Some(c) = env.collections.iter().find(|c| &c.id == collection_id) {
+                    vault_refs(&serde_json::to_value(&c.auth).unwrap_or_default(), &mut names);
+                    vault_refs(&serde_json::to_value(&c.scripts).unwrap_or_default(), &mut names);
+                    vault_refs(&serde_json::to_value(&c.variables).unwrap_or_default(), &mut names);
+                }
+            }
+            BlockConfig::Ai(AiBlockConfig { request: Some(r), .. }) => {
+                if let Some((c, item)) = find_saved(&env.collections, r) {
+                    scan(c, &item.id, &mut names);
+                    if let RequestKind::Ai(a) = &item.request {
+                        for id in &a.mcp_servers {
+                            for c in env.collections.iter().filter(|c| c.find_request(id).is_some()) {
+                                scan(c, id, &mut names);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Looks `names` up in the vault on blocking threads, all at once, so that
+/// lookups during the run find them cached. A lookup that has to fetch a
+/// linked secret blocks the task that polls every parallel branch (up to
+/// the provider timeout); a failure is remembered by the vault, so the run
+/// does not wait for it again.
+async fn prefetch_vault(vault: &Arc<dyn VaultLookup>, names: Vec<String>, cancel: &CancellationToken) {
+    if names.is_empty() {
+        return;
+    }
+    let lookups: FuturesUnordered<_> = names
+        .into_iter()
+        .map(|name| {
+            let vault = vault.clone();
+            tokio::task::spawn_blocking(move || {
+                vault.get(&name);
+            })
+        })
+        .collect();
+    tokio::select! {
+        _ = lookups.collect::<Vec<_>>() => {}
+        _ = cancel.cancelled() => {}
+    }
 }
 
 /// [`Run::drive`] behind a pointer: branches run it recursively (a branch
@@ -1808,12 +1916,7 @@ impl<'r, 'a> Run<'r, 'a> {
 
     /// The collection holding a saved item.
     fn find_saved(&self, r: &ItemRef) -> Option<(&'a Collection, &'a RequestItem)> {
-        let env = self.env();
-        if !r.collection_id.is_empty() {
-            let c = env.collections.iter().find(|c| c.id == r.collection_id)?;
-            return c.find_request(&r.request_id).map(|i| (c, i));
-        }
-        env.collections.iter().find_map(|c| c.find_request(&r.request_id).map(|i| (c, i)))
+        find_saved(&self.env().collections, r)
     }
 
     /// A collection holding just the inline request (or the context
