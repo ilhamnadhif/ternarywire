@@ -35,6 +35,9 @@ struct Importer<'a> {
     warnings: Vec<String>,
     /// Placeholder variables referenced by generated auth.
     auth_vars: IndexMap<String, bool>,
+    /// Path parameters inside a segment (`a{id}.json` becomes `a{{id}}.json`)
+    /// with the first example value found: collection variables.
+    segment_vars: IndexMap<String, String>,
     /// What is left of [`EXAMPLE_BUDGET`] for the example being generated.
     example_budget: usize,
     /// Whether the example being generated ran out of budget.
@@ -283,7 +286,10 @@ impl<'a> Importer<'a> {
             self.warn("security requirements combining several schemes: only the first is imported");
         }
         let (name, scopes) = first.iter().next()?;
-        let scheme_v = self.security_schemes().get(name)?;
+        let Some(scheme_v) = self.security_schemes().get(name) else {
+            self.warn(format!("security requirement `{name}` names no security scheme: its auth was not imported"));
+            return None;
+        };
         let scheme = self.resolve(scheme_v);
         let scopes: Vec<String> = scopes.as_array().map(|a| a.iter().map(as_string).collect()).unwrap_or_default();
         self.auth_from_scheme(name, scheme, &scopes)
@@ -552,6 +558,11 @@ impl<'a> Importer<'a> {
             let v = if secret { Variable::secret(name, "") } else { Variable::new(name, "") };
             c.variables.push(v);
         }
+        for (name, value) in std::mem::take(&mut self.segment_vars) {
+            if !c.variables.iter().any(|v| v.key == name) {
+                c.variables.push(Variable::new(name, value));
+            }
+        }
         Ok(c)
     }
 
@@ -776,8 +787,12 @@ impl<'a> Importer<'a> {
             description =
                 if description.is_empty() { "Deprecated.".into() } else { format!("Deprecated. {description}") };
         }
-        for (k, _) in extra_vars {
+        for (k, value) in extra_vars {
             self.warn(format!("path parameter `{k}` inside a segment became the variable {{{{{k}}}}}"));
+            let v = self.segment_vars.entry(k).or_default();
+            if v.is_empty() {
+                *v = value;
+            }
         }
 
         let mut item = RequestItem::new(name, req.clone());
@@ -1086,6 +1101,7 @@ pub fn import(text: &str) -> Result<(Collection, Vec<String>), ConvertError> {
         v2,
         warnings: Vec::new(),
         auth_vars: IndexMap::new(),
+        segment_vars: IndexMap::new(),
         example_budget: EXAMPLE_BUDGET,
         example_cut: false,
     };
@@ -1733,6 +1749,36 @@ mod tests {
         let get = find(&c, "Find pet by ID");
         assert_eq!(get.http().unwrap().auth.kind, AuthType::ApiKey);
         assert!(get.examples.iter().any(|e| e.status == 404));
+    }
+
+    #[test]
+    fn segment_path_params_become_collection_variables() {
+        let doc = json!({
+            "openapi": "3.0.0",
+            "info": {"title": "T", "version": "1"},
+            "components": {"securitySchemes": {"key": {"type": "apiKey", "name": "X-Key", "in": "header"}}},
+            "paths": {
+                "/files/{name}.{ext}": {"get": {
+                    "security": [{"missing": []}],
+                    "parameters": [
+                        {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}},
+                        {"name": "ext", "in": "path", "required": true, "example": "json", "schema": {"type": "string"}}
+                    ]
+                }},
+                "/v{ext}/a{baseUrl}": {"get": {
+                    "parameters": [{"name": "ext", "in": "path", "required": true, "example": "xml"}]
+                }}
+            }
+        });
+        let (c, warnings) = import(&doc.to_string()).unwrap();
+        assert_eq!(c.requests()[0].http().unwrap().url, "{{baseUrl}}/files/{{name}}.{{ext}}");
+        let var = |k: &str| c.variables.iter().filter(|v| v.key == k).map(|v| v.value.as_str()).collect::<Vec<_>>();
+        assert_eq!(var("name"), [""]);
+        assert_eq!(var("ext"), ["json"], "the first example wins");
+        assert_eq!(var("baseUrl").len(), 1, "an existing variable is not added twice");
+        assert!(warnings.iter().any(|w| w.contains("`ext` inside a segment")), "{warnings:?}");
+        // A requirement naming no scheme is reported, not dropped silently.
+        assert!(warnings.iter().any(|w| w.contains("`missing` names no security scheme")), "{warnings:?}");
     }
 
     #[test]
