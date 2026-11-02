@@ -28,6 +28,8 @@ enum SaveJob {
     History(Box<HistoryEntry>),
     ClearHistory,
     RemoveHistory(Id),
+    /// Settings > History entries changed.
+    HistoryLimit(usize),
     Flush(mpsc::Sender<()>),
 }
 
@@ -105,7 +107,7 @@ fn spawn_saver(
     store: Arc<WorkspaceStore>,
     secrets: Arc<SecretStore>,
     cookies: Arc<CookieJar>,
-    history: Arc<HistoryStore>,
+    mut history: Arc<HistoryStore>,
 ) -> (mpsc::Sender<SaveJob>, mpsc::Receiver<String>) {
     let (tx, rx) = mpsc::channel::<SaveJob>();
     let (etx, erx) = mpsc::channel::<String>();
@@ -128,6 +130,10 @@ fn spawn_saver(
                     SaveJob::History(h) => history.append(&h).map_err(|e| e.to_string()),
                     SaveJob::ClearHistory => history.clear().map_err(|e| e.to_string()),
                     SaveJob::RemoveHistory(id) => history.remove(&id).map_err(|e| e.to_string()),
+                    SaveJob::HistoryLimit(n) => {
+                        history = Arc::new(HistoryStore::new(history.path().to_path_buf(), n));
+                        Ok(())
+                    }
                     SaveJob::Flush(done) => {
                         let _ = done.send(());
                         Ok(())
@@ -349,6 +355,16 @@ impl WsState {
         self.history.truncate(self.history_limit);
     }
 
+    /// Applies a new Settings > History entries (it used to wait for the
+    /// next time the workspace was opened).
+    pub fn set_history_limit(&mut self, limit: usize) {
+        if limit != self.history_limit {
+            self.history_limit = limit;
+            self.history.truncate(limit);
+            let _ = self.saver.send(SaveJob::HistoryLimit(limit));
+        }
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
         let _ = self.saver.send(SaveJob::ClearHistory);
@@ -487,6 +503,36 @@ pub fn apply_diff(vars: &mut Vec<Variable>, before: TypedValues, after: TypedVal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new Settings > History entries applies right away (it used to wait
+    /// until the workspace was opened again).
+    #[test]
+    fn history_limit_applies_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = WsState::for_test(dir.path());
+        let entry = |n: usize| HistoryEntry {
+            id: format!("h{n}"),
+            timestamp: n as i64,
+            request: ternarywire_core::model::HttpRequest::new("GET", format!("http://h{n}.test")),
+            resolved_url: String::new(),
+            status: None,
+            elapsed_ms: 0.0,
+            size: 0,
+            error: None,
+            source_request_id: None,
+            name: None,
+        };
+        for n in 0..5 {
+            ws.add_history(entry(n));
+        }
+        ws.set_history_limit(2);
+        assert_eq!(ws.history.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["h4", "h3"]);
+        for n in 5..8 {
+            ws.add_history(entry(n));
+        }
+        assert_eq!(ws.history.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["h7", "h6"]);
+        ws.flush_blocking();
+    }
 
     #[test]
     fn diff_only_touches_changed_keys() {

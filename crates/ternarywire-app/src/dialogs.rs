@@ -2075,11 +2075,8 @@ fn run_palette_action(app: &mut TernaryWireApp, ctx: &egui::Context, action: Pal
         PaletteAction::SwitchEnvironment => app.dialog = Some(Dialog::env_switcher()),
         PaletteAction::Env(e) => app.ws.set_active_environment(e),
         PaletteAction::Run(c) => app.open_runner(c, None),
-        PaletteAction::OpenWorkspace => {
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                app.open_workspace(dir, None);
-            }
-        }
+        // Like the workspace menu: a folder that is not a workspace is refused.
+        PaletteAction::OpenWorkspace => app.pick_workspace(),
         PaletteAction::NewWorkspace => app.dialog = Some(Dialog::new_workspace()),
         PaletteAction::CheckUpdates => crate::update::request_check(ctx),
         PaletteAction::Theme(t) => {

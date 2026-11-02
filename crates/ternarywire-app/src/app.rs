@@ -1624,6 +1624,7 @@ impl TernaryWireApp {
             ternarywire_core::settings::ThemePreference::Dark => egui::ThemePreference::Dark,
         });
         crate::theme::apply(&self.ctx, new.ui.font_size);
+        self.ws.set_history_limit(new.history_limit);
         self.settings = new;
         if engine_changed {
             self.http.set_config(Self::engine_config(&self.settings, &self.ws));
