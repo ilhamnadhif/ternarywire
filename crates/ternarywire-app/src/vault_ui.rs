@@ -60,6 +60,9 @@ pub struct VaultDialog {
     link: Option<LinkForm>,
     provider: Option<ProviderForm>,
     pending: Arc<Mutex<Pending>>,
+    /// External providers were set up when the dialog opened (once: a
+    /// failure shows a toast, which would come back on every frame).
+    attached: bool,
 }
 
 /// Runs `work` in the background; its result replaces `pending`.
@@ -110,7 +113,9 @@ fn form_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 
 pub fn show(app: &mut TernaryWireApp, ctx: &egui::Context, d: &mut VaultDialog) -> Outcome {
     // External providers are set up on first use.
-    app.attach_external_secrets(true);
+    if !std::mem::replace(&mut d.attached, true) {
+        app.attach_external_secrets(true);
+    }
     let ext = app.ws.external.clone();
     let backend = app.ws.secrets.backend_description();
     let secret_count = app.ws.vault_names().len();

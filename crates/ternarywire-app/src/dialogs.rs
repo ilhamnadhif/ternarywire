@@ -4143,6 +4143,22 @@ mod tests {
         assert!(!app.tab_has_unsaved_work(0));
     }
 
+    /// External secrets that cannot be set up (the CA file is gone) are
+    /// reported once when the Vault opens, not on every frame.
+    #[test]
+    fn vault_reports_a_provider_setup_error_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        app.settings.certificates.ca_enabled = true;
+        app.settings.certificates.ca_path = dir.path().join("missing.pem").display().to_string();
+        app.dialog = Some(Dialog::vault());
+        for _ in 0..3 {
+            app.draw_frame(Vec::new());
+        }
+        let toasts: Vec<&str> = app.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(toasts.len(), 1, "{toasts:?}");
+    }
+
     fn key(key: egui::Key) -> egui::Event {
         egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
     }
