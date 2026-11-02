@@ -266,7 +266,6 @@ impl RequestTab {
     }
 
     pub fn finish(&mut self, exec: Execution, rerun: bool) {
-        self.running = None;
         if rerun {
             if let Some(r) = &mut self.result {
                 r.exec.tests = exec.tests;
@@ -277,6 +276,8 @@ impl RequestTab {
             }
             return;
         }
+        // Only a send ends the send in progress (re-running tests is not one).
+        self.running = None;
         let had_tests = !exec.tests.is_empty();
         // The new body keeps how the last one was viewed (view, wrap, filter).
         let mut body = BodyState::default();
@@ -495,7 +496,8 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Reques
     let scripts_shown = tab.section == Section::Scripts
         && tab.script_event == ScriptEvent::PostResponse
         && tab.panel != PanelMode::Maximized;
-    crate::response_actions::notice(ui, &mut tab.tools, notice_rect, scripts_shown, &mut after);
+    let busy = tab.running.is_some();
+    crate::response_actions::notice(ui, &mut tab.tools, notice_rect, scripts_shown, busy, &mut after);
 
     // Body value actions (context menu of the body, or automation).
     if let Some(a) = actions.value_action.take().or_else(|| tab.pending_value.take())

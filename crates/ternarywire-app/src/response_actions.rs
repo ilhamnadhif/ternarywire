@@ -422,8 +422,9 @@ const NOTICE_TIME: Duration = Duration::from_secs(8);
 
 /// The notice floating at the bottom of the response panel (`rect`).
 /// `scripts_shown`: the post-response script is open already (no "Open
-/// Scripts" button).
-pub fn notice(ui: &mut Ui, tools: &mut Tools, rect: egui::Rect, scripts_shown: bool, after: &mut After) {
+/// Scripts" button). `busy`: a request is being sent (tests can run on its
+/// response once it is there).
+pub fn notice(ui: &mut Ui, tools: &mut Tools, rect: egui::Rect, scripts_shown: bool, busy: bool, after: &mut After) {
     let Some(n) = &tools.notice else { return };
     let p = theme::pal(ui);
     let id = ui.make_persistent_id("resp-notice");
@@ -451,7 +452,12 @@ pub fn notice(ui: &mut Ui, tools: &mut Tools, rect: egui::Rect, scripts_shown: b
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(16.0)).color(p.ok));
                         ui.add(egui::Label::new(RichText::new(&n.text).color(p.text)).truncate());
-                        if n.run_tests && kit::ghost(ui, Some(icons::PLAY), tr("Run tests")).clicked() {
+                        if n.run_tests
+                            && ui
+                                .add_enabled_ui(!busy, |ui| kit::ghost(ui, Some(icons::PLAY), tr("Run tests")))
+                                .inner
+                                .clicked()
+                        {
                             after.rerun_tests = true;
                             close = true;
                         }

@@ -1036,6 +1036,11 @@ impl TernaryWireApp {
     pub fn rerun_tests(&mut self, id: u64) {
         let Some(idx) = self.tab_index(id) else { return };
         let TabKind::Request(tab) = &self.tabs[idx].kind else { return };
+        // The response is about to be replaced (and the scripts' results
+        // would end the send in progress).
+        if tab.running.is_some() {
+            return;
+        }
         let Some(result) = &tab.result else { return };
         let (Some(prepared), Some(response)) = (result.exec.prepared.clone(), result.exec.response.clone()) else {
             return;
@@ -2928,5 +2933,33 @@ mod tests {
         assert!(flow_state(&app).0, "the new run still runs");
         press(&mut app, Key::Enter, Modifiers::COMMAND);
         assert!(!flow_state(&app).0, "and can be stopped");
+    }
+
+    /// Tests re-run on the last response that finish while a new send is in
+    /// flight must not end it: its spinner and Cancel would go, and the
+    /// guard against sending twice with it.
+    #[test]
+    fn rerun_tests_do_not_end_a_send_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let id = scratch_tab(&mut app, "a");
+        let cancel = CancellationToken::new();
+        let TabKind::Request(t) = &mut app.tabs[0].kind else { panic!("request tab") };
+        t.start_running(cancel.clone());
+        let rerun = Msg::Request {
+            tab: id,
+            exec: Box::default(),
+            before: VariableScopes::default(),
+            after: VariableScopes::default(),
+            collection: None,
+            env: None,
+            rerun: true,
+        };
+        app.tx.send(rerun).unwrap();
+        app.pump_messages();
+        let TabKind::Request(t) = &mut app.tabs[0].kind else { panic!("request tab") };
+        assert!(t.running.is_some());
+        press(&mut app, Key::Enter, Modifiers::COMMAND);
+        assert!(cancel.is_cancelled(), "⌘↩ still cancels the send");
     }
 }
