@@ -86,8 +86,9 @@ async fn op(env: &Env, id: &str, s: &OnePasswordSettings, args: &[&str]) -> Resu
     let mut argv: Vec<OsString> = args.iter().map(Into::into).collect();
     let account = s.account.trim();
     if !account.is_empty() {
-        argv.push("--account".into());
-        argv.push(account.into());
+        // Before a `--`: everything after it is positional.
+        let at = args.iter().position(|a| *a == "--").unwrap_or(argv.len());
+        argv.splice(at..at, [OsString::from("--account"), account.into()]);
     }
     let sa_token = env.credential(id, "service_account_token");
     let mut envs = Vec::new();
@@ -195,12 +196,16 @@ async fn cli_browse(
             let v = cli_json(&op(env, id, s, &["vault", "list", "--format", "json"]).await?)?;
             Ok(named_list(&v, "name", |seg| format!("{seg}/")))
         }
+        // Names are user data: `--vault=` and `--` keep one starting with
+        // `-` from being read as a flag.
         [vault] => {
-            let v = cli_json(&op(env, id, s, &["item", "list", "--vault", vault, "--format", "json"]).await?)?;
+            let flag = format!("--vault={vault}");
+            let v = cli_json(&op(env, id, s, &["item", "list", &flag, "--format", "json"]).await?)?;
             Ok(named_list(&v, "title", |seg| format!("{vault}/{seg}/")))
         }
         [vault, item] => {
-            let v = cli_json(&op(env, id, s, &["item", "get", item, "--vault", vault, "--format", "json"]).await?)?;
+            let flag = format!("--vault={vault}");
+            let v = cli_json(&op(env, id, s, &["item", "get", &flag, "--format", "json", "--", item]).await?)?;
             Ok(field_entries(&v, vault, item))
         }
         _ => Ok(Vec::new()),

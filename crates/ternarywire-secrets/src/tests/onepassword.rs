@@ -152,3 +152,31 @@ async fn cli_read_test_browse_and_errors() {
     assert_eq!(e.kind, ErrorKind::CliMissing);
     assert!(e.message.contains("developer.1password.com"), "{e}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_names_starting_with_a_dash_are_not_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    // Logs its arguments, one per line, and answers with empty JSON.
+    let log = dir.path().join("args.log");
+    let body = format!(
+        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\necho '#end' >> '{}'\n\
+         if [ \"$2\" = list ]; then echo '[]'; else echo '{{}}'; fi\n",
+        log.display(),
+        log.display()
+    );
+    let op = super::script(dir.path(), "op", &body);
+    let s = OnePasswordSettings { cli_path: op.to_string_lossy().into(), account: "team".into(), ..Default::default() };
+    let ext = manager(ProviderSettings::OnePassword(s));
+    ext.browse("p1", "-v/").await.unwrap();
+    ext.browse("p1", "-v/--help/").await.unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    let calls: Vec<Vec<&str>> = text.split("#end\n").filter(|c| !c.is_empty()).map(|c| c.lines().collect()).collect();
+    assert_eq!(
+        calls,
+        [
+            vec!["item", "list", "--vault=-v", "--format", "json", "--account", "team"],
+            vec!["item", "get", "--vault=-v", "--format", "json", "--account", "team", "--", "--help"],
+        ]
+    );
+}
