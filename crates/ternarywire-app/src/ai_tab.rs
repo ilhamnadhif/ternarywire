@@ -95,6 +95,8 @@ impl AiTab {
         self.scripts.stop_waiting();
         if let Some(c) = self.cancel.take() {
             c.cancel();
+            // What the stopped run still sends (text, an error) is dropped.
+            self.epoch = crate::app::next_epoch();
         }
         self.started = None;
     }
@@ -891,5 +893,24 @@ mod tests {
         ai_tab(&mut app, basic.clone());
         app.draw_frame(Vec::new());
         assert_eq!(auth(&app), basic);
+    }
+
+    /// Text the model still streams after Stop does not show up.
+    #[test]
+    fn stopped_answers_stay_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let id = ai_tab(&mut app, Auth::default());
+        let TabKind::Ai(t) = &mut app.tabs[0].kind else { panic!("AI tab") };
+        t.epoch = crate::app::next_epoch();
+        t.cancel = Some(CancellationToken::new());
+        let running = t.epoch;
+        t.cancel();
+        for event in [AiEvent::Delta("late".into()), AiEvent::Error("cancelled".into())] {
+            app.tx.send(Msg::Ai { tab: id, epoch: running, event: AiMsg::Event(event) }).unwrap();
+        }
+        app.pump_messages();
+        let TabKind::Ai(t) = &app.tabs[0].kind else { panic!("AI tab") };
+        assert_eq!((t.text.as_str(), t.error.as_deref()), ("", None));
     }
 }
