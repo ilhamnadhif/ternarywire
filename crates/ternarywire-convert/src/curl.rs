@@ -19,12 +19,12 @@ use ternarywire_core::{Auth, AuthType};
 use crate::ConvertError;
 
 /// True when the text starts with a `curl` invocation (optionally after a
-/// `$ ` prompt).
+/// `$ ` prompt), as [`parse`] accepts it.
 pub fn looks_like_curl(text: &str) -> bool {
     let t = text.trim_start();
     let t = t.strip_prefix('$').map(str::trim_start).unwrap_or(t);
     let word: String = t.chars().take_while(|c| !c.is_whitespace()).collect();
-    word == "curl" || word == "curl.exe"
+    word == "curl" || word == "curl.exe" || word.ends_with("/curl")
 }
 
 /// Windows cmd syntax: a `^` line continuation, or a word starting with `^"`

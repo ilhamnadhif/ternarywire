@@ -108,7 +108,7 @@ fn detect_json(v: &serde_json::Value) -> Option<ImportFormat> {
     if v.get("_type").and_then(Value::as_str) == Some("export") && v.get("resources").is_some() {
         return Some(ImportFormat::Insomnia);
     }
-    if v.get("type").and_then(Value::as_str).map(|t| t.starts_with("collection.insomnia.rest")).unwrap_or(false) {
+    if v.get("type").and_then(Value::as_str).is_some_and(is_insomnia_v5_type) {
         return Some(ImportFormat::Insomnia);
     }
     if v.pointer("/log/entries").is_some() {
@@ -127,6 +127,11 @@ fn detect_json(v: &serde_json::Value) -> Option<ImportFormat> {
     }
 }
 
+/// The `type` of an Insomnia v5 document that `insomnia::import` reads.
+fn is_insomnia_v5_type(t: &str) -> bool {
+    t.starts_with("collection.insomnia.rest") || t.starts_with("environment.insomnia.rest")
+}
+
 /// Sniffs the format of pasted text or file content.
 pub fn detect(text: &str) -> Option<ImportFormat> {
     let t = text.trim_start_matches('\u{feff}').trim_start();
@@ -142,11 +147,15 @@ pub fn detect(text: &str) -> Option<ImportFormat> {
     if smithy::looks_like_smithy(t) {
         return Some(ImportFormat::Smithy);
     }
-    // YAML: only the formats that are commonly YAML.
-    let head: String = t.lines().take(40).collect::<Vec<_>>().join("\n");
-    let yamlish = head.lines().any(|l| {
-        let l = l.trim_start_matches(['\'', '"']);
-        l.starts_with("openapi:") || l.starts_with("swagger:") || l.starts_with("type: collection.insomnia.rest")
+    // YAML: only the formats that are commonly YAML, by a top-level key
+    // anywhere (a long comment header may come first).
+    let yamlish = t.lines().any(|l| {
+        let value = |key: &str| {
+            let rest = l.trim_start_matches(['\'', '"']).strip_prefix(key)?;
+            let rest = rest.trim_start_matches(['\'', '"']).strip_prefix(':')?;
+            Some(rest.trim().trim_start_matches(['\'', '"']))
+        };
+        value("openapi").is_some() || value("swagger").is_some() || value("type").is_some_and(is_insomnia_v5_type)
     });
     if yamlish && let Ok(v) = util::yaml_to_json(t) {
         return detect_json(&v);
@@ -256,6 +265,21 @@ mod tests {
             Some(ImportFormat::Hoppscotch)
         );
         assert_eq!(detect("hello world"), None);
+        // Insomnia v5 environment documents import too.
+        assert_eq!(detect("type: environment.insomnia.rest/5.0\nname: E\n"), Some(ImportFormat::Insomnia));
+        assert_eq!(
+            detect("{\"type\": \"environment.insomnia.rest/5.0\", \"name\": \"E\"}"),
+            Some(ImportFormat::Insomnia)
+        );
+        // The parser accepts a path to curl.
+        assert_eq!(detect("/usr/bin/curl https://x.test"), Some(ImportFormat::Curl));
+        // The YAML key may come after a long comment header, and be quoted.
+        let header = "# license\n#\n".repeat(30);
+        assert_eq!(
+            detect(&format!("{header}\nopenapi: 3.0.0\ninfo: {{title: x}}\npaths: {{}}")),
+            Some(ImportFormat::OpenApi)
+        );
+        assert_eq!(detect("\"swagger\": \"2.0\"\ninfo: {title: x}\npaths: {}"), Some(ImportFormat::OpenApi));
         assert_eq!(detect("{\"random\": 1}"), None);
     }
 
