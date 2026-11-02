@@ -2,6 +2,133 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.2.3 — 2026-11-02
+
+A release of fixes from a review of the whole code base.
+
+### Security
+- Scripts can no longer read files outside the workspace. A file a script puts into a request body
+  or a `pm.sendRequest` body must be a relative path inside the working directory (the workspace,
+  or `--working-dir` for the CLI). Files the saved request already uses keep working.
+- Scripts that run on the same worker can no longer affect later scripts by patching built-ins such
+  as iterators, or call the worker's internal hooks. The Package Library no longer tells whether a
+  file outside it exists.
+- A redirect to another origin no longer takes credentials along: API key headers, a `Cookie` header
+  set by hand, `X-Amz-Security-Token` and `Authorization` are dropped (unless *Follow Authorization
+  header* is on), and `Host` and `Proxy-Authorization` always are.
+- Network errors no longer show query strings or passwords from URLs, and `ternarywire run --verbose`
+  and `ternarywire flow run` mask credentials in URLs unless you pass `--show-secrets`.
+- Unsaved tabs no longer write credentials (Authorization, Cookie and API key headers, sensitive auth
+  fields, secret and vault values) to `.ternarywire/session.json`; they are kept in the secret store
+  and come back after a restart.
+- `.ternarywire/` now ignores itself in Git, also in workspaces that already had a `.gitignore`.
+- The mock server allows credentials in CORS only for local origins (localhost, loopback and private
+  addresses), so other web pages cannot read its responses with your cookies.
+- Code snippets: HTTPie items are escaped, so a value starting with `@` no longer reads a local file;
+  JavaScript, Java and Swift snippets quote file paths and multipart names.
+- Generated Markdown documentation keeps raw HTML from descriptions inside code, the OpenAPI export
+  and the documentation mask credentials in GraphQL variables, XML and form bodies, and the first
+  word of a masked passphrase is no longer left visible.
+- Pages opened in the browser (visualizer, HTML preview, docs) are written to private temporary
+  files with random names.
+- MCP sign-ins ignore callback requests that don't carry the sign-in's `state`.
+- Requests saved from the capture proxy follow the cookie and header options in their examples too.
+- The GitHub Action passes its inputs to its scripts through the environment, so an input can't run
+  shell commands.
+
+### Fixed
+- **Requests and auth**
+  - gRPC requests in the Collection Runner and the CLI send the auth they inherit from their
+    collection or folder.
+  - NTLM uses HTTP/1.1 and keeps its handshake on one connection, and servers that offer only
+    `Negotiate` are answered too.
+  - OAuth 2.0: requests that find the same expired token refresh it once, so rotating refresh tokens
+    keep working; client credentials in the Basic header are form-encoded as RFC 6749 asks.
+  - AWS Signature v4 signs file bodies for every service, not only S3, and leaves the multipart
+    Content-Type out; Hawk includes file bodies in the payload hash.
+  - Proxy auto-config: a failed or slow PAC call is tried again instead of sending that host direct
+    until the app restarts, and changes to the system proxy reach requests at once.
+  - Empty query values keep their `=` (`?b=`), GraphQL variables that aren't JSON are sent as typed,
+    and headers whose name is empty are left out.
+- **Scripts, Runner and CLI**
+  - `pm.sendRequest` stops when the run is cancelled or the script times out, and binary responses
+    keep their bytes.
+  - A variable that can't be stored (a BigInt, a circular object) no longer loses the tests, console
+    and variables of the whole script.
+  - `pm.cookies` holds the cookies of the URL the request is sent to, also when re-running tests.
+  - The Runner warns when its loop guard ends a `setNextRequest` loop, and performance tests say why
+    nothing ran and use the workspace folder for files.
+  - Sessions without a timeout give up connecting after 30 s; `packages.lock.json` is locked while
+    several script workers update it.
+- **Workspace**
+  - Deleting a collection, folder or request also deletes its saved secrets and OAuth tokens.
+  - Forks: a change you declined comes up again at the next pull, and removing a folder that the
+    other side changed is a conflict instead of deleting those changes.
+  - A symlink back to a parent folder no longer makes loading hang; rewritten files keep their
+    permissions; adding to a long history no longer rereads it.
+- **Protocols**
+  - Socket.IO: acknowledgements given before the namespace connects are sent once it does, invalid
+    event names are refused right away, and a slow last polling request no longer breaks the upgrade.
+  - MQTT: messages published while connecting are checked against the broker's packet size limit.
+  - gRPC: unary and server-streaming calls refuse extra request messages.
+  - MCP: a sign-in or an open dialog no longer cuts off requests, an expired session closes the
+    connection, resumed streams sign in again when needed, the last event of a stream is kept, and
+    exported host configs include Basic auth and query API keys.
+  - AI: the timeout limits the silences of a streamed answer and the whole of any other answer;
+    servers that refuse `stream_options` are asked again without it; Gemini events with several
+    responses keep them all; time to first token is shown only for streamed answers.
+- **The app**
+  - Stopping a flow and running it again no longer leaves the new run impossible to stop.
+  - Re-running tests while a request is being sent no longer hides its progress and Cancel.
+  - Results of requests started in a workspace you have since closed are dropped instead of being
+    written into the new one.
+  - Tabs restored after a restart remember unsaved edits and ask before closing.
+  - Connecting twice quickly runs the pre-request script and connects once; Stop on an AI request
+    ignores what it still streams; Cancel ends a hanging MCP handshake.
+  - Opening an AI request's Authorization section keeps its auth; the MCP command line keeps spaces
+    and quotes as you type them; a flow input's default stays as typed.
+  - A request's settings show the defaults from Settings; pending flow edits are saved when the tab
+    closes or the app quits; the Vault dialog reports a provider error once.
+  - Large response bodies are indexed and searched without blocking the window, image previews are
+    read once, and long gRPC streams no longer grow memory without bound.
+  - Updates: an AppImage is replaced without freezing the window, a skipped version no longer shows
+    its badge after a restart, and downloads never overwrite a file of yours.
+  - Eight Indonesian translations were missing.
+  - On Windows the window's thread gets the same 8 MiB stack as on macOS and Linux.
+- **Visualizer**
+  - A template whose partials call each other no longer crashes the app; template output, grids and
+    inline images have size limits.
+  - `font: 700 12px …`, `visibility: hidden`, `display: inline-table`, attribute selectors with `i`,
+    comments inside strings and `text-decoration` on children render as in browsers.
+- **Import and export**
+  - cURL: every option that takes a value is read as such, and unsupported input (`-b file`,
+    `-H @file`, extra URLs, data with `-F`) gives a warning.
+  - Insomnia v5 environments are detected and partial exports keep their order; OpenAPI path
+    parameters inside a segment get their variables; SOAP types keep their own namespace; spaces
+    around XML entities stay; Smithy reads prelude traits only from `smithy.api` and rejects broken
+    escapes and out-of-range status codes; Thunder tests keep only real number literals; GraphQL
+    suggestions work after a `#` inside a string.
+- **Flows**
+  - A loop that its own *done* path starts again is reported as a cycle before the run.
+  - Vault secrets are fetched before the run, so parallel branches don't wait on each other.
+  - Scripts find blocks by name the way templates do, flow references inside variables reach
+    requests, and `await` in a comment no longer changes a script's result.
+- **Capture proxy and mock server**
+  - Intercepted requests are recorded under the host they reached, and a client that just aborts a
+    TLS handshake no longer turns that host to passthrough.
+  - Clients that check the certificate only after the TLS handshake and then hang up (such as curl
+    8.18 on Linux) show up in the list as failed, with the likely cause, instead of not at all.
+  - The mock server answers 413 to bodies over 16 MiB instead of matching them as empty, and the
+    webhook listener numbers events in the order it stores them.
+- **Secret managers**
+  - 1Password names starting with `-` are no longer read as options, and Test connection warns when
+    credentials would go over plain `http://` to another machine.
+
+### Changed
+- The directory of a collection or folder is renamed on the next save when its name only starts
+  with the new slug (for example `api-v2` for a collection now called "API").
+- Visualizer documents nested deeper than 128 levels are flattened (was 256).
+
 ## 0.2.2 — 2026-11-02
 
 ### Changed
