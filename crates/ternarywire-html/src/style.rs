@@ -821,9 +821,11 @@ fn apply(c: &mut Computed, d: &Decl, parent: &Computed) {
             c.monospace = is_monospace_family(&lower);
         }
         "text-decoration" | "text-decoration-line" => {
+            // Not inherited, but an ancestor's lines still run through its
+            // descendants' text: `none` only drops this element's own.
             if lower.contains("none") {
-                c.underline = false;
-                c.strike = false;
+                c.underline = parent.underline;
+                c.strike = parent.strike;
             }
             if lower.contains("underline") {
                 c.underline = true;
@@ -1409,6 +1411,15 @@ mod tests {
         assert_eq!(style_of(html, "y").color, Some(Color32::BLUE));
         assert_eq!(style_of(html, "d").color, Some(Color32::from_rgb(128, 0, 128)));
         assert_eq!(style_of(html, "e").color, Some(Color32::from_rgb(255, 165, 0)));
+    }
+
+    #[test]
+    fn text_decoration_none_does_not_remove_an_ancestors_line() {
+        let html = "<style>.n { text-decoration: none }</style><u><span id=a class=n>x</span></u>\
+                    <a href=# class=n id=b>y</a><s><b id=c style='text-decoration: none'>z</b></s>";
+        assert!(style_of(html, "a").underline);
+        assert!(!style_of(html, "b").underline);
+        assert!(style_of(html, "c").strike);
     }
 
     #[test]
