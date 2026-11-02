@@ -33,7 +33,8 @@ ternarywire-mqtt = { path = "../ternarywire-mqtt" }
 
 [dev-dependencies]
 tempfile.workspace = true
-axum.workspace = true
+# `http2`: a plaintext gRPC endpoint in the tests.
+axum = { workspace = true, features = ["http2"] }
 ternarywire-script.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

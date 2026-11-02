@@ -195,9 +195,20 @@ async fn grpc(ctx: &Ctx<'_>, r: &GrpcRequest, vars: &mut VariableScopes, exec: &
     }
     let resolve = ctx.resolver(vars);
     let engine = ctx.services.http.config();
-    let target = ternarywire_grpc::Target::from_request(&req, &resolve, ctx.services.defaults.verify_ssl)
+    let mut target = ternarywire_grpc::Target::from_request(&req, &resolve, ctx.services.defaults.verify_ssl)
         .with_certificates(engine.certificates, engine.secret_resolver)
         .with_proxy(engine.proxy);
+    // `Inherit` takes the folder or collection auth, as in the app's gRPC
+    // tab; metadata the request sets itself wins.
+    if req.auth.is_inherit()
+        && let Some(eff) = ternarywire_core::model::effective_from_chain(&ctx.chain)
+    {
+        for (k, v) in ternarywire_grpc::auth_metadata(eff.auth, &resolve) {
+            if !target.metadata.iter().any(|(mk, _)| mk.eq_ignore_ascii_case(&k)) {
+                target.metadata.push((k, v));
+            }
+        }
+    }
     let schema = match &req.schema {
         GrpcSchemaSource::Reflection => ternarywire_grpc::load_via_reflection(&target).await,
         GrpcSchemaSource::ProtoFiles { files, import_paths } => {

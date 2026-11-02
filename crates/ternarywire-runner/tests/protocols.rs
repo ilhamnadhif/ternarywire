@@ -941,3 +941,54 @@ async fn cancel_interrupts_connecting_to_mcp_servers() {
         assert_eq!(exec.error.as_ref().map(|e| e.kind), Some(HttpErrorKind::Cancelled), "{:?}", exec.error);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_requests_inherit_the_collection_auth() {
+    use ternarywire_core::protocols::{GrpcRequest, GrpcSchemaSource};
+    // A plaintext HTTP/2 endpoint that records the metadata of each call
+    // and answers with a trailers-only `UNIMPLEMENTED`.
+    let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let s = seen.clone();
+    let app = Router::new().route(
+        "/t.Svc/Call",
+        post(move |h: axum::http::HeaderMap| async move {
+            let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            s.lock().unwrap().push((get("authorization"), get("x-key")));
+            ([("content-type", "application/grpc"), ("grpc-status", "12"), ("grpc-message", "no")], "")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let proto = dir.path().join("t.proto");
+    std::fs::write(
+        &proto,
+        "syntax = \"proto3\";\npackage t;\nmessage E {}\nservice Svc { rpc Call (E) returns (E); }\n",
+    )
+    .unwrap();
+
+    let grpc = |auth: Auth, metadata: Vec<ternarywire_core::model::KeyValue>| GrpcRequest {
+        url: format!("grpc://{addr}"),
+        service: "t.Svc".into(),
+        method: "Call".into(),
+        schema: GrpcSchemaSource::ProtoFiles { files: vec![proto.display().to_string()], import_paths: Vec::new() },
+        metadata,
+        auth,
+        ..Default::default()
+    };
+    let mut c = collection(item("Call", RequestKind::Grpc(grpc(Auth::default(), Vec::new())), Scripts::default()));
+    c.auth = Auth::bearer("{{tok}}");
+    let mut vars = VariableScopes::default();
+    vars.environment.insert("tok".into(), "t-1".into());
+    let exec = run_one(&c, &mut vars, &CancellationToken::new()).await;
+    assert!(exec.response.is_some() || exec.error.is_some(), "{}", console(&exec));
+
+    // The request's own metadata wins over the inherited auth.
+    let own = vec![ternarywire_core::model::KeyValue::new("Authorization", "Bearer mine")];
+    let mut c = collection(item("Call", RequestKind::Grpc(grpc(Auth::default(), own)), Scripts::default()));
+    c.auth = Auth::bearer("t-2");
+    run_one(&c, &mut VariableScopes::default(), &CancellationToken::new()).await;
+    let seen: Vec<String> = seen.lock().unwrap().iter().map(|(a, _)| a.clone()).collect();
+    assert_eq!(seen, ["Bearer t-1", "Bearer mine"]);
+}
