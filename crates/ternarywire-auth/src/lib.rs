@@ -22,7 +22,7 @@ mod simple;
 mod util;
 
 use ternarywire_core::tokens::TokenStore;
-use ternarywire_core::{Auth, AuthType, PreparedRequest};
+use ternarywire_core::{Auth, AuthType, PreparedBody, PreparedRequest};
 
 pub use error::AuthError;
 pub use fields::{FieldKind, FieldSpec, fields};
@@ -73,7 +73,12 @@ pub async fn apply(req: &mut PreparedRequest, ctx: &AuthContext<'_>) -> Result<A
     if req.auth.kind == AuthType::OAuth2 {
         return oauth2::apply(req, ctx).await;
     }
-    apply_sync(req)?;
+    // Signing may read a body file (AWS, Hawk, EdgeGrid) to the end.
+    if matches!(req.body, PreparedBody::File(_)) {
+        util::blocking(|| apply_sync(req))?;
+    } else {
+        apply_sync(req)?;
+    }
     Ok(AuthApplied::default())
 }
 

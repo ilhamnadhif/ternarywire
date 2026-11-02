@@ -4,10 +4,10 @@ use base64::Engine;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
-use ternarywire_core::PreparedRequest;
+use ternarywire_core::{PreparedBody, PreparedRequest};
 
 use crate::error::AuthError;
-use crate::util::{B64, hmac_sha1, hmac_sha256, now_secs, param, parse_url, random_alnum};
+use crate::util::{B64, hmac_sha1, hmac_sha256, now_secs, param, parse_url, random_alnum, read_file};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Alg {
@@ -45,6 +45,29 @@ fn payload_hash(alg: Alg, content_type: &str, payload: &[u8]) -> String {
     data.extend_from_slice(payload);
     data.push(b'\n');
     alg.hash(&data)
+}
+
+/// [`payload_hash`] of the request body, reading a body file.
+fn body_hash(alg: Alg, content_type: &str, body: &PreparedBody) -> Result<String, AuthError> {
+    fn file<D: Digest>(content_type: &str, path: &std::path::Path) -> Result<String, AuthError> {
+        let ct = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        let mut d = D::new();
+        d.update(format!("hawk.1.payload\n{ct}\n"));
+        read_file(path, &mut |b| d.update(b))?;
+        d.update(b"\n");
+        Ok(B64.encode(d.finalize()))
+    }
+    match body {
+        PreparedBody::File(path) => match alg {
+            Alg::Sha256 => file::<Sha256>(content_type, path),
+            Alg::Sha1 => file::<Sha1>(content_type, path),
+        },
+        PreparedBody::Multipart(_) => Err(AuthError::invalid(
+            "Hawk: a form-data body has no payload hash before it is sent (its boundary is chosen then); \
+             turn off \"Include payload hash\" or send the body another way",
+        )),
+        body => Ok(payload_hash(alg, content_type, body.as_bytes().unwrap_or_default())),
+    }
 }
 
 pub(crate) struct HawkInput<'a> {
@@ -107,8 +130,7 @@ pub(crate) fn apply(req: &mut PreparedRequest) -> Result<(), AuthError> {
         None => url.path().to_string(),
     };
     let hash = if auth.get_bool("includePayloadHash", false) {
-        let body = req.body.as_bytes().unwrap_or_default();
-        payload_hash(alg, req.header("content-type").unwrap_or(""), body)
+        body_hash(alg, req.header("content-type").unwrap_or(""), &req.body)?
     } else {
         String::new()
     };
@@ -149,7 +171,7 @@ pub(crate) fn apply(req: &mut PreparedRequest) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ternarywire_core::{Auth, AuthType, PreparedBody};
+    use ternarywire_core::{Auth, AuthType, MultipartPart, MultipartValue};
 
     fn creds() -> Auth {
         Auth::new(AuthType::Hawk)
@@ -196,6 +218,37 @@ mod tests {
         let h = req.header("authorization").unwrap();
         assert!(h.contains(r#"hash="Yi9LfIIFRtBEPt74PVmbTF/xVAwPn7ub15ePICfgnuY=""#), "{h}");
         assert!(h.contains(r#"mac="aSe1DERmZuRl3pI36/9BdZmnErTw3sNzOOAUlfeKjVw=""#), "{h}");
+    }
+
+    #[test]
+    fn payload_hash_of_body_files_and_form_data() {
+        // The README payload example, from a file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("body.txt");
+        std::fs::write(&path, "Thank you for flying Hawk").unwrap();
+        let mut req = PreparedRequest {
+            method: "POST".into(),
+            url: "http://example.com:8000/resource/1?b=1&a=2".into(),
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: PreparedBody::File(path),
+            auth: creds().with("includePayloadHash", true),
+            ..Default::default()
+        };
+        apply(&mut req).unwrap();
+        let h = req.header("authorization").unwrap();
+        assert!(h.contains(r#"hash="Yi9LfIIFRtBEPt74PVmbTF/xVAwPn7ub15ePICfgnuY=""#), "{h}");
+        assert!(h.contains(r#"mac="aSe1DERmZuRl3pI36/9BdZmnErTw3sNzOOAUlfeKjVw=""#), "{h}");
+        let sha1 = body_hash(Alg::Sha1, "", &PreparedBody::File(dir.path().join("body.txt"))).unwrap();
+        assert_eq!(sha1, payload_hash(Alg::Sha1, "", b"Thank you for flying Hawk"));
+        // Missing files and form-data bodies are errors, not a hash of nothing.
+        req.body = PreparedBody::File(dir.path().join("missing.bin"));
+        assert!(apply(&mut req).unwrap_err().to_string().contains("missing.bin"));
+        req.body = PreparedBody::Multipart(vec![MultipartPart {
+            name: "a".into(),
+            value: MultipartValue::Text("b".into()),
+            content_type: None,
+        }]);
+        assert!(apply(&mut req).unwrap_err().to_string().contains("form-data"));
     }
 
     #[test]

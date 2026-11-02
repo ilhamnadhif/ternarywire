@@ -45,6 +45,33 @@ pub(crate) fn body_bytes(req: &PreparedRequest) -> Option<&[u8]> {
     req.body.as_bytes()
 }
 
+/// Runs `f`, which blocks (reads files), without stalling the other tasks
+/// of the tokio worker it is called on (`block_in_place` on a
+/// multi-threaded runtime).
+pub(crate) fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
+/// Passes the body file at `path` to `update` piece by piece (it can be
+/// large).
+pub(crate) fn read_file(path: &std::path::Path, update: &mut dyn FnMut(&[u8])) -> Result<(), AuthError> {
+    use std::io::Read;
+    let error = |e: std::io::Error| AuthError::invalid(format!("could not read the body file {}: {e}", path.display()));
+    let mut file = std::fs::File::open(path).map_err(error)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(error(e)),
+        }
+    }
+}
+
 pub(crate) fn is_form_body(req: &PreparedRequest) -> bool {
     req.header("content-type")
         .map(|c| c.to_ascii_lowercase().starts_with("application/x-www-form-urlencoded"))
