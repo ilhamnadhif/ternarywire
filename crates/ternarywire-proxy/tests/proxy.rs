@@ -270,6 +270,39 @@ async fn h2_only_client_without_client_http2_is_tunnelled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_that_hangs_up_after_the_handshake_is_reported() {
+    let cert = ca_signed_cert();
+    let upstream = spawn_https(&cert, &[b"http/1.1"]).await;
+    let (proxy, ca) = start_proxy(|c| c.extra_upstream_roots_pem = Some(cert.ca_pem.clone())).await;
+    let name = || rustls::pki_types::ServerName::try_from("localhost").unwrap();
+
+    // Like curl 8.18 with OpenSSL when it doesn't trust our CA: it finishes
+    // the handshake, checks the certificate only then and hangs up at once.
+    let tunnel = connect_tunnel(&proxy, &format!("localhost:{}", upstream.port())).await;
+    let tls = tokio_rustls::TlsConnector::from(client_tls_config(ca.cert_pem()));
+    let mut stream = tls.connect(name(), tunnel).await.unwrap();
+    stream.shutdown().await.unwrap();
+    drop(stream);
+    let e = &finished(&proxy, 1).await[0];
+    assert_eq!((e.kind, e.state), (EntryKind::Tunnel, EntryState::Failed));
+    assert!(e.error.as_deref().unwrap().contains("does not trust the TernaryWire CA"), "{:?}", e.error);
+
+    // A connection that carried a request leaves only that request.
+    let tunnel = connect_tunnel(&proxy, &format!("localhost:{}", upstream.port())).await;
+    let mut stream = tls.connect(name(), tunnel).await.unwrap();
+    stream.write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).await.unwrap();
+    assert!(String::from_utf8_lossy(&answer).contains("hello world"));
+    drop(stream);
+    let entries = finished(&proxy, 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(proxy.entries().len(), 2, "{:#?}", proxy.entries());
+    assert_eq!((entries[1].kind, entries[1].state), (EntryKind::Http, EntryState::Complete));
+    proxy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn options_with_an_empty_path_is_forwarded_as_asterisk() {
     // A raw upstream that reports each request line.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

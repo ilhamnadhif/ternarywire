@@ -38,6 +38,10 @@ use crate::ws::{WsLog, WsSniffer};
 const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(3);
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// A decrypted connection the client closes this soon after the handshake,
+/// without a single request, is reported as a likely trust failure. Idle
+/// speculative connections (browsers open them ahead of time) last longer.
+const QUIET_CLOSE: Duration = Duration::from_secs(2);
 const TUNNEL_TICK: Duration = Duration::from_secs(1);
 const WS_TICK: Duration = Duration::from_millis(300);
 const SERVER_CONFIG_CACHE_LIMIT: usize = 4096;
@@ -271,7 +275,7 @@ async fn accept_loop(shared: Arc<Shared>, listener: TcpListener) {
                     let guard = ActiveGuard(s.clone());
                     let targets = Arc::new(OptionsTargets::default());
                     let io = TokioIo::new(OptionsSniffer::new(tcp, targets.clone()));
-                    serve_conn(s, Ctx { peer, origin: None, targets: Some(targets) }, io, false).await;
+                    serve_conn(s, Ctx { peer, origin: None, targets: Some(targets), used: None }, io, false).await;
                     drop(guard);
                 });
             }
@@ -284,12 +288,14 @@ async fn accept_loop(shared: Arc<Shared>, listener: TcpListener) {
 }
 
 /// Connection context: `origin` is set for connections inside a CONNECT,
-/// `targets` for connections from clients to the proxy itself.
+/// `targets` for connections from clients to the proxy itself. `used` is set
+/// once the connection carried a request.
 #[derive(Clone)]
 struct Ctx {
     peer: SocketAddr,
     origin: Option<Arc<Origin>>,
     targets: Option<Arc<OptionsTargets>>,
+    used: Option<Arc<AtomicBool>>,
 }
 
 struct Origin {
@@ -350,6 +356,9 @@ where
 }
 
 async fn route(shared: Arc<Shared>, ctx: Ctx, req: Request<Incoming>) -> Response<ProxyBody> {
+    if let Some(used) = &ctx.used {
+        used.store(true, Ordering::Relaxed);
+    }
     match &ctx.origin {
         Some(origin) => {
             if req.method() == Method::CONNECT {
@@ -711,11 +720,11 @@ async fn intercept_connection(
         tls_intercept(shared, peer, host, port, io, first).await;
     } else if first.starts_with(b"PRI * HTTP/2.0") {
         let origin = Arc::new(Origin { https: false, host, port, sni: None });
-        let ctx = Ctx { peer, origin: Some(origin), targets: None };
+        let ctx = Ctx { peer, origin: Some(origin), targets: None, used: None };
         serve_conn(shared, ctx, TokioIo::new(Rewind::new(first, io)), true).await;
     } else if looks_like_http(&first) {
         let origin = Arc::new(Origin { https: false, host, port, sni: None });
-        let ctx = Ctx { peer, origin: Some(origin), targets: None };
+        let ctx = Ctx { peer, origin: Some(origin), targets: None, used: None };
         serve_conn(shared, ctx, TokioIo::new(Rewind::new(first, io)), false).await;
     } else {
         tunnel_after_peek(shared, peer, host, port, io, first, "neither TLS nor HTTP; tunnelled").await;
@@ -845,8 +854,24 @@ async fn tls_intercept(
     };
     let negotiated_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
     let upstream_sni = sni.filter(|s| s != &host);
-    let origin = Arc::new(Origin { https: true, host, port, sni: upstream_sni });
-    serve_conn(shared, Ctx { peer, origin: Some(origin), targets: None }, TokioIo::new(tls), negotiated_h2).await;
+    let origin = Arc::new(Origin { https: true, host: host.clone(), port, sni: upstream_sni });
+    let used = Arc::new(AtomicBool::new(false));
+    let handshake_done = Instant::now();
+    let ctx = Ctx { peer, origin: Some(origin), targets: None, used: Some(used.clone()) };
+    serve_conn(shared.clone(), ctx, TokioIo::new(tls), negotiated_h2).await;
+    // Some clients (curl 8.18 with OpenSSL, for one) finish the handshake,
+    // check our certificate only then and hang up without a word, so the
+    // failure above never happens. Without an entry the user would see nothing.
+    if !used.load(Ordering::Relaxed)
+        && handshake_done.elapsed() < QUIET_CLOSE
+        && !shared.token.is_cancelled()
+        && let Some(ex) = shared.begin_tunnel(peer, &host, port, Version::HTTP_11, None, "TLS interception", true)
+    {
+        ex.fail(
+            "The client closed the connection right after the TLS handshake without sending a request. It probably \
+             does not trust the TernaryWire CA (or it pins certificates for this host).",
+        );
+    }
 }
 
 /// The client ended the handshake with an alert saying it rejects our
