@@ -176,3 +176,30 @@ async fn stop_closes_the_port() {
     let c = client();
     assert!(c.get(&url).send().await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_events_are_buffered_in_id_order() {
+    let hooks = start(ListenerConfig { capacity: 10_000, ..Default::default() }).await;
+    let c = client();
+    let mut tasks = Vec::new();
+    for t in 0..32 {
+        let (c, url) = (c.clone(), hooks.url());
+        tasks.push(tokio::spawn(async move {
+            for i in 0..25 {
+                let headers: Vec<(String, String)> = (0..20).map(|h| (format!("x-h{h}"), "v".repeat(64))).collect();
+                let mut req = c.post(format!("{url}/t{t}/{i}")).body("x".repeat(1000));
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+                req.send().await.unwrap();
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let ids: Vec<u64> = hooks.events().iter().map(|e| e.id).collect();
+    assert_eq!(ids.len(), 800);
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "out of order: {ids:?}");
+    hooks.stop().await;
+}

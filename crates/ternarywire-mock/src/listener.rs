@@ -284,8 +284,8 @@ async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
     let remote_addr = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.to_string());
     let (parts, body) = req.into_parts();
     let (body, body_truncated) = read_capped(body, shared.max_body_bytes).await;
-    let event = WebhookEvent {
-        id: shared.next_id.fetch_add(1, Ordering::Relaxed),
+    let mut event = WebhookEvent {
+        id: 0,
         timestamp_ms,
         method: parts.method.as_str().to_string(),
         path: parts.uri.path().to_string(),
@@ -297,6 +297,8 @@ async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
     };
     {
         let mut events = shared.events.lock();
+        // Numbered under the lock, so the buffer stays in id order.
+        event.id = shared.next_id.fetch_add(1, Ordering::Relaxed);
         while events.len() >= shared.capacity {
             events.pop_front();
         }
