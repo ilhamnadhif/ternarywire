@@ -963,6 +963,17 @@ enum Re {
     Repeat(Box<Re>, u32, u32, bool),
 }
 
+impl Re {
+    /// Always matches exactly one char.
+    fn is_one_char(&self) -> bool {
+        match self {
+            Re::Char(_) | Re::Any | Re::Class(..) => true,
+            Re::Concat(items) => items.len() == 1 && items[0].is_one_char(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ClassItem {
     Range(char, char),
@@ -973,6 +984,11 @@ enum ClassItem {
 
 /// Steps a single match may take before it gives up (catastrophic patterns).
 const REGEX_BUDGET: u32 = 1_000_000;
+/// Nesting of matcher calls before a match gives up instead of overflowing
+/// the stack: each element matched on the current path nests one deeper
+/// (a group repeated 300 times nests 300 × its length), but a `.*`-like
+/// run does not. Up to ~0.8 KB a level in debug builds: well within 2 MiB.
+const REGEX_DEPTH: u32 = 1_000;
 
 impl Regex {
     pub fn new(pattern: &str, icase: bool) -> Option<Regex> {
@@ -987,7 +1003,7 @@ impl Regex {
     pub fn is_match(&self, text: &str) -> bool {
         let s: Vec<char> = text.chars().collect();
         let budget = Cell::new(REGEX_BUDGET);
-        let m = Matcher { s: &s, icase: self.icase, budget: &budget };
+        let m = Matcher { s: &s, icase: self.icase, budget: &budget, depth: Cell::new(0) };
         (0..=s.len()).any(|start| budget.get() > 0 && m.at(&self.node, start, &mut |_| true))
     }
 }
@@ -1158,6 +1174,7 @@ struct Matcher<'s> {
     s: &'s [char],
     icase: bool,
     budget: &'s Cell<u32>,
+    depth: Cell<u32>,
 }
 
 impl Matcher<'_> {
@@ -1177,23 +1194,82 @@ impl Matcher<'_> {
         })
     }
 
+    /// Takes a step from the budget; false once it is used up.
+    fn step(&self) -> bool {
+        let left = self.budget.get();
+        left > 0 && {
+            self.budget.set(left - 1);
+            true
+        }
+    }
+
+    /// Whether `c` matches `re`, for `re` that always match one char.
+    fn one(&self, re: &Re, c: char) -> Option<bool> {
+        Some(match re {
+            Re::Char(x) => self.same(c, *x),
+            Re::Any => c != '\n',
+            Re::Class(items, negated) => self.in_class(items, c) != *negated,
+            Re::Concat(items) if items.len() == 1 => return self.one(&items[0], c),
+            _ => return None,
+        })
+    }
+
     /// Matches `re` at `i`, then hands the end position to `k`.
     fn at(&self, re: &Re, i: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
-        let left = self.budget.get();
-        if left == 0 {
+        let depth = self.depth.get();
+        if depth >= REGEX_DEPTH {
+            // Give up rather than overflow the stack.
+            self.budget.set(0);
+        }
+        if !self.step() {
             return false;
         }
-        self.budget.set(left - 1);
+        self.depth.set(depth + 1);
         let s = self.s;
-        match re {
-            Re::Char(c) => i < s.len() && self.same(s[i], *c) && k(i + 1),
-            Re::Any => i < s.len() && s[i] != '\n' && k(i + 1),
-            Re::Class(items, negated) => i < s.len() && self.in_class(items, s[i]) != *negated && k(i + 1),
+        let matched = match re {
+            Re::Char(_) | Re::Any | Re::Class(..) => i < s.len() && self.one(re, s[i]) == Some(true) && k(i + 1),
             Re::Start => i == 0 && k(i),
             Re::End => i == s.len() && k(i),
             Re::Alt(branches) => branches.iter().any(|b| self.at(b, i, k)),
             Re::Concat(items) => self.seq(items, i, k),
+            Re::Repeat(inner, min, max, greedy) if inner.is_one_char() => self.run(inner, *min, *max, *greedy, i, k),
             Re::Repeat(inner, min, max, greedy) => self.repeat(inner, *min, *max, *greedy, 0, i, k),
+        };
+        self.depth.set(depth);
+        matched
+    }
+
+    /// A repeat of a one-char `inner` (`.*`, `\d+`, `[a-z]{2,}`): the run
+    /// is counted in a loop, so a long match does not nest a call per char.
+    fn run(&self, inner: &Re, min: u32, max: u32, greedy: bool, i: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
+        let fits = |j: usize| j < self.s.len() && self.one(inner, self.s[j]) == Some(true) && self.step();
+        let (min, max) = (min as usize, max as usize);
+        let mut n = 0;
+        while n < min {
+            if !fits(i + n) {
+                return false;
+            }
+            n += 1;
+        }
+        if greedy {
+            let mut end = n;
+            while end < max && fits(i + end) {
+                end += 1;
+            }
+            (n..=end).rev().any(|j| self.budget.get() > 0 && k(i + j))
+        } else {
+            loop {
+                if self.budget.get() == 0 {
+                    return false;
+                }
+                if k(i + n) {
+                    return true;
+                }
+                if n >= max || !fits(i + n) {
+                    return false;
+                }
+                n += 1;
+            }
         }
     }
 
@@ -1443,6 +1519,25 @@ mod tests {
         for bad in ["(", "[a", "a{3,1}", "*a", "a)", "\\q", "^*"] {
             assert!(Regex::new(bad, false).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn long_strings_do_not_overflow_the_stack() {
+        // On the test thread's 2 MiB stack: runs of one-char atoms are
+        // counted in a loop, other repeats give up before the stack is used up.
+        let re = |p: &str, s: &str| Regex::new(p, false).unwrap().is_match(s);
+        let long = "a".repeat(200_000);
+        assert!(re(".*", &long));
+        assert!(re("^a+$", &long));
+        assert!(re("^[a-z]{3,}$", &long));
+        assert!(!re("^.*b$", &long));
+        assert!(re("^.*?b$", &format!("{long}b")));
+        assert!(re("^(?:a)*$", &long));
+        assert!(re("^(?:ab)*$", &"ab".repeat(300)));
+        assert!(!re("^(?:ab)*$", &"ab".repeat(100_000)));
+        assert!(!re("^(?:a|b)+c$", &"ab".repeat(100_000)));
+        let doc = json!([{"s": long}, {"s": "b"}]);
+        assert_eq!(values(&doc, "$[?(@.s =~ /^a.*$/)]").len(), 1);
     }
 
     #[test]
