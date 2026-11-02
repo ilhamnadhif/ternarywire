@@ -104,6 +104,11 @@ pub enum UpdateMsg {
     Downloaded(Result<PathBuf, String>),
     /// The new version replaced this one and opens once TernaryWire has quit.
     Installed(Result<(), String>),
+    /// The downloaded AppImage (in `path`) could not replace the running one.
+    NotReplaced {
+        path: PathBuf,
+        error: String,
+    },
 }
 
 #[derive(Default)]
@@ -582,7 +587,7 @@ impl Reporter {
     }
 }
 
-/// Downloads `asset` into `dest` (through `<dest>.part`), reporting
+/// Downloads `asset` into `dest` (through a `.part` file of its own), reporting
 /// progress, and checks its size and SHA-256. Nothing is left behind when
 /// that fails.
 async fn download_to(
@@ -598,7 +603,15 @@ async fn download_to(
     let mut resp = get(client, &asset.url, policy, "application/octet-stream, */*", None).await?;
     let total = resp.content_length().or((asset.size > 0).then_some(asset.size));
     report.send(UpdateMsg::Stage(Stage::Downloading { received: 0, total }));
-    let part = dest.with_extension("part");
+    // A new name: `<dest>.part` may be a file of the user's in Downloads.
+    let dir = dest.parent().unwrap_or(Path::new("."));
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let part = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".part")
+        .tempfile_in(dir)
+        .map_err(|e| e.to_string())?
+        .into_temp_path();
     let result = async {
         let mut file = tokio::fs::File::create(&part).await.map_err(|e| e.to_string())?;
         let mut hasher = sha2::Sha256::new();
@@ -630,8 +643,9 @@ async fn download_to(
         tokio::fs::rename(&part, dest).await.map_err(|e| e.to_string())
     }
     .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&part).await;
+    // Dropping `part` deletes what is left of a failed download.
+    if result.is_ok() {
+        let _ = part.keep();
     }
     result
 }
@@ -712,8 +726,32 @@ fn start_download(app: &mut TernaryWireApp) {
             Ok(dest)
         }
         .await;
+        // An AppImage takes the place of the running one and restarts; the
+        // copy of the whole app is no work for the UI thread.
+        if let Ok(path) = &result
+            && Install::current() == Install::AppImage
+        {
+            report.send(UpdateMsg::Stage(Stage::Installing));
+            let p = path.clone();
+            report.send(match blocking(move || replace_appimage(&p)).await {
+                Ok(()) => UpdateMsg::Installed(Ok(())),
+                Err(error) => UpdateMsg::NotReplaced { path: path.clone(), error },
+            });
+            return;
+        }
         report.send(UpdateMsg::Downloaded(result));
     });
+}
+
+/// Puts a downloaded AppImage in place of the running one.
+#[cfg(target_os = "linux")]
+fn replace_appimage(downloaded: &Path) -> Result<(), String> {
+    appimage::install(downloaded)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn replace_appimage(downloaded: &Path) -> Result<(), String> {
+    Err(format!("{} is not an AppImage install", downloaded.display()))
 }
 
 /// "Install and restart": replaces the running app with the newest release
@@ -864,14 +902,18 @@ pub fn on_msg(app: &mut TernaryWireApp, msg: UpdateMsg) {
             match result {
                 // A download or install is under way; it goes on.
                 Ok(Some(_)) if app.update.stage.is_some() => app.update.dialog_open |= manual,
+                // Skipped: not offered at startup, not even in the status bar.
+                Ok(Some(release)) if !manual && release.version == app.settings.updates.skipped_version => {
+                    app.update.available = None;
+                    app.update.dialog_open = false;
+                }
                 Ok(Some(release)) => {
-                    let skipped = !manual && release.version == app.settings.updates.skipped_version;
                     if app.update.available.as_ref().is_some_and(|r| r.version != release.version) {
                         // What was downloaded or failed belongs to the older release.
                         app.update.downloaded = None;
                         app.update.error = None;
                     }
-                    app.update.dialog_open = !skipped;
+                    app.update.dialog_open = true;
                     app.update.available = Some(release);
                 }
                 Ok(None) => {
@@ -900,19 +942,6 @@ pub fn on_msg(app: &mut TernaryWireApp, msg: UpdateMsg) {
         UpdateMsg::Downloaded(result) => {
             app.update.stage = None;
             match result {
-                // An AppImage takes the place of the running one and restarts.
-                #[cfg(target_os = "linux")]
-                Ok(path) if Install::current() == Install::AppImage => match appimage::install(&path) {
-                    Ok(()) => {
-                        app.update.stage = Some(Stage::Restarting);
-                        app.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    Err(e) => {
-                        app.update.downloaded = Some(path);
-                        app.update.error = Some(e);
-                        app.update.dialog_open = true;
-                    }
-                },
                 Ok(path) => app.update.downloaded = Some(path),
                 Err(e) => {
                     app.update.error = Some(e);
@@ -925,6 +954,12 @@ pub fn on_msg(app: &mut TernaryWireApp, msg: UpdateMsg) {
             // Quit the normal way: `on_exit` saves the session, the
             // workspace and the settings; then the helper opens the new app.
             app.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        UpdateMsg::NotReplaced { path, error } => {
+            app.update.stage = None;
+            app.update.downloaded = Some(path);
+            app.update.error = Some(error);
+            app.update.dialog_open = true;
         }
         UpdateMsg::Installed(Err(e)) => {
             tracing::warn!("update not installed: {e}");
@@ -1871,8 +1906,12 @@ mod tests {
         assert!(app.update.dialog_open);
         // A skipped version is not offered again at startup.
         app.settings.updates.skipped_version = "99.0.0".into();
-        on_msg(&mut app, UpdateMsg::Checked { manual: false, result: Ok(Some(r)) });
+        on_msg(&mut app, UpdateMsg::Checked { manual: false, result: Ok(Some(r.clone())) });
         assert!(!app.update.dialog_open);
+        assert!(app.update.available.is_none(), "no status-bar pill for it either");
+        // A check from the menu still offers it.
+        on_msg(&mut app, UpdateMsg::Checked { manual: true, result: Ok(Some(r)) });
+        assert!(app.update.dialog_open && app.update.available.is_some());
     }
 
     /// Serves `files` (path → body) on a local port, one response per
@@ -1933,6 +1972,9 @@ mod tests {
             ("/sums-good", format!("{good}  {name}\n").into_bytes()),
             ("/sums-bad", format!("{}  {name}\n", "0".repeat(64)).into_bytes()),
         ]);
+        // A file of the user's where `<installer>.part` used to be written.
+        let mine = downloads.join(Path::new(&name).with_extension("part"));
+        std::fs::write(&mine, "mine").unwrap();
         let mut app = TernaryWireApp::for_test(&dir.path().join("ws"));
         // Plain HTTP to this computer is allowed because the feed is here too.
         app.settings.updates.feed_url = format!("http://127.0.0.1:{port}/latest.json");
@@ -1992,9 +2034,10 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 2, "{names:?}");
+        assert_eq!(names.len(), 3, "{names:?}");
         assert!(names.contains(&name), "{names:?}");
-        assert!(!names.iter().any(|n| n.ends_with(".part")), "{names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".part") && !mine.ends_with(n)), "{names:?}");
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), "mine");
     }
 
     /// Messages of an install: a newer release replaces the one offered, the
