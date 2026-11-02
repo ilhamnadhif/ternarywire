@@ -148,6 +148,9 @@ pub struct McpTab {
     since: Option<Instant>,
     /// Why the last connection failed.
     error: Option<String>,
+    /// The STDIO command line as typed, and the command it was read as
+    /// (see [`command_line`]).
+    typed_command: Option<(String, String)>,
 }
 
 impl McpTab {
@@ -179,6 +182,7 @@ impl McpTab {
             search: String::new(),
             since: None,
             error: None,
+            typed_command: None,
         }
     }
 
@@ -597,6 +601,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut McpTab
     let RequestKind::Mcp(req) = &mut item.request else { return };
     let mut action = None;
     let mut call: Option<(McpCallKind, String, serde_json::Value)> = None;
+    let typed_command = &mut tab.typed_command;
     let clicked = pc::connect_bar(
         ui,
         "MCP",
@@ -633,8 +638,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut McpTab
                     widgets::var_cell(ui, "mcp-url", url, &vars, "https://example.com/mcp", w)
                 }
                 McpTransport::Stdio { command, args, .. } => {
-                    let mut line =
-                        std::iter::once(command.clone()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+                    let mut line = command_line(typed_command.take(), command, args);
                     let r = widgets::var_cell(
                         ui,
                         "mcp-cmd",
@@ -648,6 +652,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut McpTab
                         *command = parts.next().unwrap_or_default();
                         *args = parts.collect();
                     }
+                    *typed_command = Some((line, shell_join(command, args)));
                     r
                 }
             };
@@ -1188,6 +1193,35 @@ fn saved_list(ui: &mut Ui, req: &mut ternarywire_core::protocols::McpRequest, ta
     ui.label(kit::hint(ui, tr("Right-click a saved call to remove it.")));
 }
 
+/// Joins a command and its arguments into a line that [`shell_split`]
+/// reads back the same (arguments with spaces or quotes are quoted).
+pub fn shell_join(command: &str, args: &[String]) -> String {
+    if command.is_empty() && args.is_empty() {
+        return String::new();
+    }
+    let quote = |a: &str| {
+        if !a.is_empty() && !a.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'') {
+            a.to_string()
+        } else if a.contains('\'') {
+            format!("\"{a}\"")
+        } else {
+            format!("'{a}'")
+        }
+    };
+    std::iter::once(command).chain(args.iter().map(String::as_str)).map(quote).collect::<Vec<_>>().join(" ")
+}
+
+/// The STDIO command line to show: the text as typed (`typed`: the text
+/// and the command line it was read as) while it still stands for the
+/// command, so a trailing space or quotes are not lost while typing.
+fn command_line(typed: Option<(String, String)>, command: &str, args: &[String]) -> String {
+    let joined = shell_join(command, args);
+    match typed {
+        Some((text, read_as)) if read_as == joined => text,
+        _ => joined,
+    }
+}
+
 /// Splits a command line on whitespace, honouring single and double quotes.
 pub fn shell_split(line: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -1663,5 +1697,30 @@ mod tests {
     fn splits_commands() {
         assert_eq!(shell_split("npx -y \"@scope/pkg name\" 'a b'"), vec!["npx", "-y", "@scope/pkg name", "a b"]);
         assert!(shell_split("   ").is_empty());
+        let args: Vec<String> = ["-y", "a b", "it's", ""].map(String::from).into();
+        let line = shell_join("npx", &args);
+        assert_eq!(shell_split(&line), [vec!["npx".to_string()], args].concat(), "{line}");
+    }
+
+    /// The STDIO command line keeps what is typed: the space after `npx`
+    /// used to vanish on the next frame (the line was joined again from the
+    /// command and its arguments), so `npx -y` could not be typed.
+    #[test]
+    fn typing_a_command_line_keeps_spaces_and_quotes() {
+        let mut typed = None;
+        let (mut command, mut args) = (String::new(), Vec::new());
+        for c in "npx -y \"a b\" x".chars() {
+            // What the field shows, then one key press.
+            let mut line = command_line(typed.take(), &command, &args);
+            line.push(c);
+            let mut parts = shell_split(&line).into_iter();
+            command = parts.next().unwrap_or_default();
+            args = parts.collect();
+            typed = Some((line, shell_join(&command, &args)));
+        }
+        assert_eq!(command_line(typed.clone(), &command, &args), "npx -y \"a b\" x");
+        assert_eq!((command.as_str(), args.as_slice()), ("npx", ["-y", "a b", "x"].map(String::from).as_slice()));
+        // Changed elsewhere (another transport, an undo): the command wins.
+        assert_eq!(command_line(typed, "uvx", &[]), "uvx");
     }
 }
