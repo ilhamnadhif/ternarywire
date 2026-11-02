@@ -420,11 +420,11 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
                     tr("API key, sent as the provider expects. Keep it in the vault, e.g. {{vault:openai}}."),
                 ));
                 ui.add_space(6.0);
-                if req.auth.kind != AuthType::Bearer && req.auth.kind != AuthType::ApiKey {
-                    req.auth = Auth::bearer("");
-                }
-                let key = if req.auth.kind == AuthType::Bearer { "token" } else { "value" };
-                let mut v = req.auth.get_string(key);
+                // Other auth (Inherit, …) sends no key; it becomes a Bearer
+                // token once one is typed, not by looking at the section.
+                let keyed = matches!(req.auth.kind, AuthType::Bearer | AuthType::ApiKey);
+                let key = if req.auth.kind == AuthType::ApiKey { "value" } else { "token" };
+                let mut v = if keyed { req.auth.get_string(key) } else { String::new() };
                 pc::form_grid("ai-auth").show(ui, |ui| {
                     pc::form_label(ui, tr("API key"));
                     let r = if v.is_empty() || ternarywire_core::variables::is_pure_reference(&v) {
@@ -433,6 +433,9 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
                         widgets::secret_field(ui, "ai-key", &mut v, 346.0)
                     };
                     if r.changed() {
+                        if !keyed {
+                            req.auth = Auth::bearer("");
+                        }
                         req.auth.set(key, v.clone());
                     }
                     ui.end_row();
@@ -849,4 +852,42 @@ pub fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut AiTab, mut req: Ai
             c.close().await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::TabKind;
+    use ternarywire_core::model::{HttpRequest, RequestItem};
+
+    fn ai_tab(app: &mut TernaryWireApp, auth: Auth) -> u64 {
+        let mut item = RequestItem::new("ai", HttpRequest::default());
+        item.request = RequestKind::Ai(AiRequest { model: "m".into(), auth, ..Default::default() });
+        let mut tab = AiTab::new(ItemSlot { location: None, scratch: Some(item) });
+        tab.section = Section::Auth;
+        app.add_tab(TabKind::Ai(Box::new(tab)))
+    }
+
+    fn auth(app: &TernaryWireApp) -> Auth {
+        match &app.tabs[app.active].kind.scratch().unwrap().request {
+            RequestKind::Ai(r) => r.auth.clone(),
+            _ => panic!("AI request"),
+        }
+    }
+
+    /// Showing the Authorization section changes nothing: an inherited (or
+    /// any other) auth used to be replaced with an empty Bearer token.
+    #[test]
+    fn viewing_the_auth_section_keeps_the_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        ai_tab(&mut app, Auth::default());
+        app.draw_frame(Vec::new());
+        app.draw_frame(Vec::new());
+        assert_eq!(auth(&app), Auth::default());
+        let basic = Auth::basic("u", "p");
+        ai_tab(&mut app, basic.clone());
+        app.draw_frame(Vec::new());
+        assert_eq!(auth(&app), basic);
+    }
 }
