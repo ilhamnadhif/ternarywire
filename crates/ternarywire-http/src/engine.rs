@@ -131,6 +131,10 @@ struct ClientKey {
     client_cert: Option<usize>,
     cookies: bool,
     unix_socket: Option<PathBuf>,
+    /// `domain\user` of NTLM requests, which get a connection pool per
+    /// user: NTLM authenticates the connection, so its handshake must stay
+    /// on one and no other request may reuse it.
+    ntlm_user: Option<String>,
 }
 
 pub struct HttpEngine {
@@ -202,6 +206,7 @@ impl HttpEngine {
             client_cert: None,
             cookies: false,
             unix_socket: None,
+            ntlm_user: None,
         };
         self.client(&self.snapshot(), key)
     }
@@ -218,6 +223,7 @@ impl HttpEngine {
             client_cert: client_cert_for(&snapshot.config, Url::parse(url.trim()).ok().as_ref()),
             cookies: false,
             unix_socket: None,
+            ntlm_user: None,
         };
         self.client(&snapshot, key)
     }
@@ -229,24 +235,29 @@ impl HttpEngine {
             Some((sock, u)) => (Some(sock), u),
             None => (None, url.to_string()),
         };
-        self.client_for_hop(settings, Url::parse(&url).ok().as_ref(), unix)
+        self.client_for_hop(settings, Url::parse(&url).ok().as_ref(), unix, None)
     }
 
     /// [`HttpEngine::client_for`] for an already parsed URL (one hop of a
-    /// redirect chain) and the local socket every hop goes through.
+    /// redirect chain), the local socket every hop goes through and the
+    /// NTLM user (see [`ntlm_user`]).
     fn client_for_hop(
         &self,
         settings: &ResolvedSettings,
         url: Option<&Url>,
         unix_socket: Option<PathBuf>,
+        ntlm_user: Option<String>,
     ) -> Result<reqwest::Client, HttpError> {
         let snapshot = self.snapshot();
         let key = ClientKey {
             verify_ssl: settings.verify_ssl,
-            version: settings.http_version,
+            // NTLM authenticates a connection, which HTTP/2 shares between
+            // requests: servers want HTTP/1.1 for it (HTTP_1_1_REQUIRED).
+            version: if ntlm_user.is_some() { HttpVersion::Http1 } else { settings.http_version },
             client_cert: client_cert_for(&snapshot.config, url),
             cookies: !settings.disable_cookies,
             unix_socket,
+            ntlm_user,
         };
         self.client(&snapshot, key)
     }
@@ -288,7 +299,8 @@ impl HttpEngine {
                 format!("Unsupported protocol \"{}:\" (use http or https)", url.scheme()),
             ));
         }
-        let mut client = self.client_for_hop(&req.settings, Some(&url), unix.clone())?;
+        let ntlm = ntlm_user(req);
+        let mut client = self.client_for_hop(&req.settings, Some(&url), unix.clone(), ntlm.clone())?;
         let mut method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|_| HttpError::new(HttpErrorKind::InvalidHeader, format!("Invalid method \"{}\"", req.method)))?;
         let mut headers = req.headers.clone();
@@ -449,7 +461,7 @@ impl HttpEngine {
                 url = next_url;
                 // The client certificate is chosen per host: the next hop may
                 // need another one (or none), e.g. after http:// -> https://.
-                client = self.client_for_hop(&req.settings, Some(&url), unix.clone())?;
+                client = self.client_for_hop(&req.settings, Some(&url), unix.clone(), ntlm.clone())?;
                 continue;
             }
 
@@ -594,6 +606,13 @@ impl HttpEngine {
             None => ResponseBody::Memory(Bytes::from(mem)),
         })
     }
+}
+
+/// `domain\user` when `req` uses NTLM auth. The handshake's requests (the
+/// retries answering its challenge) then share the client and, as each
+/// response is read to the end, the pooled HTTP/1.1 connection.
+fn ntlm_user(req: &PreparedRequest) -> Option<String> {
+    (req.auth.kind == AuthType::Ntlm).then(|| format!("{}\\{}", req.auth.get("domain"), req.auth.get("username")))
 }
 
 /// The client certificate of `config` for `url`'s host and port.
@@ -854,6 +873,7 @@ mod tests {
             client_cert,
             cookies: false,
             unix_socket: None,
+            ntlm_user: None,
         };
         // A request picks b.test's certificate, then the settings lose it
         // before its client is built.
@@ -880,6 +900,7 @@ mod tests {
             client_cert: None,
             cookies: false,
             unix_socket: Some(PathBuf::from(r"\\.\pipe\x")),
+            ntlm_user: None,
         };
         let err = build_client(&cfg, &key, &Arc::new(CookieJar::new())).unwrap_err();
         assert!(err.message.contains("only available on Windows"), "{err}");

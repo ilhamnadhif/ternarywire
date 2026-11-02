@@ -378,6 +378,7 @@ async fn unix_socket_requests() {
 struct TlsListener {
     tcp: tokio::net::TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,
+    accepted: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl axum::serve::Listener for TlsListener {
@@ -388,6 +389,7 @@ impl axum::serve::Listener for TlsListener {
         loop {
             let Ok((tcp, addr)) = self.tcp.accept().await else { continue };
             if let Ok(tls) = self.acceptor.accept(tcp).await {
+                self.accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 return (tls, addr);
             }
         }
@@ -399,8 +401,12 @@ impl axum::serve::Listener for TlsListener {
 }
 
 /// HTTPS echo server for `localhost` speaking HTTP/1.1 and HTTP/2 (ALPN).
-/// Returns its port, certificate DER and an engine trusting it.
-async fn spawn_tls(dir: &tempfile::TempDir, proxy: Option<String>) -> (u16, Vec<u8>, HttpEngine) {
+/// Returns its port, certificate DER, an engine trusting it and the number
+/// of connections it accepted.
+async fn spawn_tls(
+    dir: &tempfile::TempDir,
+    proxy: Option<String>,
+) -> (u16, Vec<u8>, HttpEngine, Arc<std::sync::atomic::AtomicUsize>) {
     ternarywire_http::tls::install_provider();
     let ck = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der());
@@ -413,7 +419,9 @@ async fn spawn_tls(dir: &tempfile::TempDir, proxy: Option<String>) -> (u16, Vec<
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp.local_addr().unwrap().port();
-    let listener = TlsListener { tcp, acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(config)) };
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TlsListener { tcp, acceptor, accepted: accepted.clone() };
     let app = Router::new().route("/echo", any(echo)).route(
         "/ntlm",
         get(|| async { (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "NTLM TlRMTVNTUAACAAAA")]) }),
@@ -426,13 +434,13 @@ async fn spawn_tls(dir: &tempfile::TempDir, proxy: Option<String>) -> (u16, Vec<
         CertificateSettings { ca_path: ca.display().to_string(), ca_enabled: true, ..Default::default() };
     let proxy = proxy.map(|url| ProxySettings { custom_url: url, custom_enabled: true, ..Default::default() });
     let cfg = EngineConfig { certificates, proxy: proxy.unwrap_or_default(), ..Default::default() };
-    (port, ck.cert.der().to_vec(), HttpEngine::new(cfg, Arc::new(CookieJar::new())))
+    (port, ck.cert.der().to_vec(), HttpEngine::new(cfg, Arc::new(CookieJar::new())), accepted)
 }
 
 #[tokio::test]
 async fn https_responses_carry_the_server_certificate() {
     let dir = tempfile::tempdir().unwrap();
-    let (port, cert, e) = spawn_tls(&dir, None).await;
+    let (port, cert, e, _) = spawn_tls(&dir, None).await;
     for (version, wire) in
         [(HttpVersion::Auto, "HTTP/2"), (HttpVersion::Http1, "HTTP/1.1"), (HttpVersion::Http2, "HTTP/2")]
     {
@@ -449,6 +457,32 @@ async fn https_responses_carry_the_server_certificate() {
     let base = spawn().await;
     let out = e.send(&req("GET", format!("{base}/redirect/1")), &SendOptions::default()).await.unwrap();
     assert_eq!((out.response.status, out.peer_certificate), (200, None));
+}
+
+#[tokio::test]
+async fn ntlm_requests_get_http1_and_a_connection_pool_per_user() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = tempfile::tempdir().unwrap();
+    let (port, _, e, accepted) = spawn_tls(&dir, None).await;
+    let url = format!("https://localhost:{port}/echo");
+    let ntlm = |user: &str, version| {
+        let mut r = req("GET", url.clone());
+        r.auth = ternarywire_core::Auth::new(ternarywire_core::AuthType::Ntlm).with("username", user);
+        r.settings.http_version = version;
+        r
+    };
+    // NTLM authenticates the connection: the handshake stays on one
+    // HTTP/1.1 connection, though the server offers HTTP/2.
+    for version in [HttpVersion::Auto, HttpVersion::Auto, HttpVersion::Http2] {
+        let out = e.send(&ntlm("alice", version), &SendOptions::default()).await.unwrap();
+        assert_eq!((out.response.status, out.response.version.as_str()), (200, "HTTP/1.1"), "{version:?}");
+    }
+    assert_eq!(accepted.load(SeqCst), 1);
+    // Other requests, and other users, never get that connection.
+    let out = e.send(&req("GET", url.clone()), &SendOptions::default()).await.unwrap();
+    assert_eq!(out.response.version, "HTTP/2");
+    e.send(&ntlm("bob", HttpVersion::Auto), &SendOptions::default()).await.unwrap();
+    assert_eq!(accepted.load(SeqCst), 3);
 }
 
 /// HTTP CONNECT proxy: tunnels to the requested `host:port`, counting tunnels.
@@ -486,7 +520,7 @@ async fn connect_proxy() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
 async fn https_through_a_connect_proxy() {
     let (proxy, tunnels) = connect_proxy().await;
     let dir = tempfile::tempdir().unwrap();
-    let (port, _, e) = spawn_tls(&dir, Some(proxy)).await;
+    let (port, _, e, _) = spawn_tls(&dir, Some(proxy)).await;
     let out = e.send(&req("GET", format!("https://localhost:{port}/echo")), &SendOptions::default()).await.unwrap();
     assert_eq!(out.response.status, 200);
     assert_eq!(tunnels.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -499,7 +533,7 @@ async fn https_through_a_connect_proxy() {
 async fn ntlm_challenges_through_a_proxy_carry_the_server_certificate() {
     let (proxy, tunnels) = connect_proxy().await;
     let dir = tempfile::tempdir().unwrap();
-    let (port, cert, e) = spawn_tls(&dir, Some(proxy)).await;
+    let (port, cert, e, _) = spawn_tls(&dir, Some(proxy)).await;
     let out = e.send(&req("GET", format!("https://localhost:{port}/ntlm")), &SendOptions::default()).await.unwrap();
     assert_eq!(out.response.status, 401);
     // Read over a TLS handshake of its own through the same proxy, for the
