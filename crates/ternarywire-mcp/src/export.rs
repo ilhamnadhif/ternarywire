@@ -1,5 +1,6 @@
 //! Server config snippets for other MCP hosts, and argument templates.
 
+use base64::Engine;
 use serde_json::{Map, Value, json};
 use ternarywire_core::auth::AuthType;
 use ternarywire_core::model::KeyValue;
@@ -18,18 +19,39 @@ fn object(pairs: &[(String, String)]) -> Map<String, Value> {
     pairs.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()
 }
 
-/// Header from the request auth (Bearer or API key in a header), if any.
+/// Header from the request auth (Bearer, Basic or API key in a header), if any.
 fn auth_header(req: &McpRequest) -> Option<(String, String)> {
     match req.auth.kind {
         AuthType::Bearer => {
             let token = req.auth.get("token").trim();
             (!token.is_empty()).then(|| ("Authorization".to_string(), format!("Bearer {token}")))
         }
+        // Encoded like `McpConfig::from_request` does.
+        AuthType::Basic => {
+            let (user, pass) = (req.auth.get("username"), req.auth.get("password"));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            (!user.is_empty() || !pass.is_empty()).then(|| ("Authorization".to_string(), format!("Basic {encoded}")))
+        }
         AuthType::ApiKey if req.auth.get("in") != "query" => {
             let key = req.auth.get("key").trim();
             (!key.is_empty()).then(|| (key.to_string(), req.auth.get("value").to_string()))
         }
         _ => None,
+    }
+}
+
+/// `url` with the request's API key appended when it goes in the query.
+fn url_with_api_key(url: &str, req: &McpRequest) -> String {
+    let key = req.auth.get("key").trim();
+    if req.auth.kind != AuthType::ApiKey || req.auth.get("in") != "query" || key.is_empty() {
+        return url.to_string();
+    }
+    let pair = url::form_urlencoded::Serializer::new(String::new()).append_pair(key, req.auth.get("value")).finish();
+    let (base, fragment) = url.split_once('#').map_or((url, None), |(b, f)| (b, Some(f)));
+    let sep = if base.contains('?') { '&' } else { '?' };
+    match fragment {
+        Some(f) => format!("{base}{sep}{pair}#{f}"),
+        None => format!("{base}{sep}{pair}"),
     }
 }
 
@@ -41,9 +63,10 @@ fn env_name(header: &str) -> String {
 }
 
 /// JSON snippet registering this server in another MCP host. Values are
-/// exported as stored (variables such as `{{token}}` are not resolved), except
-/// that the VS Code style asks for a Bearer token through a password input
-/// instead of embedding it. An explicit HTTP+SSE transport exports as
+/// exported as stored (variables such as `{{token}}` are not resolved, and
+/// Basic credentials are base64-encoded as they are), except that the VS
+/// Code style asks for a Bearer token through a password input instead of
+/// embedding it. An API key sent in the query is appended to the URL. An explicit HTTP+SSE transport exports as
 /// `"type": "sse"`; OAuth sign-in is left to the target host, except that a
 /// pre-registered client id (and its callback port) is passed to
 /// `mcp-remote` for Claude Desktop. Client secrets are never exported.
@@ -68,6 +91,7 @@ pub fn export_config(name: &str, req: &McpRequest, style: ExportStyle) -> Value 
             s
         }
         McpTransport::Http { url, headers } => {
+            let url = url_with_api_key(url.trim(), req);
             let mut headers = pairs(headers);
             let has_auth = |h: &[(String, String)], k: &str| h.iter().any(|(n, _)| n.eq_ignore_ascii_case(k));
             if let Some((k, v)) = auth_header(req)
@@ -91,7 +115,7 @@ pub fn export_config(name: &str, req: &McpRequest, style: ExportStyle) -> Value 
                 ExportStyle::ClaudeDesktop => {
                     // Claude Desktop's config file only launches local
                     // processes; `mcp-remote` bridges stdio to HTTP.
-                    let mut args = vec![json!("-y"), json!("mcp-remote"), json!(url.trim())];
+                    let mut args = vec![json!("-y"), json!("mcp-remote"), json!(url)];
                     let oauth_client = (req.auth.kind == AuthType::OAuth2)
                         .then(|| req.auth.get("clientId").trim())
                         .filter(|c| !c.is_empty());
@@ -127,7 +151,7 @@ pub fn export_config(name: &str, req: &McpRequest, style: ExportStyle) -> Value 
                 ExportStyle::McpServers | ExportStyle::VsCode => {
                     let kind = if req.http_transport == McpHttpTransport::Sse { "sse" } else { "http" };
                     s.insert("type".into(), json!(kind));
-                    s.insert("url".into(), json!(url.trim()));
+                    s.insert("url".into(), json!(url));
                     if !headers.is_empty() {
                         s.insert("headers".into(), Value::Object(object(&headers)));
                     }
@@ -362,5 +386,31 @@ mod tests {
             ])
         );
         assert!(!cd.to_string().contains("never-exported"));
+    }
+
+    #[test]
+    fn basic_auth_and_query_api_keys_are_exported() {
+        let remote = |auth: Auth| McpRequest {
+            transport: McpTransport::Http { url: "https://api.example.com/mcp?v=1#top".into(), headers: vec![] },
+            auth,
+            ..Default::default()
+        };
+        let basic = export_config("b", &remote(Auth::basic("user", "pa ss")), ExportStyle::McpServers);
+        assert_eq!(basic["mcpServers"]["b"]["headers"]["Authorization"], json!("Basic dXNlcjpwYSBzcw=="));
+        // The same header the client sends.
+        let cfg = crate::McpConfig::from_request(&remote(Auth::basic("user", "pa ss")), &|s| s.to_string());
+        let crate::Transport::Http { headers, .. } = cfg.transport else { panic!() };
+        assert_eq!(headers, vec![("Authorization".to_string(), "Basic dXNlcjpwYSBzcw==".to_string())]);
+
+        let query = remote(Auth::api_key("api key", "s&cret", true));
+        let v = export_config("q", &query, ExportStyle::McpServers);
+        assert_eq!(v["mcpServers"]["q"]["url"], json!("https://api.example.com/mcp?v=1&api+key=s%26cret#top"));
+        assert!(v["mcpServers"]["q"].get("headers").is_none());
+        let cd = export_config("q", &query, ExportStyle::ClaudeDesktop);
+        assert_eq!(cd["mcpServers"]["q"]["args"][2], json!("https://api.example.com/mcp?v=1&api+key=s%26cret#top"));
+        // A header API key stays a header.
+        let header = export_config("h", &remote(Auth::api_key("X-Key", "k", false)), ExportStyle::McpServers);
+        assert_eq!(header["mcpServers"]["h"]["url"], json!("https://api.example.com/mcp?v=1#top"));
+        assert_eq!(header["mcpServers"]["h"]["headers"]["X-Key"], json!("k"));
     }
 }
