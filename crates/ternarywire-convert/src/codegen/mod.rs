@@ -410,13 +410,17 @@ pub(crate) fn ps(s: &str) -> String {
     out
 }
 
+/// A field or file name for a quoted `Content-Disposition` parameter, as
+/// browsers (and curl) write it: `"`, CR and LF are percent-encoded.
+pub(crate) fn form_quote(s: &str) -> String {
+    s.replace('"', "%22").replace('\r', "%0D").replace('\n', "%0A")
+}
+
 /// Manual multipart body as text (for formats without a multipart API).
 /// File contents are represented by a placeholder line.
 pub(crate) fn multipart_text(parts: &[MultipartPart]) -> String {
     use ternarywire_core::prepared::MultipartValue;
-    // Quoted names as browsers (and curl) write them: `"`, CR and LF are
-    // percent-encoded.
-    let quoted = |s: &str| s.replace('"', "%22").replace('\r', "%0D").replace('\n', "%0A");
+    let quoted = form_quote;
     let mut s = String::new();
     for p in parts {
         s.push_str(&format!("--{BOUNDARY}\r\n"));

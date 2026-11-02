@@ -6,7 +6,8 @@ use ternarywire_core::model::HttpVersion;
 use ternarywire_core::prepared::MultipartValue;
 
 use super::{
-    BOUNDARY, BodyView, Unicode, View, dq, file_name, multipart_text, path_str, ps, sh, sh_word, sq_backslash,
+    BOUNDARY, BodyView, Unicode, View, dq, file_name, form_quote, multipart_text, path_str, ps, sh, sh_word,
+    sq_backslash,
 };
 
 fn js(s: &str) -> String {
@@ -608,6 +609,11 @@ fn go_str(s: &str) -> String {
     dq(s, Unicode::Json, false)
 }
 
+/// A quoted `Content-Disposition` parameter as Go's `CreateFormFile` writes it.
+fn go_quote(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub fn go(v: &View) -> String {
     let mut imports = vec!["fmt", "io", "net/http"];
     let mut body = String::new();
@@ -652,8 +658,8 @@ pub fn go(v: &View) -> String {
                                 writeln!(body, "\th{n} := make(textproto.MIMEHeader)").ok();
                                 let disp = format!(
                                     "form-data; name=\"{}\"; filename=\"{}\"",
-                                    part.name.replace('"', "\\\""),
-                                    file_name(f).replace('"', "\\\"")
+                                    go_quote(&part.name),
+                                    go_quote(&file_name(f))
                                 );
                                 writeln!(body, "\th{n}.Set(\"Content-Disposition\", {})", go_str(&disp)).ok();
                                 writeln!(body, "\th{n}.Set(\"Content-Type\", {})", go_str(ct)).ok();
@@ -955,7 +961,8 @@ pub fn java_httpclient(v: &View) -> String {
             for part in parts.iter() {
                 match &part.value {
                     MultipartValue::Text(t) => {
-                        let mut head = format!("Content-Disposition: form-data; name=\"{}\"\r\n", part.name);
+                        let mut head =
+                            format!("Content-Disposition: form-data; name=\"{}\"\r\n", form_quote(&part.name));
                         if let Some(ct) = &part.content_type {
                             write!(head, "Content-Type: {ct}\r\n").ok();
                         }
@@ -970,8 +977,8 @@ pub fn java_httpclient(v: &View) -> String {
                     MultipartValue::File(f) => {
                         let head = format!(
                             "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
-                            part.name,
-                            file_name(f),
+                            form_quote(&part.name),
+                            form_quote(&file_name(f)),
                             part.content_type.as_deref().unwrap_or("application/octet-stream")
                         );
                         writeln!(
@@ -1313,7 +1320,8 @@ pub fn swift(v: &View) -> String {
                 append(&mut out, &format!("--{BOUNDARY}\r\n"));
                 match &part.value {
                     MultipartValue::Text(t) => {
-                        let mut head = format!("Content-Disposition: form-data; name=\"{}\"\r\n", part.name);
+                        let mut head =
+                            format!("Content-Disposition: form-data; name=\"{}\"\r\n", form_quote(&part.name));
                         if let Some(ct) = &part.content_type {
                             write!(head, "Content-Type: {ct}\r\n").ok();
                         }
@@ -1326,8 +1334,8 @@ pub fn swift(v: &View) -> String {
                             &mut out,
                             &format!(
                                 "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
-                                part.name,
-                                file_name(f),
+                                form_quote(&part.name),
+                                form_quote(&file_name(f)),
                                 part.content_type.as_deref().unwrap_or("application/octet-stream")
                             ),
                         );

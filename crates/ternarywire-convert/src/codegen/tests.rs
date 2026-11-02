@@ -566,3 +566,27 @@ fn rust_custom_methods_are_valid_byte_strings() {
     let code = generate(Language::Rust, &compact(&HttpRequest::new("PURGE", "https://h.test/")));
     assert!(code.contains(r#"reqwest::Method::from_bytes(b"PURGE")?"#), "{code}");
 }
+
+#[test]
+fn manual_multipart_headers_quote_names() {
+    // Java HttpClient and Swift write the part headers themselves: a `"` or a
+    // line break in a name must not end the parameter or add a header.
+    let mut r = HttpRequest::new("POST", "https://h.test/upload");
+    r.body.mode = BodyMode::FormData;
+    let mut f = FormField::file("f\"\r\nX-Injected: 1", "/tmp/a\"b.bin");
+    f.content_type = Some("application/x-a".into());
+    r.body.form_data = vec![FormField::text("t\"\r\nX-Injected: 1", "v"), f];
+    let p = compact(&r);
+    for lang in [Language::JavaHttpClient, Language::Swift] {
+        let code = generate(lang, &p);
+        assert!(code.contains(r#"name=\"t%22%0D%0AX-Injected: 1\""#), "{lang:?}\n{code}");
+        assert!(code.contains(r#"name=\"f%22%0D%0AX-Injected: 1\"; filename=\"a%22b.bin\""#), "{lang:?}\n{code}");
+    }
+    // Go quotes like its own CreateFormFile: `\` and `"` get a backslash.
+    let mut f = FormField::file("x\\y\"z", "/tmp/f.bin");
+    f.content_type = Some("application/x-a".into());
+    r.body.form_data = vec![f];
+    let code = generate(Language::Go, &compact(&r));
+    let disp = dq(r#"form-data; name="x\\y\"z"; filename="f.bin""#, Unicode::Json, false);
+    assert!(code.contains(&format!("h1.Set(\"Content-Disposition\", {disp})")), "{code}");
+}
