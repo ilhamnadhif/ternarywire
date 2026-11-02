@@ -107,7 +107,8 @@ pub struct MockConfig {
     pub network: NetworkConditions,
     /// Resolves `{{vars}}` in example URLs and response templates.
     pub variables: VariableScopes,
-    /// Answer CORS preflights and add permissive CORS headers.
+    /// Answer CORS preflights and add permissive CORS headers (credentials
+    /// only for pages on `localhost`, loopback or private addresses).
     pub cors: bool,
     /// Number of requests kept in the log ring buffer.
     pub log_capacity: usize,

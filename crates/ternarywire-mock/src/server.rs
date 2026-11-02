@@ -176,14 +176,35 @@ fn not_found() -> Response {
     )
 }
 
+/// Pages on this machine or on the local network (`localhost`, loopback and
+/// private addresses), which may read the mock's answers to requests with
+/// credentials (cookies, HTTP auth). Any other site the user happens to open
+/// only reads answers to requests without them, as with `*`.
+fn local_origin(origin: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin) else { return false };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        None => false,
+    }
+}
+
 fn add_cors(res: &mut Response, incoming: &IncomingRequest) {
     let h = res.headers_mut();
-    let origin = incoming.header("origin").and_then(|o| HeaderValue::from_str(o).ok());
+    let origin = incoming.header("origin").and_then(|o| Some((HeaderValue::from_str(o).ok()?, local_origin(o))));
     if !h.contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN) {
         match origin {
-            Some(o) => {
+            Some((o, local)) => {
                 h.insert(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, o);
-                h.insert(http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS, HeaderValue::from_static("true"));
+                // Browsers ask for credentials support in the preflight too,
+                // and send no sign of them in it: decide by the origin.
+                if local {
+                    h.insert(http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS, HeaderValue::from_static("true"));
+                }
                 h.append(http::header::VARY, HeaderValue::from_static("Origin"));
             }
             None => {

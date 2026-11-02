@@ -227,6 +227,40 @@ async fn concurrent_requests_and_clean_stop() {
     assert!(fresh.get(format!("http://{addr}/users/1")).send().await.is_err());
 }
 
+#[tokio::test]
+async fn cors_credentials_only_for_local_origins() {
+    let server = MockServer::start(collection(), config()).await.unwrap();
+    let c = client();
+    let url = format!("{}/users/1", server.url());
+    for (origin, credentials) in [
+        ("http://localhost:5173", true),
+        ("http://app.localhost:3000", true),
+        ("http://127.0.0.1:8080", true),
+        ("http://[::1]:8080", true),
+        ("http://192.168.1.20:5173", true),
+        ("https://evil.example", false),
+        ("http://8.8.8.8", false),
+        ("null", false),
+    ] {
+        let res = c.get(&url).header("Origin", origin).send().await.unwrap();
+        assert_eq!(res.headers()["access-control-allow-origin"], origin);
+        assert_eq!(res.headers().contains_key("access-control-allow-credentials"), credentials, "{origin}");
+        let res = c
+            .request(reqwest::Method::OPTIONS, &url)
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 204);
+        assert_eq!(res.headers().get("access-control-allow-credentials").is_some(), credentials, "{origin}");
+    }
+    assert_eq!(
+        c.get(&url).header("Origin", "http://localhost:5173").send().await.unwrap().headers()["access-control-allow-credentials"],
+        "true"
+    );
+}
+
 /// Sends `head` and then `body` on a raw connection and returns the answer.
 async fn raw_request(addr: std::net::SocketAddr, head: String, body: Vec<Vec<u8>>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
