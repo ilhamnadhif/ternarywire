@@ -813,3 +813,32 @@ async fn scripts_see_the_cookies_of_the_resolved_url() {
     let logs: Vec<&str> = exec.console.iter().map(|l| l.message.as_str()).collect();
     assert_eq!(logs, ["cookies sid"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn endless_set_next_request_loops_end_with_a_warning() {
+    let mut c = Collection::new("Loop");
+    let mut a = req("A", "GET", "http://127.0.0.1:9/never");
+    a.scripts.pre_request = "skip\nnext A".into();
+    c.items.push(a.into());
+    let mut warnings = Vec::new();
+    let mut finished = 0;
+    let summary = run_collection(
+        &services(),
+        &c,
+        &mut VariableScopes::default(),
+        RunOptions::default(),
+        &mut |e| {
+            if let RunEvent::Execution(exec) = e {
+                finished += 1;
+                warnings.extend(exec.console.iter().filter(|l| l.phase == "runner").map(|l| l.message.clone()));
+            }
+        },
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(finished, 10_000);
+    assert_eq!(summary.executed, 10_000);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("stopped after 10000 requests"), "{warnings:?}");
+}

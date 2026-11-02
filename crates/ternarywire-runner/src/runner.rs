@@ -337,7 +337,7 @@ pub async fn run_collection(
                 iteration_count: iterations,
                 base_dir: opts.base_dir.as_deref(),
             };
-            let exec = if opts.simulate_failure_rate > 0.0 && rand::random::<f32>() < opts.simulate_failure_rate {
+            let mut exec = if opts.simulate_failure_rate > 0.0 && rand::random::<f32>() < opts.simulate_failure_rate {
                 simulated_failure(item)
             } else {
                 execute_keeping_locals(services, input, vars, cancel).await
@@ -345,10 +345,27 @@ pub async fn run_collection(
             if matches!(&exec.error, Some(e) if e.kind == ternarywire_http::HttpErrorKind::Cancelled) {
                 summary.cancelled = true;
             }
+            let next = match &exec.next_request {
+                None => Some(i + 1).filter(|n| *n < list.len()),
+                Some(NextRequest::Stop) => None,
+                Some(NextRequest::Named(name)) => next_position(&list, name),
+            };
+            if steps + 1 >= max_steps && next.is_some() {
+                // Say why the iteration ends here instead of silently.
+                exec.console.push(ConsoleLine {
+                    kind: crate::pipeline::ConsoleKind::Warn,
+                    message: format!(
+                        "iteration {} stopped after {max_steps} requests: pm.execution.setNextRequest() keeps looping",
+                        iteration + 1
+                    ),
+                    source: item.name.clone(),
+                    phase: "runner".into(),
+                    at_ms: chrono::Utc::now().timestamp_millis(),
+                });
+            }
             let result = RequestResult::from_execution(&exec, iteration, steps, path.clone(), &opts);
             summary.add(&result);
             let failed = result.failed();
-            let next = exec.next_request.clone();
             sink(RunEvent::Execution(Box::new(exec)));
             sink(RunEvent::RequestFinished(Box::new(result)));
             if summary.cancelled {
@@ -363,12 +380,8 @@ pub async fn run_collection(
                 break;
             }
             i = match next {
-                None => i + 1,
-                Some(NextRequest::Stop) => break,
-                Some(NextRequest::Named(name)) => match next_position(&list, &name) {
-                    Some(pos) => pos,
-                    None => break,
-                },
+                Some(pos) => pos,
+                None => break,
             };
             if opts.delay_ms > 0 && i < list.len() {
                 tokio::select! {
