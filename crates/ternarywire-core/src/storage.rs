@@ -216,14 +216,19 @@ fn example_owner(request_id: &str, example_id: &str) -> String {
 
 /// Where each variable's secret and current values are kept: its name, with
 /// `#2`, `#3`... for later variables of the same name (a disabled and an
-/// enabled `token`, say), so that duplicates keep their own values.
+/// enabled `token`, say), so that duplicates keep their own values. A number
+/// taken by a variable actually named so (`token#2`) is skipped.
 fn var_slots(vars: &[Variable]) -> Vec<String> {
+    let mut used: HashSet<String> = vars.iter().map(|v| v.key.clone()).collect();
     let mut seen: HashMap<&str, usize> = HashMap::new();
     vars.iter()
         .map(|v| {
             let n = seen.entry(v.key.as_str()).or_default();
             *n += 1;
-            if *n == 1 { v.key.clone() } else { format!("{}#{n}", v.key) }
+            if *n == 1 {
+                return v.key.clone();
+            }
+            (*n..).map(|k| format!("{}#{k}", v.key)).find(|slot| used.insert(slot.clone())).expect("a free slot")
         })
         .collect()
 }
@@ -1642,6 +1647,28 @@ mod tests {
         assert!(!text.contains("dev-secret") && !text.contains("prod-secret"));
         let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
         assert_eq!(ws.environments[0], env);
+    }
+
+    #[test]
+    fn a_variable_named_like_a_duplicate_slot_keeps_its_own_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::memory();
+        let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+        let mut env = Environment::new("Env");
+        for (key, value) in [("token#2", "literal"), ("token", "first"), ("token", "second")] {
+            let mut v = Variable::secret(key, format!("{value}-secret"));
+            v.current = Some(format!("{value}-current"));
+            let mut plain = Variable::new(format!("host{}", &key[5..]), "h");
+            plain.current = Some(format!("{value}-host"));
+            env.variables.extend([v, plain]);
+        }
+        store.save_environment(&env, &secrets).unwrap();
+        let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ws.environments[0], env);
+        // Names without such a clash keep their slots (and stored values).
+        let plain = |k: &str| Variable::new(k, "");
+        assert_eq!(var_slots(&[plain("a"), plain("a"), plain("b"), plain("a")]), ["a", "a#2", "b", "a#3"]);
+        assert_eq!(var_slots(&[plain("a"), plain("a"), plain("a#2")]), ["a", "a#3", "a#2"]);
     }
 
     #[test]
