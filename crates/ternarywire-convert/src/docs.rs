@@ -217,15 +217,22 @@ fn only_references(s: &str) -> bool {
         && tokenize(s).iter().all(|t| t.kind == TokenKind::Variable || s[t.range.clone()].trim().is_empty())
 }
 
-/// Masks a credential value, keeping `{{references}}` and a leading scheme
-/// word (`Bearer {{token}}` stays, `Bearer abc` becomes `Bearer REDACTED`).
+/// Leading words of credential values that name an auth scheme and say
+/// nothing secret.
+const AUTH_SCHEMES: &[&str] =
+    &["basic", "bearer", "digest", "token", "negotiate", "ntlm", "hawk", "oauth", "jwt", "apikey", "mac", "ssws"];
+
+/// Masks a credential value, keeping `{{references}}` and a leading auth
+/// scheme (`Bearer {{token}}` stays, `Bearer abc` becomes `Bearer REDACTED`).
+/// Any other leading word may be part of the secret (a passphrase), so it is
+/// masked with the rest.
 pub(crate) fn mask_value(raw: &str) -> String {
     let t = raw.trim();
     if t.is_empty() {
         return raw.to_string();
     }
     let (scheme, rest) = match t.split_once(char::is_whitespace) {
-        Some((s, r)) if s.chars().all(|c| c.is_ascii_alphabetic()) => (Some(s), r.trim()),
+        Some((s, r)) if AUTH_SCHEMES.iter().any(|a| s.eq_ignore_ascii_case(a)) => (Some(s), r.trim()),
         _ => (None, t),
     };
     let rest = if only_references(rest) { rest.to_string() } else { REDACTED.to_string() };
@@ -2707,6 +2714,9 @@ mod tests {
         }
         assert_eq!(mask_value("Bearer {{token}}"), "Bearer {{token}}");
         assert_eq!(mask_value("Bearer abc"), "Bearer REDACTED");
+        assert_eq!(mask_value("token abc"), "token REDACTED");
+        // A passphrase's first word is not a scheme and must not leak.
+        assert_eq!(mask_value("correct horse battery"), "REDACTED");
         assert_eq!(mask_value(" {{a}} {{b}} "), "{{a}} {{b}}");
         assert_eq!(mask_value("x{{a}}"), "REDACTED");
         assert_eq!(mask_value(""), "");
