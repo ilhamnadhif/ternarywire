@@ -134,9 +134,23 @@ struct ClientKey {
 }
 
 pub struct HttpEngine {
-    config: RwLock<EngineConfig>,
+    config: RwLock<Arc<Snapshot>>,
     cookies: Arc<CookieJar>,
-    clients: Mutex<HashMap<ClientKey, reqwest::Client>>,
+    clients: Mutex<Clients>,
+}
+
+/// A config as `set_config` left it. A client is built from one snapshot
+/// (its certificate index points into that snapshot's list), and only
+/// cached while its generation is current.
+struct Snapshot {
+    generation: u64,
+    config: EngineConfig,
+}
+
+#[derive(Default)]
+struct Clients {
+    generation: u64,
+    map: HashMap<ClientKey, reqwest::Client>,
 }
 
 impl HttpEngine {
@@ -153,7 +167,8 @@ impl HttpEngine {
             }
             crate::tls::read_native_roots();
         });
-        HttpEngine { config: RwLock::new(with_proxy_password(config)), cookies, clients: Mutex::new(HashMap::new()) }
+        let config = Arc::new(Snapshot { generation: 0, config: with_proxy_password(config) });
+        HttpEngine { config: RwLock::new(config), cookies, clients: Mutex::new(Clients::default()) }
     }
 
     pub fn cookies(&self) -> &Arc<CookieJar> {
@@ -161,13 +176,21 @@ impl HttpEngine {
     }
 
     pub fn config(&self) -> EngineConfig {
+        self.config.read().config.clone()
+    }
+
+    fn snapshot(&self) -> Arc<Snapshot> {
         self.config.read().clone()
     }
 
     /// Replaces proxy/certificate settings; cached clients are rebuilt lazily.
     pub fn set_config(&self, config: EngineConfig) {
-        *self.config.write() = with_proxy_password(config);
-        self.clients.lock().clear();
+        let config = with_proxy_password(config);
+        let mut current = self.config.write();
+        let generation = current.generation + 1;
+        *current = Arc::new(Snapshot { generation, config });
+        // Still under the config lock: no client of the old config gets in.
+        *self.clients.lock() = Clients { generation, map: HashMap::new() };
     }
 
     /// A client with default settings and no cookie jar, for auxiliary calls.
@@ -180,7 +203,7 @@ impl HttpEngine {
             cookies: false,
             unix_socket: None,
         };
-        self.client(key)
+        self.client(&self.snapshot(), key)
     }
 
     /// [`HttpEngine::default_client`] presenting the client certificate
@@ -188,29 +211,15 @@ impl HttpEngine {
     /// auxiliary calls to one endpoint such as OAuth 2.0 token requests
     /// (mutual TLS, RFC 8705).
     pub fn client_for_url(&self, url: &str) -> Result<reqwest::Client, HttpError> {
+        let snapshot = self.snapshot();
         let key = ClientKey {
             verify_ssl: true,
             version: HttpVersion::Auto,
-            client_cert: self.client_cert_for(Url::parse(url.trim()).ok().as_ref()),
+            client_cert: client_cert_for(&snapshot.config, Url::parse(url.trim()).ok().as_ref()),
             cookies: false,
             unix_socket: None,
         };
-        self.client(key)
-    }
-
-    /// The client certificate configured for `url`'s host and port.
-    fn client_cert_for(&self, url: Option<&Url>) -> Option<usize> {
-        let url = url?;
-        // Client certificates only matter for TLS (and loading one may need
-        // its passphrase), so plain http:// requests never select one.
-        if url.scheme() != "https" {
-            return None;
-        }
-        crate::certs::find_client_certificate_index(
-            &self.config.read().certificates,
-            url.host_str()?,
-            url.port_or_known_default(),
-        )
+        self.client(&snapshot, key)
     }
 
     /// A client honoring the given request settings (TLS verification, HTTP
@@ -231,21 +240,34 @@ impl HttpEngine {
         url: Option<&Url>,
         unix_socket: Option<PathBuf>,
     ) -> Result<reqwest::Client, HttpError> {
-        self.client(ClientKey {
+        let snapshot = self.snapshot();
+        let key = ClientKey {
             verify_ssl: settings.verify_ssl,
             version: settings.http_version,
-            client_cert: self.client_cert_for(url),
+            client_cert: client_cert_for(&snapshot.config, url),
             cookies: !settings.disable_cookies,
             unix_socket,
-        })
+        };
+        self.client(&snapshot, key)
     }
 
-    fn client(&self, key: ClientKey) -> Result<reqwest::Client, HttpError> {
-        if let Some(c) = self.clients.lock().get(&key) {
-            return Ok(c.clone());
+    /// The cached client for `key`, or one built from `snapshot` (which
+    /// `key`'s certificate index refers to).
+    fn client(&self, snapshot: &Snapshot, key: ClientKey) -> Result<reqwest::Client, HttpError> {
+        {
+            let clients = self.clients.lock();
+            if clients.generation == snapshot.generation
+                && let Some(c) = clients.map.get(&key)
+            {
+                return Ok(c.clone());
+            }
         }
-        let client = build_client(&self.config.read(), &key, &self.cookies)?;
-        self.clients.lock().insert(key, client.clone());
+        let client = build_client(&snapshot.config, &key, &self.cookies)?;
+        let mut clients = self.clients.lock();
+        // A `set_config` while it was built: it is not cached for the new settings.
+        if clients.generation == snapshot.generation {
+            clients.map.insert(key, client.clone());
+        }
         Ok(client)
     }
 
@@ -380,7 +402,7 @@ impl HttpEngine {
                     // The proxy a PAC script chose cannot be reached: retry
                     // with its next choice, like browsers (nothing was sent).
                     if proxy_failovers < MAX_PROXY_FAILOVERS && unix.is_none() && crate::error::is_unreachable(&e) {
-                        let proxy = self.config.read().proxy.clone();
+                        let proxy = self.config.read().config.proxy.clone();
                         if crate::proxy::skip_unreachable_proxy(&proxy, &url) {
                             proxy_failovers += 1;
                             continue;
@@ -497,7 +519,7 @@ impl HttpEngine {
         let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']').to_string();
         let port = url.port_or_known_default()?;
         let (proxy, certificates, secrets) = {
-            let c = self.config.read();
+            let c = &self.config.read().config;
             (c.proxy.clone(), c.certificates.clone(), c.secret_resolver.clone())
         };
         let via = crate::proxy::ProxyResolver::new(&proxy).ok()?.proxy_for(&host, port, true)?;
@@ -525,7 +547,7 @@ impl HttpEngine {
         timeout_ms: Option<u128>,
     ) -> Result<ResponseBody, HttpError> {
         let (limit, temp_dir) = {
-            let c = self.config.read();
+            let c = &self.config.read().config;
             (c.max_body_in_memory, c.temp_dir.clone())
         };
         let total = resp.content_length();
@@ -570,6 +592,17 @@ impl HttpEngine {
             None => ResponseBody::Memory(Bytes::from(mem)),
         })
     }
+}
+
+/// The client certificate of `config` for `url`'s host and port.
+fn client_cert_for(config: &EngineConfig, url: Option<&Url>) -> Option<usize> {
+    let url = url?;
+    // Client certificates only matter for TLS (and loading one may need
+    // its passphrase), so plain http:// requests never select one.
+    if url.scheme() != "https" {
+        return None;
+    }
+    crate::certs::find_client_certificate_index(&config.certificates, url.host_str()?, url.port_or_known_default())
 }
 
 /// Whether a 401 answer carries an NTLM or Negotiate challenge with a token
@@ -799,6 +832,40 @@ mod tests {
         assert_eq!(named_pipe_path(Path::new("//./pipe/a")).as_deref(), Some(r"\\.\pipe\a"));
         assert_eq!(named_pipe_path(Path::new("/var/run/docker.sock")), None);
         assert_eq!(named_pipe_path(Path::new(r"\\.\pipe\")), None);
+    }
+
+    #[test]
+    fn clients_are_built_from_the_config_their_key_came_from() {
+        let cert = |host: &str| ternarywire_core::settings::ClientCertificate {
+            host: host.into(),
+            cert_path: "/nonexistent/client.pem".into(),
+            key_path: "/nonexistent/client.key".into(),
+            enabled: true,
+            ..Default::default()
+        };
+        let mut cfg = EngineConfig::default();
+        cfg.certificates.client_certs = vec![cert("a.test"), cert("b.test")];
+        let e = HttpEngine::new(cfg, Arc::new(CookieJar::new()));
+        let key = |client_cert| ClientKey {
+            verify_ssl: true,
+            version: HttpVersion::Auto,
+            client_cert,
+            cookies: false,
+            unix_socket: None,
+        };
+        // A request picks b.test's certificate, then the settings lose it
+        // before its client is built.
+        let old = e.snapshot();
+        let index = client_cert_for(&old.config, Some(&Url::parse("https://b.test/").unwrap()));
+        assert_eq!(index, Some(1));
+        e.set_config(EngineConfig::default());
+        // The index still refers to the old list (whose files do not exist).
+        assert_eq!(e.client(&old, key(index)).unwrap_err().kind, HttpErrorKind::Certificate);
+        // A client of the old settings is not cached for the new ones.
+        e.client(&old, key(None)).unwrap();
+        assert!(e.clients.lock().map.is_empty());
+        e.client(&e.snapshot(), key(None)).unwrap();
+        assert_eq!(e.clients.lock().map.len(), 1);
     }
 
     #[cfg(not(windows))]
