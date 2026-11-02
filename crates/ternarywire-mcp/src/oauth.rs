@@ -471,17 +471,19 @@ async fn handle_redirect(mut stream: tokio::net::TcpStream, path: String, state:
     let params: HashMap<String, String> = url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
     let is_error = params.contains_key("error");
     // Only the redirect of this login counts; another one (an old tab, a
-    // forged link) gets an error page while the login keeps waiting. An
-    // error without `state` is let through: some servers leave it out of
-    // error redirects, and an error cannot smuggle in a code.
-    let ours = match params.get("state") {
-        Some(s) => **s == *state,
-        None => is_error,
-    };
+    // forged link, any local request) gets an error page while the login
+    // keeps waiting. Errors need the state too (RFC 6749 4.1.2.1), or any
+    // page could abort the login; one without it is still shown.
+    let ours = params.get("state").is_some_and(|s| **s == *state);
     if !ours && (is_error || params.contains_key("code") || params.contains_key("state")) {
-        let text = "This sign-in response does not belong to the login TernaryWire is waiting for (the state does not \
-                    match). Finish signing in in the browser window TernaryWire opened.";
-        respond(&mut stream, "400 Bad Request", &page("Unexpected sign-in response", text)).await;
+        let mut text = "This sign-in response does not belong to the login TernaryWire is waiting for (the state is \
+                        missing or does not match). Finish signing in in the browser window TernaryWire opened."
+            .to_string();
+        if let Some(error) = params.get("error") {
+            let detail = params.get("error_description").map(|d| format!(": {d}")).unwrap_or_default();
+            text.push_str(&format!(" The response reported the error \"{error}\"{detail}."));
+        }
+        respond(&mut stream, "400 Bad Request", &page("Unexpected sign-in response", &text)).await;
         return;
     }
     if !is_error && !params.contains_key("code") {

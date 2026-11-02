@@ -655,7 +655,8 @@ async fn unauthorized_without_any_metadata_suggests_a_static_credential() {
 type Pages = Arc<Mutex<Vec<(u16, String)>>>;
 
 /// A "browser" that first sends stray requests to the callback (another
-/// login's state, no state, nothing), then finishes the real login; or,
+/// login's state, no state, an error without state, nothing), then
+/// finishes the real login; or,
 /// with `bogus_code`, comes back with the right state but a code the
 /// authorization server never issued. Records every page it got.
 fn stray_browser(pages: Pages, bogus_code: bool) -> OAuthOptions {
@@ -669,6 +670,7 @@ fn stray_browser(pages: Pages, bogus_code: bool) -> OAuthOptions {
                 format!("{cb}?code=forged&state=wrong"),
                 format!("{cb}?code=forged"),
                 format!("{cb}?error=access_denied&state=wrong"),
+                format!("{cb}?error=access_denied&error_description=forged"),
                 cb.clone(),
             ];
             urls.push(if bogus_code { format!("{cb}?code=bogus&state={}", q["state"]) } else { url });
@@ -694,15 +696,16 @@ async fn stray_callback_requests_do_not_abort_the_login() {
         .await
         .expect("the real redirect still completes the login");
     let pages = pages.lock().clone();
-    assert_eq!(pages.len(), 5, "{pages:#?}");
-    for (status, body) in &pages[..3] {
+    assert_eq!(pages.len(), 6, "{pages:#?}");
+    for (status, body) in &pages[..4] {
         assert_eq!(*status, 400);
         assert!(body.contains("does not belong to the login"), "{body}");
         assert!(!body.contains("Authorization complete"), "{body}");
     }
-    assert!(pages[3].0 == 400 && pages[3].1.contains("Missing authorization code"), "{:?}", pages[3]);
-    assert_eq!(pages[4].0, 200);
-    assert!(pages[4].1.contains("Authorization complete"), "{}", pages[4].1);
+    assert!(pages[3].1.contains("access_denied") && pages[3].1.contains("forged"), "{}", pages[3].1);
+    assert!(pages[4].0 == 400 && pages[4].1.contains("Missing authorization code"), "{:?}", pages[4]);
+    assert_eq!(pages[5].0, 200);
+    assert!(pages[5].1.contains("Authorization complete"), "{}", pages[5].1);
     client.close().await;
 }
 
@@ -714,7 +717,7 @@ async fn the_callback_page_reports_a_failed_code_exchange() {
     assert!(matches!(&err, McpError::Auth(m) if m.contains("token request failed")), "{err:?}");
     // The browser is told so instead of "complete".
     for _ in 0..100 {
-        if pages.lock().len() == 5 {
+        if pages.lock().len() == 6 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
