@@ -698,12 +698,13 @@ fn patched_iterators_and_other_built_ins_do_not_reach_later_jobs() {
         "pm.variables.get('x');\n\
          const leaks = [[][Symbol.iterator](), new Map().entries(), (function* () {})(), new Uint8Array(1),\n\
            new ArrayBuffer(1), new RangeError('x'), {}].filter((o) => o.leak !== undefined || o.polluted !== undefined);\n\
-         console.log(leaks.length, typeof Map.groupBy([1], (x) => x), Promise.resolve(1) instanceof Promise);",
+         console.log(leaks.length, typeof Map.groupBy([1], (x) => x), Promise.resolve(1) instanceof Promise,\n\
+           typeof Object.getOwnPropertyDescriptor(JSON, 'parse').value);",
     );
     j.variables.environment.insert("x".into(), "1".into());
     let out = e.run(j);
     assert!(out.errors.is_empty(), "{:?}", out.errors);
-    assert_eq!(out.console[0].message, "0 object true");
+    assert_eq!(out.console[0].message, "0 object true function");
     assert_eq!(out.variables.environment.get("stolen"), None);
 }
 

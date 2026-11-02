@@ -238,10 +238,38 @@ fn host_tz_offset(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
     Ok(JsArray::from_iter(items, ctx).into())
 }
 
+/// `__mp_host_same_data(obj, names, values)`: whether every `names[i]` is
+/// still an own data property of `obj` holding `values[i]` (NaN equal to
+/// itself). Checked natively, so a getter a job put in place of a data
+/// property neither runs nor stays unnoticed when the prelude restores
+/// built-ins after the job, and without allocating a descriptor each.
+fn host_same_data(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let object = |i: usize| args.get(i).and_then(JsValue::as_object);
+    let (Some(obj), Some(names), Some(values)) = (object(0), object(1), object(2)) else {
+        return Ok(false.into());
+    };
+    let len = names.get(JsString::from("length"), ctx)?.to_length(ctx)?;
+    for i in 0..len {
+        let key = names.get(i, ctx)?.to_property_key(ctx)?;
+        let want = values.get(i, ctx)?;
+        let same = match obj.borrow().properties().get(&key) {
+            Some(d) if d.is_data_descriptor() => {
+                let nan = |v: &JsValue| v.as_number().is_some_and(f64::is_nan);
+                d.value().is_some_and(|v| v.strict_equals(&want) || (nan(v) && nan(&want)))
+            }
+            _ => false,
+        };
+        if !same {
+            return Ok(false.into());
+        }
+    }
+    Ok(true.into())
+}
+
 type HostFn = fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
 
 pub(crate) fn register(ctx: &mut Context) -> JsResult<()> {
-    let fns: [(&str, usize, HostFn); 11] = [
+    let fns: [(&str, usize, HostFn); 12] = [
         ("__mp_host_check", 0, host_check),
         ("__mp_host_body", 0, host_body),
         ("__mp_host_body_base64", 0, host_body_base64),
@@ -253,6 +281,7 @@ pub(crate) fn register(ctx: &mut Context) -> JsResult<()> {
         ("__mp_host_pkg_load", 3, crate::packages::host_pkg_load),
         ("__mp_host_tz_local", 0, host_tz_local),
         ("__mp_host_tz_offset", 2, host_tz_offset),
+        ("__mp_host_same_data", 3, host_same_data),
     ];
     for (name, len, f) in fns {
         ctx.register_global_builtin_callable(JsString::from(name), len, NativeFunction::from_fn_ptr(f))?;

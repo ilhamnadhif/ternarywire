@@ -19,10 +19,11 @@
     pkgLoad: G.__mp_host_pkg_load,
     tzLocal: G.__mp_host_tz_local,
     tzOffset: G.__mp_host_tz_offset,
+    sameData: G.__mp_host_same_data,
   };
   ['__mp_host_check', '__mp_host_body', '__mp_host_body_base64', '__mp_host_dynamic', '__mp_host_random',
     '__mp_host_send', '__mp_host_load', '__mp_host_pkg_resolve', '__mp_host_pkg_load', '__mp_host_tz_local',
-    '__mp_host_tz_offset'].forEach(function (k) { try { delete G[k]; } catch (e) { /* ignore */ } });
+    '__mp_host_tz_offset', '__mp_host_same_data'].forEach(function (k) { try { delete G[k]; } catch (e) { /* ignore */ } });
 
   // Captured before any user code runs, so scripts that patch built-ins
   // cannot break the sandbox bookkeeping.
@@ -2940,19 +2941,10 @@
     const o = entry.o;
     if (getProto(o) !== entry.proto || isExtensible(o) !== entry.ext) return true;
     if (ownKeys(o).length !== entry.names.length) return true;
-    const dataNames = entry.dataNames;
-    const dataValues = entry.dataValues;
-    for (let i = 0; i < dataNames.length; i++) {
-      // Through the descriptor: reading `o[name]` would run a getter the job
-      // put there, which could patch objects already restored.
-      const d = getDesc(o, dataNames[i]);
-      if (!d) return true;
-      plainDesc(d);
-      if (d.get !== undefined || d.set !== undefined) return true;
-      const v = d.value;
-      // `!==`, except that NaN (`Number.NaN`, `globalThis.NaN`) equals itself.
-      if (v !== dataValues[i] && (v === v || dataValues[i] === dataValues[i])) return true; // eslint-disable-line no-self-compare
-    }
+    // Natively: reading `o[name]` would run a getter the job put in place of
+    // a data property (which could patch objects already restored), and
+    // would not notice it if it returned the old value.
+    if (!host.sameData(o, entry.dataNames, entry.dataValues)) return true;
     const accessors = entry.accessors;
     for (let i = 0; i < accessors.length; i++) {
       const d = entry.descs[accessors[i]];
