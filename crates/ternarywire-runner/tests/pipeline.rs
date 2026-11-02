@@ -12,9 +12,11 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use ternarywire_core::auth::Auth;
-use ternarywire_core::model::{Collection, Folder, HttpRequest, Item, KeyValue, RequestItem};
+use ternarywire_core::model::{
+    Body, BodyMode, Collection, Folder, FormField, HttpRequest, Item, KeyValue, RequestItem,
+};
 use ternarywire_core::script::{
-    ConsoleEntry, LogLevel, NextRequest, ScriptEngine, ScriptError, ScriptJob, ScriptOutcome, TestResult,
+    ConsoleEntry, LogLevel, NextRequest, ScriptEngine, ScriptError, ScriptJob, ScriptOutcome, ScriptRequest, TestResult,
 };
 use ternarywire_core::settings::RequestDefaults;
 use ternarywire_core::tokens::MemoryTokenStore;
@@ -25,7 +27,8 @@ use ternarywire_runner::runner::RunEvent;
 use ternarywire_runner::{ExecuteInput, RunOptions, Services, execute, run_collection};
 
 /// Script lines: `env.set k v`, `col.set k v`, `local.set k v`, `header.add k v`,
-/// `capture k <json field>`, `test.status N`, `next NAME|null`, `skip`, `log MSG`, `throw MSG`.
+/// `capture k <json field>`, `test.status N`, `next NAME|null`, `skip`, `log MSG`, `throw MSG`,
+/// `body.file PATH`, `form.file KEY PATH`, `send URL`, `send.file URL PATH`.
 struct DslEngine;
 
 impl ScriptEngine for DslEngine {
@@ -75,6 +78,32 @@ impl ScriptEngine for DslEngine {
                     ["throw", rest @ ..] => {
                         out.errors.push(ScriptError { location: s.location.clone(), message: rest.join(" ") })
                     }
+                    ["body.file", path] => {
+                        out.request.body =
+                            Body { mode: BodyMode::Binary, binary_path: path.to_string(), ..Default::default() }
+                    }
+                    ["form.file", key, path] => {
+                        out.request.body = Body {
+                            mode: BodyMode::FormData,
+                            form_data: vec![FormField::file(*key, *path)],
+                            ..Default::default()
+                        }
+                    }
+                    ["send", url] | ["send.file", url, ..] => {
+                        let body = match parts.get(2) {
+                            Some(path) => {
+                                Body { mode: BodyMode::Binary, binary_path: path.to_string(), ..Default::default() }
+                            }
+                            None => Body::default(),
+                        };
+                        let request =
+                            ScriptRequest { method: "POST".into(), url: url.to_string(), body, ..Default::default() };
+                        let message = match job.http.as_ref().unwrap().send(request, &job.variables) {
+                            Ok(r) => format!("sent {}", r.code),
+                            Err(e) => format!("error {e}"),
+                        };
+                        out.console.push(ConsoleEntry { level: LogLevel::Log, message });
+                    }
                     other => panic!("unknown dsl line {other:?}"),
                 }
             }
@@ -93,6 +122,13 @@ async fn server() -> String {
                     Some("Bearer t-123") => (StatusCode::OK, "me").into_response_parts(),
                     _ => (StatusCode::UNAUTHORIZED, "nope").into_response_parts(),
                 }
+            }),
+        )
+        .route(
+            "/slow",
+            any(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "late"
             }),
         )
         .route(
@@ -623,4 +659,114 @@ async fn digest_challenge_after_redirect_signs_the_final_url() {
         execute(&services(), input(&c, &ids[1]), &mut VariableScopes::default(), &CancellationToken::new()).await;
     assert_eq!(exec.response.as_ref().map(|r| r.status), Some(401));
     assert!(seen.lock().unwrap().iter().all(|a| a.is_empty()), "{:?}", seen.lock().unwrap());
+}
+
+/// Runs one request with `pre` as its pre-request script and `body` as its
+/// saved body, from the working directory `work`.
+async fn run_from(
+    services: &Services,
+    work: &std::path::Path,
+    base: &str,
+    pre: &str,
+    body: Body,
+) -> ternarywire_runner::Execution {
+    let mut c = Collection::new("Files");
+    let mut r = req("Upload", "POST", "{{base}}/echo");
+    r.request.as_http_mut().unwrap().body = body;
+    r.scripts.pre_request = pre.into();
+    let id = r.id.clone();
+    c.items.push(r.into());
+    let mut vars = scopes(base);
+    vars.environment.insert("abs".into(), work.join("..").join("secret.txt").display().to_string());
+    let input = ExecuteInput { base_dir: Some(work), ..input(&c, &id) };
+    execute(services, input, &mut vars, &CancellationToken::new()).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scripts_only_send_files_from_the_working_directory() {
+    let base = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join("data")).unwrap();
+    std::fs::write(work.join("data/ok.txt"), "ok").unwrap();
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "secret").unwrap();
+    let services = services();
+    let refused = |exec: &ternarywire_runner::Execution| {
+        exec.response.is_none()
+            && exec.error.as_ref().is_some_and(|e| e.message.contains("set by a script was not sent"))
+    };
+
+    let secret_path = secret.display().to_string();
+    for pre in [
+        format!("body.file {secret_path}"),
+        "body.file ../secret.txt".to_string(),
+        "body.file data/../../secret.txt".to_string(),
+        "body.file {{abs}}".to_string(),
+        format!("form.file f {secret_path}"),
+    ] {
+        let exec = run_from(&services, &work, &base, &pre, Body::default()).await;
+        assert!(refused(&exec), "{pre}: {:?}", exec.error);
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&secret, work.join("link.txt")).unwrap();
+        let exec = run_from(&services, &work, &base, "body.file link.txt", Body::default()).await;
+        assert!(refused(&exec), "symlink: {:?}", exec.error);
+    }
+
+    // Relative paths inside the working directory are sent.
+    for pre in ["body.file data/ok.txt", "form.file f data/ok.txt"] {
+        let exec = run_from(&services, &work, &base, pre, Body::default()).await;
+        assert!(exec.error.is_none(), "{pre}: {:?}", exec.error);
+        assert_eq!(exec.response.as_ref().map(|r| r.status), Some(200));
+    }
+
+    // A file the saved request already sends keeps working, even when the
+    // script changes the request or moves the file into a form field.
+    let saved = Body { mode: BodyMode::Binary, binary_path: secret_path.clone(), ..Default::default() };
+    for pre in ["header.add X-A 1".to_string(), format!("form.file f {secret_path}")] {
+        let exec = run_from(&services, &work, &base, &pre, saved.clone()).await;
+        assert!(exec.error.is_none(), "{pre}: {:?}", exec.error);
+        assert_eq!(exec.response.as_ref().map(|r| r.status), Some(200));
+    }
+
+    // pm.sendRequest: every file comes from the script.
+    let exec =
+        run_from(&services, &work, &base, &format!("send.file {{{{base}}}}/echo {secret_path}"), saved.clone()).await;
+    let logs: Vec<&str> =
+        exec.console.iter().filter(|l| l.phase == "pre-request").map(|l| l.message.as_str()).collect();
+    assert!(logs[0].starts_with("error pm.sendRequest: file") && logs[0].contains("not sent"), "{logs:?}");
+    let exec = run_from(&services, &work, &base, "send.file {{base}}/echo data/ok.txt", Body::default()).await;
+    let logs: Vec<&str> =
+        exec.console.iter().filter(|l| l.phase == "pre-request").map(|l| l.message.as_str()).collect();
+    assert_eq!(logs, ["sent 200"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_request_stops_with_the_run_and_the_script_timeout() {
+    let base = server().await;
+    let mut c = Collection::new("Slow");
+    let mut r = req("Slow", "GET", "{{base}}/echo");
+    r.scripts.pre_request = "send {{base}}/slow".into();
+    let id = r.id.clone();
+    c.items.push(r.into());
+
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        c2.cancel();
+    });
+    let started = std::time::Instant::now();
+    let exec = execute(&services(), input(&c, &id), &mut scopes(&base), &cancel).await;
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(exec.console.iter().any(|l| l.message.starts_with("error")), "{:?}", exec.console);
+
+    let mut s = services();
+    s.script_timeout = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let exec = execute(&s, input(&c, &id), &mut scopes(&base), &CancellationToken::new()).await;
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(exec.console.iter().any(|l| l.message.contains("before the script timed out")), "{:?}", exec.console);
 }

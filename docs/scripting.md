@@ -58,7 +58,12 @@ The `pm` object follows Postman's API:
   `headers` (a `PropertyList`: `get/has/add/upsert/remove/toObject/each`),
   `body` (`mode` plus `raw`/`urlencoded`/`formdata`/`file`/`graphql`). Changes
   made in pre-request scripts are sent; unchanged parts stay byte-for-byte as
-  saved.
+  saved. Like Postman's working directory, a file a script puts in a body
+  (`file.src`, or a form-data `src`) must be a path relative to the working
+  directory (the workspace folder, or `ternarywire run --working-dir`) that
+  stays inside it, symlinks included; otherwise the request fails with an
+  error and is not sent. Files the saved request already names are sent as
+  before.
 - **Response** (post-response): `pm.response.code`, `status`, `headers`,
   `responseTime`, `responseSize`, `text()`, `json()`, `cookies`, `size()`,
   `dataURI()`.
@@ -67,7 +72,9 @@ The `pm` object follows Postman's API:
   `pm.response.to.have.status(200)`, `.to.be.ok`, `.to.have.header(k[, v])`,
   `.to.have.jsonBody(path[, value])`, `.to.have.jsonSchema(schema)`,
   `.to.have.responseTime.below(ms)`, `.to.be.json`, ...
-- **Other**: `pm.sendRequest(req[, callback])` (callback or promise),
+- **Other**: `pm.sendRequest(req[, callback])` (callback or promise; file
+  bodies follow the working-directory rule above, and the request stops when
+  the run is cancelled or the script times out),
   `pm.cookies` (+ `jar()`), `pm.info`, `pm.execution.setNextRequest(name|null)`,
   `pm.execution.skipRequest()`, `pm.visualizer.set(template, data)`,
   `console.*`, timers, `Buffer`, `URL`, `URLSearchParams`, `TextEncoder`,

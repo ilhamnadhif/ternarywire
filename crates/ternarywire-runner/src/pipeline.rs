@@ -289,6 +289,16 @@ pub fn script_response(r: &HttpResponse) -> ScriptResponse {
     }
 }
 
+/// `pm.sendRequest` for a job of this run: cancelled with it, files from
+/// `base_dir` only.
+pub(crate) fn script_http(
+    services: &Services,
+    base_dir: Option<&Path>,
+    cancel: &CancellationToken,
+) -> crate::script_http::PipelineHttp {
+    crate::script_http::PipelineHttp::new(services.clone()).with_base_dir(base_dir).with_cancel(cancel.clone())
+}
+
 /// Runs a script job on a blocking thread, honoring cancellation.
 pub(crate) async fn run_scripts(services: &Services, mut job: ScriptJob, cancel: &CancellationToken) -> ScriptOutcome {
     let flag = Arc::new(AtomicBool::new(false));
@@ -414,13 +424,15 @@ pub(crate) async fn execute_keeping_locals(
 
     // Pre-request scripts.
     let pre = script_chain(&chain, &item.scripts, &item.name, ScriptEvent::PreRequest);
+    // The body before scripts: files it names are the user's, not a script's.
+    let own_body = request.body.clone();
     if !pre.is_empty() {
         let before = with_folder_vars(vars, &chain);
         let mut job = ScriptJob::new(ScriptEvent::PreRequest, pre, script_request(&item.id, &item.name, &request));
         job.info = info.clone();
         job.variables = before.clone();
         job.cookies = services.http.cookies().for_url(&Resolver::new(vars).resolve(&request.url));
-        job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(services.clone())));
+        job.http = Some(Arc::new(script_http(services, input.base_dir, cancel)));
         job.packages = services.packages.clone();
         let mut outcome = run_scripts(services, job, cancel).await;
         exec.absorb(ScriptEvent::PreRequest, &mut outcome);
@@ -453,6 +465,14 @@ pub(crate) async fn execute_keeping_locals(
     let mut resolver = Resolver::new(&scopes_for_resolve);
     if let Some(v) = &services.vault {
         resolver = resolver.with_vault(v.as_ref());
+    }
+    if request.body != own_body
+        && let Err(e) = crate::script_http::check_script_files(&own_body, &request.body, &resolver, input.base_dir)
+    {
+        exec.network(ConsoleKind::Error, e.clone());
+        exec.error = Some(HttpError::new(ternarywire_http::HttpErrorKind::Other, e));
+        exec.request = Some(request);
+        return exec;
     }
     let ctx = PrepareContext {
         resolver,
@@ -559,7 +579,7 @@ pub(crate) async fn execute_keeping_locals(
         job.variables = before.clone();
         job.response = exec.response.as_ref().map(script_response);
         job.cookies = services.http.cookies().for_url(&prepared.url);
-        job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(services.clone())));
+        job.http = Some(Arc::new(script_http(services, input.base_dir, cancel)));
         let mut outcome = run_scripts(services, job, cancel).await;
         exec.absorb(ScriptEvent::PostResponse, &mut outcome);
         merge_script_scopes(vars, &before, outcome.variables);
@@ -638,7 +658,7 @@ pub async fn rerun_post_response(
     };
     job.variables = before.clone();
     job.response = Some(script_response(response));
-    job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(services.clone())));
+    job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(services.clone()).with_cancel(cancel.clone())));
     let mut outcome = run_scripts(services, job, cancel).await;
     exec.absorb(ScriptEvent::PostResponse, &mut outcome);
     merge_script_scopes(vars, &before, outcome.variables);

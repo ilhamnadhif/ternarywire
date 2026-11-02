@@ -52,7 +52,7 @@ impl Ctx<'_> {
         let mut job = ScriptJob::for_protocol(event, scripts, protocol);
         job.info = self.info.clone();
         job.variables = before.clone();
-        job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(self.services.clone())));
+        job.http = Some(Arc::new(crate::pipeline::script_http(self.services, self.base_dir, self.cancel)));
         job.packages = self.services.packages.clone();
         let mut outcome = run_scripts(self.services, job, self.cancel).await;
         exec.absorb(event, &mut outcome);
