@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -144,6 +145,8 @@ struct Failure {
     at: Instant,
 }
 
+type FetchResult = Result<String, SecretError>;
+
 struct Inner {
     env: Env,
     config: RwLock<SecretsConfig>,
@@ -182,6 +185,32 @@ impl Inner {
 
     fn record_error(&self, key: &Key, error: SecretError) {
         self.errors.lock().insert(key.clone(), Failure { error, at: Instant::now() });
+    }
+
+    /// After the synchronous lookup stopped waiting for the fetch answering
+    /// on `rx`: its result if it arrived meanwhile, else `timeout` is
+    /// recorded. Under the errors lock, which the fetch sends its result
+    /// under (see [`Inner::finish_sync_fetch`]), so a fetch that succeeds
+    /// at that moment does not leave the timeout behind.
+    fn sync_timed_out(&self, key: &Key, rx: &Receiver<FetchResult>, timeout: SecretError) -> Option<FetchResult> {
+        let mut errors = self.errors.lock();
+        match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(_) => {
+                errors.insert(key.clone(), Failure { error: timeout, at: Instant::now() });
+                None
+            }
+        }
+    }
+
+    /// Hands the result of the synchronous lookup's fetch to it; a success
+    /// clears the timeout the lookup recorded if it gave up.
+    fn finish_sync_fetch(&self, key: &Key, result: FetchResult, tx: &SyncSender<FetchResult>) {
+        let mut errors = self.errors.lock();
+        if result.is_ok() && errors.get(key).is_some_and(|f| f.error.kind == ErrorKind::Timeout) {
+            errors.remove(key);
+        }
+        let _ = tx.send(result);
     }
 
     async fn fetch(self: Arc<Self>, link: LinkedSecret, force: bool) -> Result<String, SecretError> {
@@ -632,11 +661,13 @@ impl ExternalSecrets {
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let inner = self.inner.clone();
+        let fetched = key.clone();
         rt.spawn(async move {
-            let _ = tx.send(inner.fetch(link, false).await);
+            let result = inner.clone().fetch(link, false).await;
+            inner.finish_sync_fetch(&fetched, result, &tx);
         });
         let timeout = *self.inner.sync_timeout.read();
-        let wait = move || rx.recv_timeout(timeout);
+        let wait = || rx.recv_timeout(timeout);
         let result = match tokio::runtime::Handle::try_current() {
             Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(wait),
             _ => wait(),
@@ -645,19 +676,21 @@ impl ExternalSecrets {
             Ok(Ok(v)) => Some(v),
             Ok(Err(_)) => None,
             Err(_) => {
-                if self.inner.cached(&key, max_age).is_none() {
-                    self.inner.record_error(
-                        &key,
-                        SecretError::new(
-                            ErrorKind::Timeout,
-                            format!(
-                                "Fetching vault secret \"{name}\" took longer than {} s; it is used once it arrives.",
-                                timeout.as_secs_f32()
-                            ),
-                        ),
-                    );
+                if let Some(v) = self.inner.cached(&key, max_age) {
+                    return Some(v);
                 }
-                self.inner.cached(&key, max_age)
+                let error = SecretError::new(
+                    ErrorKind::Timeout,
+                    format!(
+                        "Fetching vault secret \"{name}\" took longer than {} s; it is used once it arrives.",
+                        timeout.as_secs_f32()
+                    ),
+                );
+                // TTL 0 values are never cached: the result may only be on `rx`.
+                match self.inner.sync_timed_out(&key, &rx, error) {
+                    Some(result) => result.ok(),
+                    None => self.inner.cached(&key, max_age),
+                }
             }
         }
     }
@@ -727,5 +760,41 @@ pub struct CachedLookup(ExternalSecrets);
 impl VaultLookup for CachedLookup {
     fn get(&self, key: &str) -> Option<String> {
         self.0.get_cached(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> ExternalSecrets {
+        let store = Arc::new(SecretStore::memory());
+        ExternalSecrets::new(store, SecretsConfig::default(), reqwest::Client::new())
+    }
+
+    fn timeout() -> SecretError {
+        SecretError::new(ErrorKind::Timeout, "slow")
+    }
+
+    #[test]
+    fn a_fetch_finishing_as_the_lookup_gives_up_leaves_no_timeout() {
+        let ext = manager();
+        let key = Key { provider: "p".into(), reference: "r".into() };
+        // The value arrives right after the wait timed out (TTL 0: nothing cached).
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        ext.inner.finish_sync_fetch(&key, Ok("v".into()), &tx);
+        assert_eq!(ext.inner.sync_timed_out(&key, &rx, timeout()).unwrap().unwrap(), "v");
+        assert!(ext.inner.recent_error(&key).is_none());
+        // It arrives just after the timeout was recorded: the success clears it.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        assert!(ext.inner.sync_timed_out(&key, &rx, timeout()).is_none());
+        assert_eq!(ext.inner.recent_error(&key).unwrap().kind, ErrorKind::Timeout);
+        ext.inner.finish_sync_fetch(&key, Ok("v".into()), &tx);
+        assert!(ext.inner.recent_error(&key).is_none());
+        // A failure keeps it (the fetch records its own error otherwise).
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        assert!(ext.inner.sync_timed_out(&key, &rx, timeout()).is_none());
+        ext.inner.finish_sync_fetch(&key, Err(SecretError::provider("down")), &tx);
+        assert_eq!(ext.inner.recent_error(&key).unwrap().kind, ErrorKind::Timeout);
     }
 }
