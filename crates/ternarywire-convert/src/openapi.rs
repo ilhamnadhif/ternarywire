@@ -1203,6 +1203,47 @@ impl Exporter {
             && !self.secret_values.iter().any(|s| value.contains(s.as_str()))
     }
 
+    /// `s` with every secret variable value in it replaced by `REDACTED`.
+    fn scrub(&self, s: &str) -> String {
+        let mut out = s.to_string();
+        for secret in &self.secret_values {
+            out = out.replace(secret.as_str(), crate::docs::REDACTED);
+        }
+        out
+    }
+
+    /// A string in an example: like [`Self::shows_example`], values of
+    /// credential-like names and values that look like one are masked (as in
+    /// the docs), and secret variable values never appear.
+    fn example_string(&self, name: &str, value: &str) -> String {
+        if crate::docs::is_credential_name(name) || looks_like_credential(value) {
+            crate::docs::mask_value(&self.scrub(value))
+        } else {
+            self.scrub(value)
+        }
+    }
+
+    /// Masks a JSON example: values under credential-like keys as the docs
+    /// do, and every string through [`Self::example_string`].
+    fn mask_json(&self, v: &mut Value) {
+        fn strings(ex: &Exporter, v: &mut Value) {
+            match v {
+                Value::String(s) => *s = ex.example_string("", s),
+                Value::Array(items) => items.iter_mut().for_each(|x| strings(ex, x)),
+                Value::Object(map) => map.values_mut().for_each(|x| strings(ex, x)),
+                _ => {}
+            }
+        }
+        crate::docs::mask_credentials_json(v);
+        strings(self, v);
+    }
+
+    /// A body or response text (not JSON) masked like the docs: credential
+    /// values in XML and urlencoded text, and secret variable values.
+    fn text_example(&self, text: &str) -> Value {
+        json!(self.scrub(&crate::docs::mask_credentials_text(text)))
+    }
+
     /// Registers a security scheme for an auth and returns its name.
     fn scheme_for(&mut self, auth: &Auth) -> Option<String> {
         let (name, scheme) = match auth.kind {
@@ -1284,13 +1325,8 @@ fn looks_like_credential(value: &str) -> bool {
     }
 }
 
-/// A form field's example value: credential-like fields are masked as in the
-/// generated docs.
-fn field_example(key: &str, value: &str) -> Value {
-    if crate::docs::is_credential_name(key) { json!(crate::docs::mask_value(value)) } else { json!(value) }
-}
-
-fn body_to_request_body(body: &Body, headers: &[KeyValue]) -> Option<Value> {
+fn body_to_request_body(ex: &Exporter, body: &Body, headers: &[KeyValue]) -> Option<Value> {
+    let field_example = |key: &str, value: &str| json!(ex.example_string(key, value));
     let header_ct = headers
         .iter()
         .rev()
@@ -1303,13 +1339,13 @@ fn body_to_request_body(body: &Body, headers: &[KeyValue]) -> Option<Value> {
             let media = if ct.contains("json") {
                 match serde_json::from_str::<Value>(&body.raw) {
                     Ok(mut v) => {
-                        crate::docs::mask_credentials_json(&mut v);
+                        ex.mask_json(&mut v);
                         json!({"schema": infer_schema(&v), "example": v})
                     }
-                    Err(_) => json!({"schema": {"type": "string"}, "example": body.raw}),
+                    Err(_) => json!({"schema": {"type": "string"}, "example": ex.text_example(&body.raw)}),
                 }
             } else {
-                json!({"schema": {"type": "string"}, "example": body.raw})
+                json!({"schema": {"type": "string"}, "example": ex.text_example(&body.raw)})
             };
             (ct, media)
         }
@@ -1355,7 +1391,8 @@ fn body_to_request_body(body: &Body, headers: &[KeyValue]) -> Option<Value> {
             json!({"schema": {"type": "string", "format": "binary"}}),
         ),
         BodyMode::GraphQl => {
-            let vars = serde_json::from_str::<Value>(&body.graphql.variables).unwrap_or(json!({}));
+            let mut vars = serde_json::from_str::<Value>(&body.graphql.variables).unwrap_or(json!({}));
+            ex.mask_json(&mut vars);
             (
                 "application/json".into(),
                 json!({
@@ -1368,7 +1405,7 @@ fn body_to_request_body(body: &Body, headers: &[KeyValue]) -> Option<Value> {
     Some(json!({"content": {ct: media}}))
 }
 
-fn example_value(e: &Example) -> (String, Value) {
+fn example_value(ex: &Exporter, e: &Example) -> (String, Value) {
     let ct = e
         .headers
         .iter()
@@ -1389,18 +1426,18 @@ fn example_value(e: &Example) -> (String, Value) {
     let v = if ct.contains("json") {
         match serde_json::from_str::<Value>(&e.body) {
             Ok(mut v) => {
-                crate::docs::mask_credentials_json(&mut v);
+                ex.mask_json(&mut v);
                 v
             }
-            Err(_) => json!(e.body),
+            Err(_) => ex.text_example(&e.body),
         }
     } else {
-        json!(e.body)
+        ex.text_example(&e.body)
     };
     (ct, v)
 }
 
-fn responses_for(examples: &[Example]) -> Value {
+fn responses_for(ex: &Exporter, examples: &[Example]) -> Value {
     if examples.is_empty() {
         return json!({"200": {"description": "Successful response"}});
     }
@@ -1417,7 +1454,7 @@ fn responses_for(examples: &[Example]) -> Value {
             if e.body.is_empty() {
                 continue;
             }
-            let (ct, v) = example_value(e);
+            let (ct, v) = example_value(ex, e);
             content.entry(ct).or_default().push((e.name.clone(), v));
         }
         let mut resp = json!({"description": description});
@@ -1559,10 +1596,10 @@ pub fn export(c: &Collection) -> Value {
         if !params.is_empty() {
             op.insert("parameters".into(), Value::Array(params));
         }
-        if let Some(rb) = body_to_request_body(&h.body, &h.headers) {
+        if let Some(rb) = body_to_request_body(&ex, &h.body, &h.headers) {
             op.insert("requestBody".into(), rb);
         }
-        op.insert("responses".into(), responses_for(&r.examples));
+        op.insert("responses".into(), responses_for(&ex, &r.examples));
         if let Some(sec) = ex.security(&h.auth) {
             op.insert("security".into(), sec);
         }
@@ -1854,5 +1891,46 @@ mod tests {
         assert_eq!(body["example"]["password"], crate::docs::REDACTED);
         let form = &doc["paths"]["/login"]["put"]["requestBody"]["content"]["application/x-www-form-urlencoded"];
         assert_eq!(form["example"]["scope"], "read");
+    }
+
+    #[test]
+    fn export_masks_graphql_variables_and_text_bodies() {
+        let mut c = Collection::new("Creds");
+        c.variables.push(Variable::secret("pin", "pin-secret-1"));
+        let mut gql = HttpRequest::new("POST", "https://h.test/graphql");
+        gql.body.mode = BodyMode::GraphQl;
+        gql.body.graphql.query = "mutation { login }".into();
+        gql.body.graphql.variables =
+            r#"{"user": "ada", "password": "gql-secret-2", "note": "Bearer gql-secret-3"}"#.into();
+        c.items.push(RequestItem::new("Login", gql).into());
+        let mut soap = HttpRequest::new("POST", "https://h.test/soap");
+        soap.body = Body::raw_text(
+            "<s:Envelope xmlns:s=\"urn:s\"><wsse:Password xmlns:wsse=\"urn:w\">xml-secret-4</wsse:Password>\
+             <user token=\"xml-secret-5\">ada</user><pin>pin-secret-1</pin></s:Envelope>",
+            RawLanguage::Xml,
+        );
+        let mut item = RequestItem::new("Soap", soap);
+        item.examples.push(Example {
+            status: 200,
+            name: "OK".into(),
+            body: "user=ada&access_token=form-secret-6".into(),
+            ..Default::default()
+        });
+        c.items.push(item.into());
+        let text = serde_json::to_string(&export(&c)).unwrap();
+        for n in 1..=6 {
+            assert!(!text.contains(&format!("secret-{n}")), "secret-{n} leaked: {text}");
+        }
+        let doc = export(&c);
+        let vars =
+            &doc["paths"]["/graphql"]["post"]["requestBody"]["content"]["application/json"]["example"]["variables"];
+        assert_eq!(vars["user"], "ada");
+        assert_eq!(vars["note"], "Bearer REDACTED");
+        let xml =
+            doc["paths"]["/soap"]["post"]["requestBody"]["content"]["application/xml"]["example"].as_str().unwrap();
+        assert!(xml.contains("<wsse:Password xmlns:wsse=\"urn:w\">REDACTED</wsse:Password>"), "{xml}");
+        assert!(xml.contains("<user token=\"REDACTED\">ada</user><pin>REDACTED</pin>"), "{xml}");
+        let ok = &doc["paths"]["/soap"]["post"]["responses"]["200"]["content"]["text/plain"]["example"];
+        assert_eq!(ok, "user=ada&access_token=REDACTED");
     }
 }

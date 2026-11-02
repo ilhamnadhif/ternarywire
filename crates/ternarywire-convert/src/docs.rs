@@ -15,7 +15,8 @@
 //!   whose name looks like a credential (`token`, `password`, `apiKey`, ...)
 //!   are never resolved; snippets keep their `{{name}}` placeholder;
 //! * literal values of sensitive auth parameters, of credential-like headers,
-//!   query/form fields and JSON body keys, and URL passwords are replaced by
+//!   query/form fields, JSON keys, XML elements and attributes and urlencoded
+//!   fields in bodies and examples, and URL passwords are replaced by
 //!   `REDACTED`;
 //! * the auth summary only names the auth type.
 //!
@@ -240,6 +241,37 @@ pub(crate) fn mask_credentials_json(v: &mut Value) -> bool {
     Redactor::default().mask_json(v)
 }
 
+/// A body or example text masked as the docs do: JSON, XML or urlencoded
+/// values under credential-like names; other text is kept. For the OpenAPI
+/// export.
+pub(crate) fn mask_credentials_text(text: &str) -> String {
+    Redactor::default().mask_text(text)
+}
+
+/// The unescaped text of an XML text, CDATA or entity reference event.
+fn xml_text(ev: &quick_xml::events::Event<'_>) -> Option<String> {
+    use quick_xml::events::Event;
+    match ev {
+        Event::Text(t) => {
+            let raw = t.decode().ok()?;
+            Some(quick_xml::escape::unescape(&raw).map(|c| c.into_owned()).unwrap_or_else(|_| raw.into_owned()))
+        }
+        Event::CData(t) => Some(String::from_utf8_lossy(t).into_owned()),
+        Event::GeneralRef(r) => Some(match r.decode().ok()?.as_ref() {
+            "amp" => "&".into(),
+            "lt" => "<".into(),
+            "gt" => ">".into(),
+            "quot" => "\"".into(),
+            "apos" => "'".into(),
+            other => match r.resolve_char_ref().ok().flatten() {
+                Some(c) => c.to_string(),
+                None => format!("&{other};"),
+            },
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct Redactor {
     /// Variable names that must never be resolved.
@@ -328,6 +360,102 @@ impl Redactor {
             }
             Err(_) => text.to_string(),
         }
+    }
+
+    /// Masks a body or example text: JSON, XML (`<wsse:Password>`,
+    /// `password="..."`) or urlencoded; other text is kept verbatim, and so is
+    /// a document in which nothing had to be masked.
+    fn mask_text(&mut self, text: &str) -> String {
+        if serde_json::from_str::<Value>(text).is_ok() {
+            return self.mask_json_text(text);
+        }
+        let masked = if text.trim_start().starts_with('<') { self.mask_xml(text) } else { self.mask_form(text) };
+        masked.unwrap_or_else(|| text.to_string())
+    }
+
+    /// `None` unless `text` is XML and something was masked.
+    fn mask_xml(&mut self, text: &str) -> Option<String> {
+        use quick_xml::events::{BytesText, Event};
+        let local = |name: quick_xml::name::QName<'_>| String::from_utf8_lossy(name.local_name().as_ref()).into_owned();
+        let mut reader = quick_xml::Reader::from_str(text);
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        // Per open element: whether its text is a credential.
+        let mut open: Vec<bool> = Vec::new();
+        let mut pending = String::new();
+        let mut changed = false;
+        loop {
+            let ev = reader.read_event().ok()?;
+            if open.last() == Some(&true) && matches!(ev, Event::Text(_) | Event::CData(_) | Event::GeneralRef(_)) {
+                pending.push_str(&xml_text(&ev)?);
+                continue;
+            }
+            if !pending.is_empty() {
+                let masked = self.mask(&pending);
+                changed |= masked != pending;
+                writer.write_event(Event::Text(BytesText::new(&masked))).ok()?;
+                pending.clear();
+            }
+            let ev = match ev {
+                Event::Start(e) | Event::Empty(e) if e.attributes().any(|a| a.is_err()) => return None,
+                Event::Start(ref e) | Event::Empty(ref e)
+                    if e.attributes().flatten().any(|a| is_credential_name(&local(a.key))) =>
+                {
+                    let mut masked = e.to_owned();
+                    masked.clear_attributes();
+                    for a in e.attributes().flatten() {
+                        if is_credential_name(&local(a.key)) && !a.key.as_ref().starts_with(b"xmlns") {
+                            let value = a.unescape_value().ok()?;
+                            let m = self.mask(&value);
+                            changed |= m != value;
+                            masked.push_attribute((String::from_utf8_lossy(a.key.as_ref()).as_ref(), m.as_str()));
+                        } else {
+                            masked.push_attribute(a);
+                        }
+                    }
+                    if matches!(ev, Event::Start(_)) { Event::Start(masked) } else { Event::Empty(masked) }
+                }
+                ev => ev,
+            };
+            match &ev {
+                Event::Start(e) => open.push(is_credential_name(&local(e.name()))),
+                Event::End(_) => {
+                    open.pop();
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            writer.write_event(ev).ok()?;
+        }
+        if !changed {
+            return None;
+        }
+        String::from_utf8(writer.into_inner()).ok()
+    }
+
+    /// `None` unless `text` is an urlencoded form (`a=1&b=2`, one line) and
+    /// something was masked.
+    fn mask_form(&mut self, text: &str) -> Option<String> {
+        let t = text.trim();
+        if !t.contains('=') || t.contains(char::is_whitespace) {
+            return None;
+        }
+        let mut changed = false;
+        let pairs: Vec<String> = t
+            .split('&')
+            .map(|pair| match url::form_urlencoded::parse(pair.as_bytes()).next() {
+                Some((k, v)) if pair.contains('=') && is_credential_name(&k) => {
+                    let masked = self.mask(&v);
+                    if masked == v {
+                        return pair.to_string();
+                    }
+                    changed = true;
+                    let key = &pair[..pair.find('=').unwrap_or(pair.len())];
+                    format!("{key}={}", url::form_urlencoded::byte_serialize(masked.as_bytes()).collect::<String>())
+                }
+                _ => pair.to_string(),
+            })
+            .collect();
+        changed.then(|| pairs.join("&"))
     }
 
     /// Replaces the password of `scheme://user:password@host`.
@@ -632,7 +760,7 @@ impl Builder {
         for f in s.body.form_data.iter_mut().filter(|f| f.kind == FormFieldKind::Text && is_credential_name(&f.key)) {
             f.value = red.mask(&f.value);
         }
-        s.body.raw = red.mask_json_text(&s.body.raw);
+        s.body.raw = red.mask_text(&s.body.raw);
         s.body.graphql.variables = red.mask_json_text(&s.body.graphql.variables);
         s
     }
@@ -645,7 +773,7 @@ impl Builder {
                 self.red.mask_json(&mut v);
                 ("json".to_string(), serde_json::to_string_pretty(&v).unwrap_or_default())
             }
-            _ => (if lang.is_empty() { "text".into() } else { sanitize_lang(&lang) }, e.body.clone()),
+            _ => (if lang.is_empty() { "text".into() } else { sanitize_lang(&lang) }, self.red.mask_text(&e.body)),
         };
         let status_text =
             if e.status_text.trim().is_empty() { status_reason(e.status).to_string() } else { e.status_text.clone() };
@@ -2332,6 +2460,46 @@ mod tests {
         assert!(md.contains("{{apiSecret}}-{{folderKey}}-{{clientSecret}}"));
         assert!(md.contains("page=1") && md.contains("\"user\": \"ada\"") && md.contains("\"expires\": 3600"));
         assert!(md.contains("Auth: API Key") && md.contains("Auth: OAuth 2.0"));
+    }
+
+    #[test]
+    fn xml_and_urlencoded_texts_are_masked() {
+        let mut c = Collection::new("C");
+        let mut r = HttpRequest::new("POST", "https://h.test/soap");
+        r.body = Body::raw_text(
+            "<?xml version=\"1.0\"?>\n<s:Envelope xmlns:s=\"urn:s\">\n  <wsse:Password xmlns:wsse=\"urn:w\">xml-secret-1 &amp; \
+             x</wsse:Password>\n  <login user=\"ada\" password=\"xml-secret-2\"/>\n  \
+             <apiKey>{{key}}</apiKey><!-- kept --><note>a &amp; b</note>\n</s:Envelope>",
+            RawLanguage::Xml,
+        );
+        let mut item = RequestItem::new("Soap", r);
+        item.examples.push(Example {
+            name: "OK".into(),
+            body: "<r><token><![CDATA[xml-secret-3]]></token></r>".into(),
+            language: Some("xml".into()),
+            ..Default::default()
+        });
+        c.items.push(item.into());
+        let mut form = HttpRequest::new("POST", "https://h.test/token");
+        form.headers.push(KeyValue::new("Content-Type", "application/x-www-form-urlencoded"));
+        form.body =
+            Body::raw_text("grant_type=password&username=ada&password=form-secret-4%21&pw={{pw}}", RawLanguage::Text);
+        c.items.push(RequestItem::new("Token", form).into());
+        let opts = DocsOptions { snippet_languages: vec![Language::Curl, Language::Python], ..Default::default() };
+        let md = to_markdown(&c, &opts);
+        let html = html_of(&c, &opts);
+        for n in 1..=4 {
+            assert!(!md.contains(&format!("secret-{n}")) && !html.contains(&format!("secret-{n}")), "secret-{n}: {md}");
+        }
+        assert!(md.contains("<wsse:Password xmlns:wsse=\"urn:w\">REDACTED</wsse:Password>"), "{md}");
+        assert!(md.contains("<login user=\"ada\" password=\"REDACTED\"/>"), "{md}");
+        assert!(md.contains("<apiKey>{{key}}</apiKey><!-- kept --><note>a &amp; b</note>"), "{md}");
+        assert!(md.contains("<r><token>REDACTED</token></r>"), "{md}");
+        assert!(md.contains("grant_type=password&username=ada&password=REDACTED&pw={{pw}}"), "{md}");
+        // Texts without anything to mask stay verbatim.
+        assert_eq!(Redactor::default().mask_text("<a>\n <b x='1'>t</b>\n</a>"), "<a>\n <b x='1'>t</b>\n</a>");
+        assert_eq!(Redactor::default().mask_text("a=1&b=%20"), "a=1&b=%20");
+        assert_eq!(Redactor::default().mask_text("password: hunter2"), "password: hunter2");
     }
 
     #[test]
