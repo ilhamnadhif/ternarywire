@@ -14,7 +14,7 @@ use ternarywire_core::storage::WorkspaceStore;
 use ternarywire_core::variables::{self, Resolver};
 use ternarywire_http::CookieJar;
 use ternarywire_mock::{MockConfig, MockServer};
-use ternarywire_runner::perf::{PerfOptions, run_perf};
+use ternarywire_runner::perf::{PerfOptions, run_perf_in_dir};
 
 use crate::run::cancel_on_ctrl_c;
 use crate::source::{self, WsCtx};
@@ -850,7 +850,11 @@ pub async fn perf(args: PerfArgs) -> Result<i32> {
             );
         }
     };
-    let report = run_perf(&services, c, &vars, opts, &mut on_sample, &cancel).await;
+    // Relative file paths in bodies resolve like in `ternarywire run`.
+    let report = run_perf_in_dir(&services, c, &vars, opts, Some(&loaded.base_dir), &mut on_sample, &cancel).await;
+    if let Some(e) = &report.error {
+        bail!("{e}");
+    }
     if !args.silent {
         let l = &report.latency;
         let ms = ternarywire_core::util::human_ms;

@@ -3,6 +3,7 @@
 //! does not grow with the number of requests.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -78,9 +79,13 @@ pub struct PerfReport {
     pub per_request: Vec<RequestStats>,
     pub timeline: Vec<PerfSample>,
     pub cancelled: bool,
+    /// Why nothing ran (e.g. a selected request no longer exists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-/// Log-scale histogram with ~2% relative precision from 1 µs to ~10 min.
+/// Log-scale histogram with ~2% relative precision from 1 µs to ~47 min
+/// (1.02^1099 µs); longer latencies share the last bucket.
 #[derive(Clone)]
 pub struct Histogram {
     buckets: Vec<u64>,
@@ -179,7 +184,9 @@ struct Agg {
     active_vus: usize,
 }
 
-/// Runs a load test against the selected requests of `c`.
+/// Runs a load test against the selected requests of `c`, with relative
+/// file paths in bodies resolved against the current directory; see
+/// [`run_perf_in_dir`].
 pub async fn run_perf(
     services: &Services,
     c: &Collection,
@@ -188,16 +195,34 @@ pub async fn run_perf(
     on_sample: &mut (dyn FnMut(&PerfSample) + Send),
     cancel: &CancellationToken,
 ) -> PerfReport {
+    run_perf_in_dir(services, c, vars, opts, None, on_sample, cancel).await
+}
+
+/// [`run_perf`] with `base_dir` as the working directory for file bodies,
+/// like [`crate::run_collection`]'s `RunOptions::base_dir`.
+pub async fn run_perf_in_dir(
+    services: &Services,
+    c: &Collection,
+    vars: &VariableScopes,
+    opts: PerfOptions,
+    base_dir: Option<&Path>,
+    on_sample: &mut (dyn FnMut(&PerfSample) + Send),
+    cancel: &CancellationToken,
+) -> PerfReport {
     let plan_opts = RunOptions { order: opts.request_ids.clone(), ..Default::default() };
-    let ids: Vec<(String, String)> = match plan(c, &plan_opts) {
-        Ok(list) => list.into_iter().map(|(r, _)| (r.id.clone(), r.name.clone())).collect(),
-        Err(_) => Vec::new(),
-    };
     let vus = opts.virtual_users.max(1);
     let mut report = PerfReport { virtual_users: vus, ..Default::default() };
+    let ids: Vec<(String, String)> = match plan(c, &plan_opts) {
+        Ok(list) => list.into_iter().map(|(r, _)| (r.id.clone(), r.name.clone())).collect(),
+        Err(e) => {
+            report.error = Some(e);
+            return report;
+        }
+    };
     if ids.is_empty() {
         return report;
     }
+    let base_dir: Option<Arc<PathBuf>> = base_dir.map(|d| Arc::new(d.to_path_buf()));
     let agg = Arc::new(Mutex::new(Agg::default()));
     {
         let mut a = agg.lock();
@@ -219,6 +244,7 @@ pub async fn run_perf(
         let ids = ids.clone();
         let agg = agg.clone();
         let stop = stop.clone();
+        let base_dir = base_dir.clone();
         let mut vars = vars.clone();
         let delay = if vus > 1 { opts.ramp_up.mul_f64(vu as f64 / vus as f64) } else { Duration::ZERO };
         tasks.push(tokio::spawn(async move {
@@ -239,7 +265,7 @@ pub async fn run_perf(
                         request_override: None,
                         iteration,
                         iteration_count: 0,
-                        base_dir: None,
+                        base_dir: base_dir.as_deref().map(PathBuf::as_path),
                     };
                     let exec = execute(&services, input, &mut vars, &stop).await;
                     if exec.skipped {
@@ -280,6 +306,7 @@ pub async fn run_perf(
     }
 
     let mut second = 0u64;
+    let mut window_start = Instant::now();
     let mut ticker =
         tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(1), Duration::from_secs(1));
     loop {
@@ -296,25 +323,8 @@ pub async fn run_perf(
             }
         }
         second += 1;
-        let sample = {
-            let mut a = agg.lock();
-            let s = PerfSample {
-                second,
-                requests: a.window_requests,
-                rps: a.window_requests as f64,
-                avg_latency_ms: if a.window_requests == 0 {
-                    0.0
-                } else {
-                    a.window_latency_ms / a.window_requests as f64
-                },
-                errors: a.window_errors,
-                active_vus: a.active_vus,
-            };
-            a.window_requests = 0;
-            a.window_latency_ms = 0.0;
-            a.window_errors = 0;
-            s
-        };
+        window_start = Instant::now();
+        let sample = take_sample(&agg, second, 1.0);
         on_sample(&sample);
         report.timeline.push(sample);
         // Give in-flight requests a short grace period after the deadline.
@@ -324,6 +334,15 @@ pub async fn run_perf(
     }
     for t in tasks {
         let _ = t.await;
+    }
+    // Requests since the last full second (a cancelled run stops between
+    // ticks) still belong in the timeline.
+    if agg.lock().window_requests > 0 {
+        second += 1;
+        let secs = window_start.elapsed().as_secs_f64().clamp(0.001, 1.0);
+        let sample = take_sample(&agg, second, secs);
+        on_sample(&sample);
+        report.timeline.push(sample);
     }
 
     let elapsed = start.elapsed().min(opts.duration.max(Duration::from_millis(1)) + Duration::from_secs(5));
@@ -348,6 +367,24 @@ pub async fn run_perf(
         })
         .collect();
     report
+}
+
+/// The current window as sample number `second`, `secs` long; starts the
+/// next window.
+fn take_sample(agg: &Mutex<Agg>, second: u64, secs: f64) -> PerfSample {
+    let mut a = agg.lock();
+    let s = PerfSample {
+        second,
+        requests: a.window_requests,
+        rps: a.window_requests as f64 / secs,
+        avg_latency_ms: if a.window_requests == 0 { 0.0 } else { a.window_latency_ms / a.window_requests as f64 },
+        errors: a.window_errors,
+        active_vus: a.active_vus,
+    };
+    a.window_requests = 0;
+    a.window_latency_ms = 0.0;
+    a.window_errors = 0;
+    s
 }
 
 #[cfg(test)]
@@ -445,5 +482,15 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(report.per_request.len(), 1);
         assert_eq!(report.errors, 0);
+        // Cancelled before the first full second: the requests are still in
+        // the timeline.
+        assert!(report.total > 0);
+        assert_eq!(report.timeline.iter().map(|s| s.requests).sum::<u64>(), report.total, "{:?}", report.timeline);
+
+        // A selection that names a request that is gone is an error, not an
+        // empty report.
+        let opts = PerfOptions { request_ids: Some(vec!["gone".into()]), ..Default::default() };
+        let report = run_perf(&services, &c, &VariableScopes::default(), opts, &mut |_| {}, &cancel).await;
+        assert_eq!(report.error.as_deref(), Some("request gone not found"));
     }
 }
