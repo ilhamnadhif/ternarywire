@@ -1,12 +1,117 @@
 //! Handlebars templating with Postman visualizer semantics.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 use handlebars::{
     BlockContext, BlockParams, Context, Handlebars, Helper, HelperDef, HelperResult, Output, RenderContext,
-    RenderErrorReason, Renderable, handlebars_helper,
+    RenderError, RenderErrorReason, Renderable, ScopedJson, handlebars_helper,
 };
 use serde_json::Value;
 
 use crate::Error;
+
+// A template comes with a collection and its data from a response: limits
+// keep a rendering from exhausting memory, time or the stack.
+
+/// Bytes a rendering may produce (nested `#each`es multiply).
+const MAX_OUTPUT: usize = 16 << 20;
+/// Helper calls (values printed, `#if`s, ...): the work of nested loops.
+const MAX_STEPS: u64 = 5_000_000;
+/// Partials expanded inside one another (a partial may render itself, for
+/// a tree; without a limit a cycle overflows the stack).
+const MAX_PARTIAL_DEPTH: usize = 64;
+/// Blocks nested in the template text.
+const MAX_NESTING: usize = 256;
+
+#[derive(Default)]
+struct Budget {
+    steps: AtomicU64,
+    partials: AtomicUsize,
+}
+
+impl Budget {
+    fn step(&self) -> Result<(), RenderError> {
+        if self.steps.fetch_add(1, Ordering::Relaxed) < MAX_STEPS {
+            Ok(())
+        } else {
+            Err(RenderErrorReason::Other("the template takes too many steps to render".into()).into())
+        }
+    }
+}
+
+/// A helper whose calls count against the [`Budget`].
+struct Counted<H>(H, Arc<Budget>);
+
+impl<H: HelperDef> HelperDef for Counted<H> {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &Helper<'rc>,
+        r: &'reg Handlebars<'reg>,
+        ctx: &'rc Context,
+        rc: &mut RenderContext<'reg, 'rc>,
+    ) -> Result<ScopedJson<'rc>, RenderError> {
+        self.1.step()?;
+        self.0.call_inner(h, r, ctx, rc)
+    }
+
+    fn call<'reg: 'rc, 'rc>(
+        &self,
+        h: &Helper<'rc>,
+        r: &'reg Handlebars<'reg>,
+        ctx: &'rc Context,
+        rc: &mut RenderContext<'reg, 'rc>,
+        out: &mut dyn Output,
+    ) -> HelperResult {
+        self.1.step()?;
+        self.0.call(h, r, ctx, rc, out)
+    }
+}
+
+/// `{{#js_nest}}`, put around each partial call by [`rewrite_values`]:
+/// counts how deep partials are expanded.
+struct JsNest(Arc<Budget>);
+
+impl HelperDef for JsNest {
+    fn call<'reg: 'rc, 'rc>(
+        &self,
+        h: &Helper<'rc>,
+        r: &'reg Handlebars<'reg>,
+        ctx: &'rc Context,
+        rc: &mut RenderContext<'reg, 'rc>,
+        out: &mut dyn Output,
+    ) -> HelperResult {
+        let depth = &self.0.partials;
+        let result = if depth.fetch_add(1, Ordering::Relaxed) >= MAX_PARTIAL_DEPTH {
+            Err(RenderErrorReason::Other(format!("partials nested more than {MAX_PARTIAL_DEPTH} deep")).into())
+        } else {
+            h.template().map_or(Ok(()), |t| t.render(r, ctx, rc, out))
+        };
+        depth.fetch_sub(1, Ordering::Relaxed);
+        result
+    }
+}
+
+/// The rendered text, refusing to grow past [`MAX_OUTPUT`].
+#[derive(Default)]
+struct Capped(Vec<u8>);
+
+impl std::io::Write for Capped {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + b.len() > MAX_OUTPUT {
+            return Err(std::io::Error::other(format!(
+                "the rendered template is larger than {} MiB",
+                MAX_OUTPUT >> 20
+            )));
+        }
+        self.0.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 // `x.length` of Handlebars.js (arrays, strings and `length` properties).
 handlebars_helper!(js_length: |x: Json| match x {
@@ -148,9 +253,18 @@ fn verbatim_len(tag: &str) -> Option<usize> {
 /// `{{js_str (lookup a b)}}`. A bare extra helper name (`{{len}}`,
 /// `{{{raw}}}`, never a valid helper call) reads the data field
 /// (`{{js_str this.len}}`), as in Handlebars.js.
-fn rewrite_values(template: &str) -> String {
+///
+/// Partial calls and partial blocks are put inside `{{#js_nest}}` (see
+/// [`JsNest`]), moving their outer `~` to it. Fails for blocks nested
+/// deeper than [`MAX_NESTING`].
+fn rewrite_values(template: &str) -> Result<String, Error> {
     let mut out = String::with_capacity(template.len() + 64);
     let mut rest = template;
+    // Open blocks: (whether partials may recurse in it, whether it is a
+    // guarded partial block). Partials can only recurse through calls
+    // inside a partial (`#*inline`) or partial block: calls elsewhere are
+    // left as they are (a guard would change standalone-line whitespace).
+    let mut blocks: Vec<(bool, bool)> = Vec::new();
     while let Some(start) = rest.find("{{") {
         out.push_str(&rest[..start]);
         let tag = &rest[start..];
@@ -163,6 +277,44 @@ fn rewrite_values(template: &str) -> String {
         }
         let Some(close) = tag.find("}}") else { break };
         let inner = &tag[2..close];
+        let (lead, trail) = (inner.starts_with('~'), inner.len() > 1 && inner.ends_with('~'));
+        let unlead = inner.strip_prefix('~').unwrap_or(inner);
+        let untrail = if trail { &inner[..inner.len() - 1] } else { inner };
+        let head = unlead.trim_start();
+        let opens = head.strip_prefix(['#', '^']).is_some_and(|n| !n.trim_end_matches('~').trim().is_empty());
+        let inside = blocks.iter().any(|b| b.0);
+        let guard = if lead { "{{~#js_nest}}" } else { "{{#js_nest}}" };
+        if opens {
+            let partial_block = head.starts_with("#>");
+            blocks.push((partial_block || head.starts_with("#*inline"), partial_block && inside));
+            if blocks.len() > MAX_NESTING {
+                let message = format!("blocks nested more than {MAX_NESTING} deep");
+                return Err(Error::Template { message, line: None, column: None });
+            }
+            if partial_block && inside {
+                out.push_str(guard);
+                out.push_str("{{");
+                out.push_str(unlead);
+                out.push_str("}}");
+                rest = &tag[close + 2..];
+                continue;
+            }
+        }
+        if head.starts_with('/') && blocks.pop().is_some_and(|b| b.1) {
+            out.push_str("{{");
+            out.push_str(untrail);
+            out.push_str(if trail { "}}{{/js_nest~}}" } else { "}}{{/js_nest}}" });
+            rest = &tag[close + 2..];
+            continue;
+        }
+        if head.starts_with('>') && inside {
+            out.push_str(guard);
+            out.push_str("{{");
+            out.push_str(untrail.strip_prefix('~').unwrap_or(untrail));
+            out.push_str(if trail { "}}{{/js_nest~}}" } else { "}}{{/js_nest}}" });
+            rest = &tag[close + 2..];
+            continue;
+        }
         // A `~` (whitespace control), then one `{` or `&` (unescaped).
         let tilde = usize::from(inner.starts_with('~'));
         let triple = inner[tilde..].starts_with('{');
@@ -211,7 +363,7 @@ fn rewrite_values(template: &str) -> String {
         rest = &tag[close..];
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
 fn is_path_char(c: char) -> bool {
@@ -324,24 +476,30 @@ fn rewrite_mustache(inner: &str) -> String {
 /// `with`, `lookup` and `log` are available (plus `eq`, `ne`, `gt`, `lt`,
 /// `and`, `or`, `not`, `len` of handlebars-rust).
 pub fn render_template(template: &str, data: &Value) -> Result<String, Error> {
+    let budget = Arc::new(Budget::default());
     let mut hb = Handlebars::new();
     hb.set_strict_mode(false);
     hb.register_escape_fn(handlebars::html_escape);
-    hb.register_helper("js_length", Box::new(js_length));
-    hb.register_helper("js_str", Box::new(js_str));
-    hb.register_helper("if", Box::new(JsIf { positive: true }));
-    hb.register_helper("unless", Box::new(JsIf { positive: false }));
-    hb.register_helper("with", Box::new(JsWith));
-    hb.render_template(&rewrite_values(&rewrite_length(template)), data).map_err(|e| {
+    hb.register_helper("js_length", Box::new(Counted(js_length, budget.clone())));
+    hb.register_helper("js_str", Box::new(Counted(js_str, budget.clone())));
+    hb.register_helper("if", Box::new(Counted(JsIf { positive: true }, budget.clone())));
+    hb.register_helper("unless", Box::new(Counted(JsIf { positive: false }, budget.clone())));
+    hb.register_helper("with", Box::new(Counted(JsWith, budget.clone())));
+    hb.register_helper("js_nest", Box::new(JsNest(budget)));
+    let mut out = Capped::default();
+    hb.render_template_to_write(&rewrite_values(&rewrite_length(template))?, data, &mut out).map_err(|e| {
         let (message, line, column) = match e.reason() {
             RenderErrorReason::TemplateError(t) => {
                 let pos = t.pos();
                 (t.reason().to_string(), pos.map(|p| p.0), pos.map(|p| p.1))
             }
+            RenderErrorReason::IOError(io) => (io.to_string(), None, None),
             other => (other.to_string(), e.line_no, e.column_no),
         };
         Error::Template { message, line, column }
-    })
+    })?;
+    // Only whole `str` pieces were written.
+    Ok(String::from_utf8(out.0).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
 #[cfg(test)]
@@ -473,6 +631,61 @@ mod tests {
         assert_eq!(rewrite_length("no lengths {{x}}"), "no lengths {{x}}");
         let raw = "{{{{raw}}}}{{x.length}}{{{{/raw}}}} {{!-- {{x.length}} --}}";
         assert_eq!(rewrite_length(raw), raw);
+    }
+
+    #[test]
+    fn partials_render_and_cannot_recurse_without_end() {
+        let data = json!({"name": "root", "kids": [{"name": "a", "kids": [{"name": "b", "kids": []}]}]});
+        let tree =
+            "{{#*inline \"node\"}}<li>{{name}}<ul>{{#each kids}}{{> node}}{{/each}}</ul></li>{{/inline}}{{> node}}";
+        assert_eq!(
+            render_template(tree, &data).unwrap(),
+            "<li>root<ul><li>a<ul><li>b<ul></ul></li></ul></li></ul></li>"
+        );
+        // Whitespace control and partial blocks still work.
+        let t = "{{#*inline \"q\"}}Q{{/inline}}{{#*inline \"p\"}}[{{> @partial-block}}]{{/inline}}\
+                 a {{~> q ~}} b|{{> q}} |{{#> p}}x{{/p}}|{{~#> p~}} y {{~/p~}} |";
+        assert_eq!(render_template(t, &data).unwrap(), "aQb|Q |[x]|[y]|");
+        // Calls outside partials keep their standalone-line whitespace.
+        assert_eq!(rewrite_values("<ul>\n  {{> q}}\n</ul>").unwrap(), "<ul>\n  {{> q}}\n</ul>");
+        for cycle in [
+            "{{#*inline \"a\"}}x{{> a}}{{/inline}}{{> a}}",
+            "{{#*inline \"a\"}}{{> b}}{{/inline}}{{#*inline \"b\"}}{{> a}}{{/inline}}{{> a}}",
+            "{{#*inline \"a\"}}{{#> a}}{{/a}}{{/inline}}{{> a}}",
+        ] {
+            let err = render_template(cycle, &data).unwrap_err();
+            assert!(err.to_string().contains("partials nested more than"), "{cycle}: {err}");
+        }
+        // The deepest tree allowed (a top-level call, then MAX_PARTIAL_DEPTH
+        // nested ones) renders on a test thread's stack.
+        let mut deep = json!({"name": "leaf", "kids": []});
+        for _ in 0..MAX_PARTIAL_DEPTH {
+            deep = json!({"name": "n", "kids": [deep]});
+        }
+        let tree = "{{#*inline \"node\"}}{{#if name}}<li>{{name}}{{#with this}}<ul>{{#each kids}}{{> node}}{{/each}}\
+                    </ul>{{/with}}</li>{{/if}}{{/inline}}{{> node}}";
+        assert!(render_template(tree, &deep).unwrap().contains("leaf"));
+        let err = render_template(tree, &json!({"name": "n", "kids": [deep]})).unwrap_err();
+        assert!(err.to_string().contains("partials nested more than"), "{err}");
+    }
+
+    #[test]
+    fn renderings_are_bounded() {
+        let data = json!({"a": (0..200).collect::<Vec<_>>()});
+        let start = std::time::Instant::now();
+        // 200^4 rows of output, or of steps printing nothing.
+        let each = "{{#each a}}{{#each ../a}}{{#each ../../a}}{{#each ../../../a}}";
+        let end = "{{/each}}{{/each}}{{/each}}{{/each}}";
+        let err = render_template(&format!("{each}<p>{{{{this}}}}</p>{end}"), &data).unwrap_err();
+        assert!(err.to_string().contains("larger than 16 MiB"), "{err}");
+        let err = render_template(&format!("{each}{{{{missing}}}}{end}"), &data).unwrap_err();
+        assert!(err.to_string().contains("too many steps"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
+        // Deeply nested blocks.
+        let deep = |n: usize| format!("{}x{}", "{{#if a}}".repeat(n), "{{/if}}".repeat(n));
+        assert_eq!(render_template(&deep(MAX_NESTING), &data).unwrap(), "x");
+        let err = render_template(&deep(MAX_NESTING + 1), &data).unwrap_err();
+        assert!(err.to_string().contains("nested more than"), "{err}");
     }
 
     #[test]
