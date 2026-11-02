@@ -60,6 +60,12 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::io::Write::write_all(&mut tmp, data)?;
+    // The temporary file is private (0600): keep the mode of the file it
+    // replaces, so a group-readable workspace file stays readable.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = tmp.as_file().set_permissions(meta.permissions());
+    }
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -1715,6 +1721,25 @@ mod tests {
         write_atomic(&link, b"new").unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_mode_of_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for m in [0o644, 0o640, 0o600] {
+            let p = dir.path().join(format!("f{m:o}.json"));
+            std::fs::write(&p, "old").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).unwrap();
+            write_atomic(&p, b"new").unwrap();
+            assert_eq!((mode(&p), std::fs::read_to_string(&p).unwrap().as_str()), (m, "new"));
+        }
+        // New files stay private, as before.
+        let p = dir.path().join("new.json");
+        write_atomic(&p, b"x").unwrap();
+        assert_eq!(mode(&p), 0o600);
     }
 
     #[test]
