@@ -190,6 +190,12 @@ impl CaptureEntry {
     /// The captured response as an example (decoded body, without
     /// `Content-Encoding`/`Content-Length`). `None` without a response.
     pub fn to_example(&self) -> Option<Example> {
+        self.example(&ImportOptions::default())
+    }
+
+    /// [`to_example`](Self::to_example) whose saved request follows `opts`
+    /// (no `Cookie` without `keep_cookies`, ...), like the item's own.
+    fn example(&self, opts: &ImportOptions) -> Option<Example> {
         let status = self.status?;
         if self.kind != EntryKind::Http {
             return None;
@@ -217,7 +223,7 @@ impl CaptureEntry {
         };
         Some(Example {
             name: format!("{} {}", status, self.status_text()).trim().to_owned(),
-            request: Some(self.to_http_request(&ImportOptions { include_example: false, ..ImportOptions::default() })),
+            request: Some(self.to_http_request(&ImportOptions { include_example: false, ..opts.clone() })),
             status,
             status_text: self.status_text().to_owned(),
             headers,
@@ -238,7 +244,7 @@ impl CaptureEntry {
                 let mut item = RequestItem::new(self.request_name(), req);
                 item.description = notes.join("\n");
                 if opts.include_example
-                    && let Some(ex) = self.to_example()
+                    && let Some(ex) = self.example(opts)
                 {
                     item.examples.push(ex);
                 }
@@ -430,6 +436,25 @@ mod tests {
         assert_eq!(req.params[0].key, "x");
         let no_cookies = e.to_http_request(&ImportOptions { keep_cookies: false, ..Default::default() });
         assert!(no_cookies.header("cookie").is_none());
+    }
+
+    #[test]
+    fn example_request_follows_the_import_options() {
+        let mut e = entry(
+            "GET",
+            "https://api.test/me",
+            &[("cookie", "sid=secret"), ("sec-fetch-mode", "cors"), ("accept", "*/*")],
+            b"",
+        );
+        e.status = Some(200);
+        let opts = ImportOptions { keep_cookies: false, drop_browser_headers: true, ..Default::default() };
+        let item = e.to_request_item(&opts).unwrap();
+        for req in [item.http().unwrap(), item.examples[0].request.as_ref().unwrap()] {
+            let names: Vec<&str> = req.headers.iter().map(|h| h.key.as_str()).collect();
+            assert_eq!(names, ["Accept"]);
+        }
+        // Without options the example keeps what was captured, as before.
+        assert!(e.to_example().unwrap().request.unwrap().header("cookie").is_some());
     }
 
     #[test]
