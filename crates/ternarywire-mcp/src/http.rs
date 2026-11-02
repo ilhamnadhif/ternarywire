@@ -361,17 +361,16 @@ impl HttpConn {
         }
     }
 
-    /// POSTs the message, authorizing and retrying on 401.
-    async fn send_authorized(&self, msg: &Outbound) -> Result<reqwest::Response, McpError> {
+    /// Sends the request `build` makes with the access token, authorizing
+    /// and retrying on 401 (or a 403 step-up).
+    async fn send_authorized(
+        &self,
+        build: impl Fn(Option<&str>) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, McpError> {
         let mut attempt = 0;
         loop {
             let token = self.token().await;
-            let rb = self
-                .with_session(self.client.post(self.url.clone()), token.as_deref())
-                .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json, text/event-stream")
-                .body(msg.json.clone());
-            let resp = rb.send().await.map_err(|e| self.net_err(e))?;
+            let resp = build(token.as_deref()).send().await.map_err(|e| self.net_err(e))?;
             let status = resp.status().as_u16();
             if let Some(auth) = &self.auth
                 && attempt < AUTH_ATTEMPTS
@@ -388,7 +387,14 @@ impl HttpConn {
     }
 
     async fn post_inner(&self, msg: &Outbound) -> Result<(), McpError> {
-        let resp = self.send_authorized(msg).await?;
+        let resp = self
+            .send_authorized(|token| {
+                self.with_session(self.client.post(self.url.clone()), token)
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ACCEPT, "application/json, text/event-stream")
+                    .body(msg.json.clone())
+            })
+            .await?;
         self.capture_session(&resp);
         let status = resp.status();
         if status.as_u16() == 202 || status.as_u16() == 204 {
@@ -542,12 +548,13 @@ impl HttpConn {
 
     /// `GET` resuming a broken stream after the event `last_id`.
     async fn resume(&self, last_id: &str) -> Result<reqwest::Response, McpError> {
-        let token = self.token().await;
-        let rb = self
-            .with_session(self.client.get(self.url.clone()), token.as_deref())
-            .header(ACCEPT, "text/event-stream")
-            .header("last-event-id", last_id);
-        let resp = rb.send().await.map_err(|e| self.net_err(e))?;
+        let resp = self
+            .send_authorized(|token| {
+                self.with_session(self.client.get(self.url.clone()), token)
+                    .header(ACCEPT, "text/event-stream")
+                    .header("last-event-id", last_id)
+            })
+            .await?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let message = error_message(&body_prefix(resp, MAX_SMALL_BODY).await);
@@ -593,7 +600,16 @@ impl HttpConn {
                     auth_attempts = 0;
                     let mut stream = resp.bytes_stream();
                     let mut parser = SseParser::new();
-                    while let Some(Ok(chunk)) = stream.next().await {
+                    let mut ended = false;
+                    loop {
+                        let chunk = match stream.next().await {
+                            Some(Ok(chunk)) => chunk,
+                            Some(Err(_)) => break,
+                            None => {
+                                ended = true;
+                                break;
+                            }
+                        };
                         let events = match parser.feed(&chunk) {
                             Ok(events) => events,
                             Err(e) => {
@@ -612,14 +628,28 @@ impl HttpConn {
                         }
                         retry = parser.retry_ms().or(retry);
                     }
+                    // A last event without its blank line, like on the POST streams.
+                    if ended && let Ok(Some(ev)) = parser.finish() {
+                        got_events = true;
+                        if ev.event == "message" {
+                            self.shared.handle_incoming(&ev.data);
+                        }
+                        if let Some(id) = parser.last_event_id() {
+                            last_event_id = Some(id.to_string());
+                        }
+                    }
                 }
-                Ok(resp) if self.auth.is_some() && resp.status().as_u16() == 401 && auth_attempts < AUTH_ATTEMPTS => {
-                    let www = www_authenticate(&resp);
+                Ok(resp)
+                    if self.auth.is_some()
+                        && auth_attempts < AUTH_ATTEMPTS
+                        && wants_auth(resp.status().as_u16(), www_authenticate(&resp).as_deref()) =>
+                {
+                    let (status, www) = (resp.status().as_u16(), www_authenticate(&resp));
                     drop(resp);
                     let first = auth_attempts == 0;
                     auth_attempts += 1;
                     if let Some(auth) = &self.auth
-                        && auth.on_unauthorized(401, www.as_deref(), token.as_deref(), first).await.is_err()
+                        && auth.on_unauthorized(status, www.as_deref(), token.as_deref(), first).await.is_err()
                     {
                         return;
                     }

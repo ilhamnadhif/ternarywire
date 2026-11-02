@@ -29,6 +29,8 @@ struct AppState {
     hang_initialized: bool,
     /// The GET stream sends one event with `retry: 150`, then closes.
     listen_with_retry: bool,
+    /// The GET stream sends one event without its closing blank line.
+    listen_unterminated: bool,
     gets: AtomicUsize,
     /// `Last-Event-ID` headers of GET requests.
     resumed_from: Mutex<Vec<String>>,
@@ -110,6 +112,10 @@ async fn handle_get(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         let id = st.resume_id.lock().clone().unwrap_or(Value::Null);
         let answer = Event::default().id("e2").data(text_result(&id, "resumed").to_string());
         return Sse::new(stream::iter([Ok::<_, Infallible>(answer)]).chain(stream::pending())).into_response();
+    }
+    if st.listen_unterminated {
+        let note = json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
+        return ([(header::CONTENT_TYPE, "text/event-stream")], format!("data: {note}")).into_response();
     }
     if !st.listen_with_retry {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -197,6 +203,20 @@ async fn the_get_stream_reconnects_after_the_servers_retry_delay() {
     // retry: 150 instead of the default 2 s between connections.
     let gets = state.gets.load(Ordering::SeqCst);
     assert!(gets >= 4, "{gets} GET requests");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn the_get_stream_delivers_a_last_event_without_its_blank_line() {
+    let (url, _) = spawn(AppState { listen_unterminated: true, ..Default::default() }).await;
+    let (events, on_event) = recorder();
+    let client = McpClient::connect(config(&url, Duration::from_secs(10)), on_event).await.unwrap();
+    wait_for(
+        &events,
+        "the notification",
+        |e| matches!(e, McpEvent::Notification { method, .. } if method == "notifications/tools/list_changed"),
+    )
+    .await;
     client.close().await;
 }
 

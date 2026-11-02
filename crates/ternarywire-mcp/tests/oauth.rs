@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -64,6 +64,11 @@ struct Fake {
     unauthorized: AtomicUsize,
     refreshes: AtomicUsize,
     next: AtomicUsize,
+    /// The `tools/call` "resume" waiting for its answer on a resumed stream.
+    resume_id: Mutex<Option<Value>>,
+    /// The first GET stream is refused with a 403 `insufficient_scope`.
+    step_up: bool,
+    stepped_up: AtomicBool,
 }
 
 impl Fake {
@@ -108,7 +113,8 @@ fn rpc(id: &Value, result: Value) -> Response {
     ([("mcp-session-id", "oauth-sess")], Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))).into_response()
 }
 
-async fn mcp(State(f): St, headers: HeaderMap, body: String) -> Response {
+/// The bearer token of a request, or the 401 to answer it with.
+fn authorized(f: &Fake, headers: &HeaderMap) -> Result<String, Box<Response>> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -125,11 +131,32 @@ async fn mcp(State(f): St, headers: HeaderMap, body: String) -> Response {
             ),
             _ => "Bearer realm=\"mcp\"".to_string(),
         };
-        return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, www)], Json(json!({"error": "invalid_token"})))
-            .into_response();
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, www)], Json(json!({"error": "invalid_token"})))
+                .into_response(),
+        ));
     }
+    Ok(token)
+}
+
+fn sse_body(text: String) -> Response {
+    ([(header::CONTENT_TYPE, "text/event-stream")], text).into_response()
+}
+
+async fn mcp(State(f): St, headers: HeaderMap, body: String) -> Response {
+    let token = match authorized(&f, &headers) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
     let msg: Value = serde_json::from_str(&body).unwrap();
     let Some(id) = msg.get("id").cloned() else { return StatusCode::ACCEPTED.into_response() };
+    if msg["method"] == "tools/call" && msg["params"]["name"] == "resume" {
+        // The stream ends before the answer, and the token expires meanwhile.
+        *f.resume_id.lock() = Some(id);
+        f.access.lock().clear();
+        let progress = json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": 1, "progress": 0.5}});
+        return sse_body(format!("id: r1\nretry: 50\ndata: {progress}\n\n"));
+    }
     match msg["method"].as_str().unwrap_or("") {
         "initialize" => rpc(
             &id,
@@ -138,6 +165,29 @@ async fn mcp(State(f): St, headers: HeaderMap, body: String) -> Response {
         "tools/call" => rpc(&id, json!({"content": [{"type": "text", "text": token}]})),
         _ => rpc(&id, json!({})),
     }
+}
+
+async fn mcp_get(State(f): St, headers: HeaderMap) -> Response {
+    if let Err(resp) = authorized(&f, &headers) {
+        return *resp;
+    }
+    if headers.get("last-event-id").and_then(|v| v.to_str().ok()) == Some("r1") {
+        let id = f.resume_id.lock().clone().unwrap_or(Value::Null);
+        let answer = json!({"jsonrpc": "2.0", "id": id, "result": {"content": [{"type": "text", "text": "resumed"}]}});
+        return sse_body(format!("id: r2\ndata: {answer}\n\n"));
+    }
+    if !f.step_up {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    if !f.stepped_up.swap(true, Ordering::SeqCst) {
+        let www = format!(
+            "Bearer error=\"insufficient_scope\", scope=\"mcp:admin\", resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
+            f.base()
+        );
+        return (StatusCode::FORBIDDEN, [(header::WWW_AUTHENTICATE, www)]).into_response();
+    }
+    let note = json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
+    sse_body(format!("data: {note}\n\n"))
 }
 
 async fn prm(State(f): St) -> Response {
@@ -268,7 +318,7 @@ async fn spawn(fake: Fake) -> Arc<Fake> {
     ternarywire_http::tls::install_provider();
     let fake = Arc::new(fake);
     let app = Router::new()
-        .route("/mcp", post(mcp))
+        .route("/mcp", post(mcp).get(mcp_get))
         .route("/.well-known/oauth-protected-resource/mcp", get(prm))
         .route("/.well-known/oauth-authorization-server/auth", get(rfc8414))
         .route("/auth/.well-known/openid-configuration", get(oidc))
@@ -411,6 +461,52 @@ async fn full_flow_refresh_and_reuse() {
         .collect();
     let log = log.join("\n");
     assert!(!log.contains(&first) && !log.contains("rt-"), "{log}");
+}
+
+#[tokio::test]
+async fn a_resumed_stream_refreshes_an_expired_token() {
+    let fake = spawn(Fake::default()).await;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let client = McpClient::builder(config(&fake))
+        .oauth(browser(Arc::new(MemoryOAuthStorage::default()), opened.clone()))
+        .connect()
+        .await
+        .unwrap();
+    let r = client.call_tool("resume", json!({})).await.expect("answered on the resumed stream");
+    assert_eq!(r.text(), "resumed");
+    assert_eq!(fake.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(opened.load(Ordering::SeqCst), 1, "refreshed without a second login");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn the_get_stream_signs_in_again_for_more_scopes() {
+    let fake = spawn(Fake { step_up: true, ..Default::default() }).await;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let (events, on_event) = recorder();
+    let client = McpClient::builder(config(&fake))
+        .oauth(browser(Arc::new(MemoryOAuthStorage::default()), opened.clone()))
+        .on_event(on_event)
+        .connect()
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if events.lock().iter().any(|e| matches!(e, McpEvent::Notification { .. })) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        events.lock().iter().any(
+            |e| matches!(e, McpEvent::Notification { method, .. } if method == "notifications/tools/list_changed")
+        ),
+        "{:#?}",
+        events.lock()
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), 2, "a second login for the step-up");
+    let scopes: Vec<String> = fake.authorize_params.lock().iter().map(|q| q["scope"].clone()).collect();
+    assert!(scopes.last().is_some_and(|s| s.contains("mcp:admin")), "{scopes:?}");
+    client.close().await;
 }
 
 #[tokio::test]
