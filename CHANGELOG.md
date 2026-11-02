@@ -2,6 +2,12 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.2.2 — 2026-11-02
+
+### Changed
+- Merpati is now TernaryWire, one of the Ternary family with TernaryGrid (SQL client) and TernaryShell (SSH and SFTP client). The app, its files and its downloads carry the new name, and it has a new icon: a route through the 3 × 3 lattice the three apps share.
+- The command-line tool is `ternarywire` (`ternarywire run` replaces `merpati run`), the GitHub Action is `ilhamnadhif/ternarywire`, and a workspace is a folder with a `ternarywire.json` file (local state in `.ternarywire/`). Settings and saved secrets are kept under the new name; nothing is read from Merpati's folders or Keychain entries.
+
 ## 0.2.1 — 2026-10-31
 
 ### Fixed

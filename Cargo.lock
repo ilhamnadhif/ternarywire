@@ -6400,7 +6400,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-ai"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "futures-util",
@@ -6418,7 +6418,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -6467,7 +6467,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-auth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6501,7 +6501,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -6533,7 +6533,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-convert"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6552,7 +6552,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6574,7 +6574,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-flows"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "chrono",
@@ -6596,7 +6596,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-grpc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6628,7 +6628,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-html"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "eframe",
@@ -6644,7 +6644,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-http"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6685,7 +6685,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6708,7 +6708,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-mock"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "bytes",
@@ -6730,7 +6730,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-mqtt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -6750,7 +6750,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-proxy"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6792,7 +6792,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-runner"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "bytes",
@@ -6825,7 +6825,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-script"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6860,7 +6860,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-secrets"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6885,7 +6885,7 @@ dependencies = [
 
 [[package]]
 name = "ternarywire-socketio"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
