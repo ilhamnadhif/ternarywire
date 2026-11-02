@@ -87,8 +87,9 @@ fn start_element(e: &BytesStart<'_>, parent_scope: &Rc<HashMap<String, String>>)
 
 /// Parses a document and returns its root element.
 pub fn parse(text: &str) -> Result<Element, ConvertError> {
+    // Text is trimmed per element once it is complete: trimming each event
+    // would also drop the spaces around entity references (`a &amp; b`).
     let mut reader = quick_xml::Reader::from_str(text);
-    reader.config_mut().trim_text(true);
     let mut stack: Vec<Element> = Vec::new();
     let root_scope = Rc::new(HashMap::new());
     let mut root: Option<Element> = None;
@@ -114,7 +115,11 @@ pub fn parse(text: &str) -> Result<Element, ConvertError> {
                 }
             }
             Event::End(_) => {
-                let el = stack.pop().ok_or_else(|| ConvertError::Xml("unbalanced end tag".into()))?;
+                let mut el = stack.pop().ok_or_else(|| ConvertError::Xml("unbalanced end tag".into()))?;
+                let trimmed = el.text.trim();
+                if trimmed.len() != el.text.len() {
+                    el.text = trimmed.to_string();
+                }
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(el),
                     None => root = Some(el),
@@ -180,9 +185,13 @@ mod tests {
         let child = doc.child("child").unwrap();
         assert_eq!(child.ns, "urn:d");
         assert_eq!(child.attr("x"), Some("1"));
-        assert_eq!(child.text, "t&c");
+        assert_eq!(child.text, "t & c");
         assert_eq!(doc.children[1].ns, "urn:a");
         assert_eq!(doc.resolve_qname("a:Foo"), ("urn:a".to_string(), "Foo".to_string()));
         assert!(parse("<a><b></a>").is_err());
+        // Spaces around entities stay; the text of each element is trimmed.
+        let doc = parse("<a>\n  <b> x &amp; y &lt; z </b>\n  <c/>\n</a>").unwrap();
+        assert_eq!(doc.text, "");
+        assert_eq!(doc.children[0].text, "x & y < z");
     }
 }
