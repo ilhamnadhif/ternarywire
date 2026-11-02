@@ -2,6 +2,8 @@
 //! and light normalization. These work on strings that may still contain
 //! `{{variables}}`, so they cannot rely on a full URL parser.
 
+use std::collections::{HashMap, VecDeque};
+
 use crate::model::KeyValue;
 
 /// Byte index of the `?` that starts the query, ignoring `?` inside `{{ }}`.
@@ -68,12 +70,31 @@ pub fn parse_query(query: &str) -> Vec<KeyValue> {
 /// percent-encoded outside `{{variables}}`, so a typed value comes back as
 /// one param; everything else is kept as typed.
 pub fn build_query(params: &[KeyValue]) -> String {
+    query_like(params, "")
+}
+
+/// [`build_query`], keeping the `=` of empty values that had one in `old`
+/// (`b=` and `b` are both an empty `b` row, but not the same query).
+fn query_like(params: &[KeyValue], old: &str) -> String {
+    let mut had_eq: HashMap<&str, VecDeque<bool>> = HashMap::new();
+    for piece in old.split('&').filter(|p| !p.is_empty()) {
+        let (key, eq) = piece.split_once('=').map_or((piece, false), |(k, _)| (k, true));
+        had_eq.entry(key).or_default().push_back(eq);
+    }
     params
         .iter()
         .filter(|p| p.enabled && !(p.key.is_empty() && p.value.is_empty()))
         .map(|p| {
             let key = escape_query_part(&p.key, true);
-            if p.value.is_empty() { key } else { format!("{key}={}", escape_query_part(&p.value, false)) }
+            // Matched by occurrence of the key, so editing other rows keeps it.
+            let eq = had_eq.get_mut(key.as_str()).and_then(VecDeque::pop_front).unwrap_or(false);
+            if !p.value.is_empty() {
+                format!("{key}={}", escape_query_part(&p.value, false))
+            } else if eq {
+                format!("{key}=")
+            } else {
+                key
+            }
         })
         .collect::<Vec<_>>()
         .join("&")
@@ -128,8 +149,8 @@ pub fn merge_params_from_url(url: &str, existing: &[KeyValue]) -> Vec<KeyValue> 
 
 /// Replaces the query part of `url` with the enabled `params`.
 pub fn replace_query(url: &str, params: &[KeyValue]) -> String {
-    let (base, _, fragment) = split(url);
-    let q = build_query(params);
+    let (base, old, fragment) = split(url);
+    let q = query_like(params, old.unwrap_or(""));
     if q.is_empty() { format!("{base}{fragment}") } else { format!("{base}?{q}{fragment}") }
 }
 
@@ -267,6 +288,19 @@ mod tests {
         assert_eq!((back[1].key.as_str(), back[1].value.as_str()), ("a%3Db", "{{token}}"));
         // Already encoded text is kept as typed.
         assert_eq!(build_query(&[KeyValue::new("q", "a%26b")]), "q=a%26b");
+    }
+
+    #[test]
+    fn empty_values_keep_their_equals_sign() {
+        // `b=` sends an empty value, `flag` none; Postman tells them apart.
+        let mut r = crate::model::HttpRequest::new("GET", "{{baseUrl}}/users?flag&b=&c=1#top");
+        r.sync_url_from_params();
+        assert_eq!(r.url, "{{baseUrl}}/users?flag&b=&c=1#top");
+        // Editing another row, or clearing a value, keeps the others as typed.
+        r.params[2].value.clear();
+        r.params.insert(0, KeyValue::new("new", ""));
+        r.sync_url_from_params();
+        assert_eq!(r.url, "{{baseUrl}}/users?new&flag&b=&c=#top");
     }
 
     #[test]
