@@ -6,20 +6,20 @@
 # Measures: binary sizes, cold start to first frame, idle memory (RSS and
 # physical footprint as shown by Activity Monitor), 5 open request tabs,
 # a 100 MB response, a 10,000-request workspace, and runner memory over
-# 100/1,000/3,000 iterations. The GUI is driven by the MERPATI_AUTOMATION hook.
+# 100/1,000/3,000 iterations. The GUI is driven by the TERNARYWIRE_AUTOMATION hook.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="${BENCH_DIR:-$(mktemp -d -t merpati-bench)}"
+WORK="${BENCH_DIR:-$(mktemp -d -t ternarywire-bench)}"
 # BENCH_PROFILE=dist measures the shipped profile; BENCH_TARGET_DIR another target dir.
 PROFILE="${BENCH_PROFILE:-release}"
 TARGET="${BENCH_TARGET_DIR:-$ROOT/target}"
-APP="$TARGET/$PROFILE/merpati-app"
-CLI="$TARGET/$PROFILE/merpati"
-export MERPATI_SECRETS=file
+APP="$TARGET/$PROFILE/ternarywire-app"
+CLI="$TARGET/$PROFILE/ternarywire"
+export TERNARYWIRE_SECRETS=file
 
 echo "== building $PROFILE binaries"
-(cd "$ROOT" && cargo build --profile "$PROFILE" --target-dir "$TARGET" -p merpati-app -p merpati-cli >/dev/null)
+(cd "$ROOT" && cargo build --profile "$PROFILE" --target-dir "$TARGET" -p ternarywire-app -p ternarywire-cli >/dev/null)
 printf "binary sizes: app %.1f MB, cli %.1f MB\n" \
   "$(echo "$(stat -f%z "$APP") / 1048576" | bc -l)" "$(echo "$(stat -f%z "$CLI") / 1048576" | bc -l)"
 
@@ -58,10 +58,10 @@ trap 'kill $SERVER 2>/dev/null || true' EXIT
 sleep 1
 
 run_app() { # steps.json workspace
-  MERPATI_CONFIG_DIR="$WORK/config-$(basename "$2")" MERPATI_AUTOMATION="$1" "$APP" "$2" >"$WORK/app.log" 2>&1 &
+  TERNARYWIRE_CONFIG_DIR="$WORK/config-$(basename "$2")" TERNARYWIRE_AUTOMATION="$1" "$APP" "$2" >"$WORK/app.log" 2>&1 &
   local pid=$! worker_max=0 r
   while kill -0 "$pid" 2>/dev/null; do
-    r=$(ps -axo rss=,command= | awk '/--merpati-script-worker/ && !/awk/ {s+=$1} END {print s+0}')
+    r=$(ps -axo rss=,command= | awk '/--ternarywire-script-worker/ && !/awk/ {s+=$1} END {print s+0}')
     [ "$r" -gt "$worker_max" ] && worker_max=$r
     sleep 0.1
   done
@@ -97,7 +97,7 @@ for n in 100 1000 3000; do
   worker_max=0
   cli_max=0
   while kill -0 "$pid" 2>/dev/null; do
-    r=$(ps -axo rss=,command= | awk '/--merpati-script-worker/ && !/awk/ {s+=$1} END {print s+0}')
+    r=$(ps -axo rss=,command= | awk '/--ternarywire-script-worker/ && !/awk/ {s+=$1} END {print s+0}')
     [ "$r" -gt "$worker_max" ] && worker_max=$r
     r=$(ps -axo rss=,command= | awk -v cli="$CLI run" 'index($0, cli) && !/script-worker|awk|time -l/ {s+=$1} END {print s+0}')
     [ "$r" -gt "$cli_max" ] && cli_max=$r

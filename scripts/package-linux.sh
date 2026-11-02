@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Packages the Linux build for the host architecture (x86_64 or aarch64):
 #
-#   cargo build --profile dist --locked -p merpati-app -p merpati-cli
-#   scripts/package-linux.sh            # into target/dist-pkg (MERPATI_DIST_DIR)
+#   cargo build --profile dist --locked -p ternarywire-app -p ternarywire-cli
+#   scripts/package-linux.sh            # into target/dist-pkg (TERNARYWIRE_DIST_DIR)
 #
-#   merpati-<v>-linux-<arch>.tar.gz     any distribution (unpack and run)
-#   merpati_<v>_<amd64|arm64>.deb       Debian, Ubuntu, Mint, Pop!_OS, ...
-#   merpati-<v>-1.<arch>.rpm            Fedora, RHEL, Rocky, openSUSE, ...
-#   Merpati-<v>-<arch>.AppImage         most others (Arch, Manjaro, ...)
+#   ternarywire-<v>-linux-<arch>.tar.gz     any distribution (unpack and run)
+#   ternarywire_<v>_<amd64|arm64>.deb       Debian, Ubuntu, Mint, Pop!_OS, ...
+#   ternarywire-<v>-1.<arch>.rpm            Fedora, RHEL, Rocky, openSUSE, ...
+#   TernaryWire-<v>-<arch>.AppImage         most others (Arch, Manjaro, ...)
 #
 # Needs dpkg-dev (dpkg-deb, dpkg-shlibdeps), rpm (rpmbuild) and, for the
 # AppImage, appimagetool (downloaded into target/ unless APPIMAGETOOL points
@@ -26,16 +26,16 @@ case "$ARCH" in
   *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 BIN="$ROOT/target/dist"
-OUT="${MERPATI_DIST_DIR:-$ROOT/target/dist-pkg}"
+OUT="${TERNARYWIRE_DIST_DIR:-$ROOT/target/dist-pkg}"
 WORK="$ROOT/target/linux-pkg"
-REPO="https://github.com/ilhamnadhif/merpati"
+REPO="https://github.com/ilhamnadhif/ternarywire"
 SUMMARY="Lightweight native API client"
-DESCRIPTION="Merpati is a fast, native API client written in Rust: HTTP, GraphQL, gRPC,
+DESCRIPTION="TernaryWire is a fast, native API client written in Rust: HTTP, GraphQL, gRPC,
 WebSocket, Socket.IO, MQTT, MCP and AI requests, Postman-compatible collections
 and scripts, a collection runner, mock server and a newman-compatible CLI
-(merpati). No account, no telemetry; workspaces are plain files."
+(ternarywire). No account, no telemetry; workspaces are plain files."
 
-for f in merpati-app merpati; do
+for f in ternarywire-app ternarywire; do
   [[ -x "$BIN/$f" ]] || { echo "missing $BIN/$f: build with --profile dist first" >&2; exit 1; }
 done
 rm -rf "$WORK"
@@ -43,22 +43,22 @@ mkdir -p "$WORK" "$OUT"
 
 echo "== file tree"
 TREE="$WORK/tree"
-install -Dm755 "$BIN/merpati-app" "$TREE/usr/bin/merpati-app"
-install -Dm755 "$BIN/merpati" "$TREE/usr/bin/merpati"
-install -Dm644 packaging/linux/merpati.desktop "$TREE/usr/share/applications/merpati.desktop"
-for icon in packaging/linux/icons/hicolor/*/apps/merpati.png; do
+install -Dm755 "$BIN/ternarywire-app" "$TREE/usr/bin/ternarywire-app"
+install -Dm755 "$BIN/ternarywire" "$TREE/usr/bin/ternarywire"
+install -Dm644 packaging/linux/ternarywire.desktop "$TREE/usr/share/applications/ternarywire.desktop"
+for icon in packaging/linux/icons/hicolor/*/apps/ternarywire.png; do
   install -Dm644 "$icon" "$TREE/usr/share/icons/${icon#packaging/linux/icons/}"
 done
-install -Dm644 README.md "$TREE/usr/share/doc/merpati/README.md"
+install -Dm644 README.md "$TREE/usr/share/doc/ternarywire/README.md"
 cat LICENSE-MIT LICENSE-APACHE > "$WORK/copyright"
-install -Dm644 "$WORK/copyright" "$TREE/usr/share/doc/merpati/copyright"
+install -Dm644 "$WORK/copyright" "$TREE/usr/share/doc/ternarywire/copyright"
 
 echo "== tar.gz"
-TAR_DIR="$WORK/merpati-$VERSION"
+TAR_DIR="$WORK/ternarywire-$VERSION"
 mkdir -p "$TAR_DIR"
-cp "$BIN/merpati-app" "$BIN/merpati" packaging/linux/merpati.desktop README.md LICENSE-MIT LICENSE-APACHE "$TAR_DIR/"
-cp packaging/linux/icons/hicolor/256x256/apps/merpati.png "$TAR_DIR/merpati.png"
-tar -C "$WORK" -czf "$OUT/merpati-$VERSION-linux-$ARCH.tar.gz" "merpati-$VERSION"
+cp "$BIN/ternarywire-app" "$BIN/ternarywire" packaging/linux/ternarywire.desktop README.md LICENSE-MIT LICENSE-APACHE "$TAR_DIR/"
+cp packaging/linux/icons/hicolor/256x256/apps/ternarywire.png "$TAR_DIR/ternarywire.png"
+tar -C "$WORK" -czf "$OUT/ternarywire-$VERSION-linux-$ARCH.tar.gz" "ternarywire-$VERSION"
 
 echo "== deb"
 DEB="$WORK/deb"
@@ -66,14 +66,14 @@ cp -a "$TREE" "$DEB"
 mkdir -p "$DEB/DEBIAN"
 # dpkg-shlibdeps wants a debian/control next to it.
 mkdir -p "$WORK/shlibs/debian"
-printf 'Source: merpati\n\nPackage: merpati\nArchitecture: any\n' > "$WORK/shlibs/debian/control"
-DEPENDS="$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$DEB/usr/bin/merpati-app" "$DEB/usr/bin/merpati" 2>/dev/null |
+printf 'Source: ternarywire\n\nPackage: ternarywire\nArchitecture: any\n' > "$WORK/shlibs/debian/control"
+DEPENDS="$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$DEB/usr/bin/ternarywire-app" "$DEB/usr/bin/ternarywire" 2>/dev/null |
   sed -n 's/^shlibs:Depends=//p')"
 {
-  echo "Package: merpati"
+  echo "Package: ternarywire"
   echo "Version: $VERSION"
   echo "Architecture: $DEB_ARCH"
-  echo "Maintainer: Merpati contributors <ilhamnadhif@users.noreply.github.com>"
+  echo "Maintainer: TernaryWire contributors <ilhamnadhif@users.noreply.github.com>"
   echo "Installed-Size: $(du -sk "$TREE" | cut -f1)"
   echo "Depends: $DEPENDS"
   echo "Recommends: xdg-desktop-portal, gnome-keyring | kwalletmanager"
@@ -83,13 +83,13 @@ DEPENDS="$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$DEB/usr/bin/merpati-app" "$D
   echo "Description: $SUMMARY"
   echo "$DESCRIPTION" | sed 's/^/ /'
 } > "$DEB/DEBIAN/control"
-dpkg-deb --root-owner-group -Zxz --build "$DEB" "$OUT/merpati_${VERSION}_${DEB_ARCH}.deb" >/dev/null
+dpkg-deb --root-owner-group -Zxz --build "$DEB" "$OUT/ternarywire_${VERSION}_${DEB_ARCH}.deb" >/dev/null
 
 echo "== rpm"
 RPM="$WORK/rpm"
 mkdir -p "$RPM"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 {
-  echo "Name: merpati"
+  echo "Name: ternarywire"
   echo "Version: $VERSION"
   echo "Release: 1"
   echo "Summary: $SUMMARY"
@@ -106,22 +106,22 @@ mkdir -p "$RPM"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
   echo "mkdir -p %{buildroot}"
   echo "cp -a $TREE/. %{buildroot}/"
   echo "%files"
-  echo "/usr/bin/merpati-app"
-  echo "/usr/bin/merpati"
-  echo "/usr/share/applications/merpati.desktop"
-  echo "/usr/share/icons/hicolor/*/apps/merpati.png"
-  echo "%doc /usr/share/doc/merpati/README.md"
-  echo "%license /usr/share/doc/merpati/copyright"
-} > "$RPM/SPECS/merpati.spec"
-rpmbuild -bb --quiet --define "_topdir $RPM" --target "$ARCH" "$RPM/SPECS/merpati.spec"
-cp "$RPM/RPMS/$ARCH/merpati-$VERSION-1.$ARCH.rpm" "$OUT/"
+  echo "/usr/bin/ternarywire-app"
+  echo "/usr/bin/ternarywire"
+  echo "/usr/share/applications/ternarywire.desktop"
+  echo "/usr/share/icons/hicolor/*/apps/ternarywire.png"
+  echo "%doc /usr/share/doc/ternarywire/README.md"
+  echo "%license /usr/share/doc/ternarywire/copyright"
+} > "$RPM/SPECS/ternarywire.spec"
+rpmbuild -bb --quiet --define "_topdir $RPM" --target "$ARCH" "$RPM/SPECS/ternarywire.spec"
+cp "$RPM/RPMS/$ARCH/ternarywire-$VERSION-1.$ARCH.rpm" "$OUT/"
 
 echo "== AppImage"
-APPDIR="$WORK/Merpati.AppDir"
+APPDIR="$WORK/TernaryWire.AppDir"
 cp -a "$TREE" "$APPDIR"
-ln -s usr/bin/merpati-app "$APPDIR/AppRun"
-cp packaging/linux/merpati.desktop "$APPDIR/merpati.desktop"
-cp packaging/linux/icons/hicolor/256x256/apps/merpati.png "$APPDIR/merpati.png"
+ln -s usr/bin/ternarywire-app "$APPDIR/AppRun"
+cp packaging/linux/ternarywire.desktop "$APPDIR/ternarywire.desktop"
+cp packaging/linux/icons/hicolor/256x256/apps/ternarywire.png "$APPDIR/ternarywire.png"
 TOOL="${APPIMAGETOOL:-$ROOT/target/appimagetool-$ARCH.AppImage}"
 if [[ ! -x "$TOOL" ]]; then
   curl --proto '=https' --tlsv1.2 -fsSL -o "$TOOL" \
@@ -129,9 +129,9 @@ if [[ ! -x "$TOOL" ]]; then
   chmod +x "$TOOL"
 fi
 # Extract-and-run: CI machines have no FUSE.
-ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" "$OUT/Merpati-$VERSION-$ARCH.AppImage" >/dev/null
+ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" "$OUT/TernaryWire-$VERSION-$ARCH.AppImage" >/dev/null
 
 echo "== checksums"
-(cd "$OUT" && sha256sum "merpati-$VERSION-linux-$ARCH.tar.gz" "merpati_${VERSION}_${DEB_ARCH}.deb" \
-  "merpati-$VERSION-1.$ARCH.rpm" "Merpati-$VERSION-$ARCH.AppImage" > "SHA256SUMS-linux-$ARCH.txt")
+(cd "$OUT" && sha256sum "ternarywire-$VERSION-linux-$ARCH.tar.gz" "ternarywire_${VERSION}_${DEB_ARCH}.deb" \
+  "ternarywire-$VERSION-1.$ARCH.rpm" "TernaryWire-$VERSION-$ARCH.AppImage" > "SHA256SUMS-linux-$ARCH.txt")
 ls -la "$OUT"

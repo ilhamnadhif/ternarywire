@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Merpati</string>
+  <string>TernaryWire</string>
   <key>CFBundleDisplayName</key>
-  <string>Merpati</string>
+  <string>TernaryWire</string>
   <key>CFBundleIdentifier</key>
-  <string>dev.merpati.app</string>
+  <string>dev.ternarywire.app</string>
   <key>CFBundleExecutable</key>
-  <string>merpati-app</string>
+  <string>ternarywire-app</string>
   <key>CFBundleIconFile</key>
-  <string>Merpati</string>
+  <string>TernaryWire</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -36,7 +36,7 @@
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>Merpati sends the API requests you make to servers on your local network.</string>
+  <string>TernaryWire sends the API requests you make to servers on your local network.</string>
   <key>NSHumanReadableCopyright</key>
   <string>MIT OR Apache-2.0</string>
 </dict>

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Builds the fonts bundled with the app (crates/merpati-app/assets/fonts) and
-the icon constants (crates/merpati-app/src/icons.rs).
+"""Builds the fonts bundled with the app (crates/ternarywire-app/assets/fonts) and
+the icon constants (crates/ternarywire-app/src/icons.rs).
 
     python3 -m venv /tmp/ft && /tmp/ft/bin/pip install fonttools
     /tmp/ft/bin/python scripts/build-fonts.py --inter DIR --jetbrains DIR --phosphor DIR
@@ -24,8 +24,8 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "crates", "merpati-app", "assets", "fonts")
-ICONS_RS = os.path.join(ROOT, "crates", "merpati-app", "src", "icons.rs")
+OUT = os.path.join(ROOT, "crates", "ternarywire-app", "assets", "fonts")
+ICONS_RS = os.path.join(ROOT, "crates", "ternarywire-app", "src", "icons.rs")
 
 TEXT_RANGES = ",".join([
     "U+0000-024F",  # Basic Latin, Latin-1, Latin Extended-A/B

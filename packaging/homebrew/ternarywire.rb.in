@@ -1,0 +1,21 @@
+# Homebrew cask for TernaryWire. `scripts/package-macos.sh` fills in the version
+# and checksum; publish the DMG on the release page and put the result in a tap.
+cask "ternarywire" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/ilhamnadhif/ternarywire/releases/download/v#{version}/TernaryWire-#{version}-__ARCH__.dmg"
+  name "TernaryWire"
+  desc "Lightweight native API client (HTTP, GraphQL, gRPC, WebSocket, MQTT, MCP)"
+  homepage "https://github.com/ilhamnadhif/ternarywire"
+
+  depends_on macos: ">= :monterey"
+
+  app "TernaryWire.app"
+  binary "#{appdir}/TernaryWire.app/Contents/MacOS/ternarywire-app", target: "ternarywire-app"
+
+  zap trash: [
+    "~/Library/Application Support/TernaryWire",
+    "~/Library/Preferences/dev.ternarywire.app.plist",
+  ]
+end

@@ -1,0 +1,23 @@
+[package]
+name = "ternarywire-ai"
+description = "AI model requests (OpenAI-compatible, Anthropic, Google Gemini) with MCP tools for TernaryWire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ternarywire-core.workspace = true
+ternarywire-http.workspace = true
+ternarywire-mcp = { path = "../ternarywire-mcp", default-features = false }
+reqwest.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+parking_lot.workspace = true

@@ -6,7 +6,7 @@ Oct 23, 2026 · @Tommy Lumos Empire
 
 Produk ini adalah aplikasi desktop klien API yang ditulis 100% Rust, termasuk UI dan semua klien protokol, dengan paritas fitur terhadap Postman untuk sisi klien. Tujuannya menggantikan Postman bagi pengguna yang terganggu oleh pemakaian memori, waktu start, dan ketergantungan pada akun dan cloud.
 
-Nama kerja sementara: **Merpati**.
+Nama: **TernaryWire** (keluarga Ternary, bersama TernaryGrid dan TernaryShell).
 
 **Masalah.** Postman adalah platform besar dengan 18 area fitur, dari request builder sampai governance dan AI. Aplikasinya berat, dan banyak fitur terikat ke akun dan layanan cloud Postman.
 
@@ -368,7 +368,7 @@ Lima keputusan ini menentukan arah teknis dan perlu dijawab sebelum pengerjaan d
 - [ ] **Mesin JavaScript**: Rust murni (`boa_engine`) dengan risiko kompatibilitas, atau QuickJS dengan pustaka C yang dibundel? Ini menentukan makna "full Rust" dan seberapa mulus koleksi lama berjalan.
 - [ ] **Framework UI**: toolkit siap pakai (`egui`, `iced`, `slint`) atau renderer kustom untuk editor kode dan penampil respons? Rekomendasi awal: toolkit untuk kerangka, komponen editor dan penampil respons ditulis sendiri.
 - [ ] **Platform**: macOS dulu atau lintas platform sejak fase 1?
-- [ ] **Format penyimpanan dan nama**: JSON atau YAML untuk berkas koleksi di disk (selain impor Postman v2.1), lisensi proyek, dan nama final selain nama kerja Merpati; periksa ketersediaan nama di crates.io, GitHub, dan domain.
+- [x] **Format penyimpanan dan nama**: JSON untuk berkas koleksi di disk (selain impor Postman v2.1), lisensi MIT OR Apache-2.0, dan nama final TernaryWire.
 
 ## 16. Sumber
 

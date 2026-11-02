@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Installs (or updates) Merpati from its GitHub releases into /Applications.
+# Installs (or updates) TernaryWire from its GitHub releases into /Applications.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/merpati/master/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternarywire/master/scripts/install.sh | bash
 #   ... | bash -s -- v0.1.0          # a specific version
 #
 # The app is downloaded with curl, so macOS does not quarantine it and it opens without the
@@ -11,15 +11,15 @@
 # used only when /Applications or the installed app is not writable.
 #
 # Environment:
-#   MERPATI_REPO      GitHub repository to install from (default ilhamnadhif/merpati)
-#   MERPATI_APP_DIR   folder to install Merpati.app into (default /Applications)
+#   TERNARYWIRE_REPO      GitHub repository to install from (default ilhamnadhif/ternarywire)
+#   TERNARYWIRE_APP_DIR   folder to install TernaryWire.app into (default /Applications)
 set -euo pipefail
 
-REPO="${MERPATI_REPO:-ilhamnadhif/merpati}"
-APP_DIR="${MERPATI_APP_DIR:-/Applications}"
-APP="$APP_DIR/Merpati.app"
-BUNDLE_ID="dev.merpati.app"
-EXE="merpati-app"
+REPO="${TERNARYWIRE_REPO:-ilhamnadhif/ternarywire}"
+APP_DIR="${TERNARYWIRE_APP_DIR:-/Applications}"
+APP="$APP_DIR/TernaryWire.app"
+BUNDLE_ID="dev.ternarywire.app"
+EXE="ternarywire-app"
 
 TMP=""
 MNT=""
@@ -67,16 +67,16 @@ resolve_release() {
     i=0
     while name="$(json "assets.$i.name")"; do
         case "$name" in
-            "Merpati-$VERSION-macos-universal.zip") zip=$i ;;
-            "Merpati-$VERSION-macos-$arch.zip") arch_zip=$i ;;
-            "Merpati-$VERSION-universal.dmg") dmg=$i ;;
-            "Merpati-$VERSION-$arch.dmg") arch_dmg=$i ;;
+            "TernaryWire-$VERSION-macos-universal.zip") zip=$i ;;
+            "TernaryWire-$VERSION-macos-$arch.zip") arch_zip=$i ;;
+            "TernaryWire-$VERSION-universal.dmg") dmg=$i ;;
+            "TernaryWire-$VERSION-$arch.dmg") arch_dmg=$i ;;
             "SHA256SUMS-macos.txt") sums=$i ;;
         esac
         i=$((i + 1))
     done
     asset="${zip:-${arch_zip:-${dmg:-$arch_dmg}}}"
-    [ -n "$asset" ] || die "release $tag of $REPO has no Merpati-$VERSION-macos-universal.zip or .dmg"
+    [ -n "$asset" ] || die "release $tag of $REPO has no TernaryWire-$VERSION-macos-universal.zip or .dmg"
     NAME="$(json "assets.$asset.name")"
     URL="$(json "assets.$asset.browser_download_url")"
     DIGEST="$(json "assets.$asset.digest" || true)"
@@ -106,36 +106,36 @@ verify_checksum() {
     say "Checksum verified"
 }
 
-# unpack FILE: extracts a .zip or mounts a .dmg; sets SRC to the Merpati.app inside.
+# unpack FILE: extracts a .zip or mounts a .dmg; sets SRC to the TernaryWire.app inside.
 unpack() {
     case "$1" in
         *.zip)
             mkdir "$TMP/unpacked"
             ditto -x -k "$1" "$TMP/unpacked" || die "the download could not be unpacked"
-            SRC="$TMP/unpacked/Merpati.app"
+            SRC="$TMP/unpacked/TernaryWire.app"
             # Tolerate an archive that wraps the app in one folder.
-            [ -d "$SRC" ] || SRC="$(find "$TMP/unpacked" -maxdepth 2 -type d -name Merpati.app | head -n 1)"
+            [ -d "$SRC" ] || SRC="$(find "$TMP/unpacked" -maxdepth 2 -type d -name TernaryWire.app | head -n 1)"
             ;;
         *.dmg)
             MNT="$TMP/mnt"
             mkdir "$MNT"
             hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$MNT" "$1" ||
                 die "the disk image could not be opened"
-            SRC="$MNT/Merpati.app"
+            SRC="$MNT/TernaryWire.app"
             ;;
         *) die "unknown archive: $1" ;;
     esac
-    if [ ! -d "$SRC" ] || [ -L "$SRC" ]; then die "the download does not contain Merpati.app"; fi
+    if [ ! -d "$SRC" ] || [ -L "$SRC" ]; then die "the download does not contain TernaryWire.app"; fi
 }
 
 # check_app APP: the signature, bundle id and version, and the team of the installed copy.
 check_app() {
     $SUDO codesign --verify --deep --strict "$1" 2>/dev/null || die "the downloaded app's signature is not valid"
-    [ "$(plist "$1" CFBundleIdentifier)" = "$BUNDLE_ID" ] || die "the download is not Merpati"
+    [ "$(plist "$1" CFBundleIdentifier)" = "$BUNDLE_ID" ] || die "the download is not TernaryWire"
     [ "$(plist "$1" CFBundleShortVersionString)" = "$VERSION" ] || die "the downloaded version does not match the release"
-    [ "$(plist "$1" CFBundleExecutable)" = "$EXE" ] || die "the download is not Merpati"
+    [ "$(plist "$1" CFBundleExecutable)" = "$EXE" ] || die "the download is not TernaryWire"
     if [ -n "$INSTALLED_TEAM" ] && [ "$(team "$1")" != "$INSTALLED_TEAM" ]; then
-        die "the download is signed by someone else than the installed Merpati; remove $APP first to install it anyway"
+        die "the download is signed by someone else than the installed TernaryWire; remove $APP first to install it anyway"
     fi
 }
 
@@ -148,23 +148,23 @@ install_app() {
 
     if [ ! -w "$APP_DIR" ] || { [ -e "$APP" ] && { [ ! -w "$APP" ] || [ ! -w "$APP/Contents" ]; }; }; then
         SUDO="sudo"
-        say "$APP_DIR or the installed Merpati.app is not writable by $(id -un)."
+        say "$APP_DIR or the installed TernaryWire.app is not writable by $(id -un)."
         say "sudo will ask for your password to replace it."
-        sudo -v || die "Merpati was not installed: administrator rights are needed"
+        sudo -v || die "TernaryWire was not installed: administrator rights are needed"
     fi
 
     if running; then
-        say "Quitting the running Merpati"
+        say "Quitting the running TernaryWire"
         osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
         for _ in $(seq 1 20); do running || break; sleep 0.5; done
-        ! running || die "Merpati is still running; quit it (check for unsaved tabs) and run this again."
+        ! running || die "TernaryWire is still running; quit it (check for unsaved tabs) and run this again."
     fi
 
     # The copy that gets installed is made in a new folder next to the app (same volume, so
     # moving it in is a rename) that only this script (or root) can write, and checked again
     # there. As root it gets the owner of the copy it replaces.
-    STAGE="$($SUDO mktemp -d "$APP_DIR/.merpati-install.XXXXXXXX")"
-    local new="$STAGE/Merpati.app"
+    STAGE="$($SUDO mktemp -d "$APP_DIR/.ternarywire-install.XXXXXXXX")"
+    local new="$STAGE/TernaryWire.app"
     $SUDO ditto --norsrc --noextattr --noacl "$src" "$new"
     if [ -n "$SUDO" ]; then
         owner="root:wheel"
@@ -175,12 +175,12 @@ install_app() {
     check_app "$new"
 
     if [ -e "$APP" ] || [ -L "$APP" ]; then
-        say "Replacing Merpati $(plist "$APP" CFBundleShortVersionString) in $APP_DIR with $VERSION"
-        OLD="$(mktemp -u "$APP_DIR/.Merpati.app.old-XXXXXXXX")"
+        say "Replacing TernaryWire $(plist "$APP" CFBundleShortVersionString) in $APP_DIR with $VERSION"
+        OLD="$(mktemp -u "$APP_DIR/.TernaryWire.app.old-XXXXXXXX")"
         # -h: never move into a directory a link points to.
         $SUDO mv -h "$APP" "$OLD" || die "the installed app could not be moved aside; nothing was changed"
     else
-        say "Installing Merpati $VERSION into $APP_DIR"
+        say "Installing TernaryWire $VERSION into $APP_DIR"
     fi
     if ! $SUDO mv -h "$new" "$APP"; then
         if [ -n "$OLD" ]; then
@@ -191,7 +191,7 @@ install_app() {
     fi
     OLD=""
     # The old copy, and any an interrupted update left behind (the new app is in place and checked).
-    for leftover in "$APP_DIR"/.Merpati.app.old-*; do
+    for leftover in "$APP_DIR"/.TernaryWire.app.old-*; do
         if [ -e "$leftover" ] || [ -L "$leftover" ]; then
             $SUDO rm -rf "$leftover" 2>/dev/null || say "Could not remove $leftover; delete it yourself."
         fi
@@ -221,7 +221,7 @@ main() {
     unpack "$TMP/$NAME"
     install_app "$SRC"
 
-    say "Done. Merpati $(plist "$APP" CFBundleShortVersionString) is in $APP_DIR."
+    say "Done. TernaryWire $(plist "$APP" CFBundleShortVersionString) is in $APP_DIR."
     open "$APP" || true
 }
 

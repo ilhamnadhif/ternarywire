@@ -1,11 +1,11 @@
-name: Merpati collection run
-description: Run a Postman or Merpati collection with the Merpati CLI and publish JUnit results.
+name: TernaryWire collection run
+description: Run a Postman or TernaryWire collection with the TernaryWire CLI and publish JUnit results.
 branding:
   icon: send
   color: blue
 inputs:
   collection:
-    description: Postman collection file, Merpati workspace directory, or collection folder.
+    description: Postman collection file, TernaryWire workspace directory, or collection folder.
     required: true
   collection-name:
     description: Collection name or id when the workspace has several.
@@ -26,13 +26,13 @@ inputs:
   junit-export:
     description: Path of the JUnit report.
     required: false
-    default: merpati-reports/junit.xml
+    default: ternarywire-reports/junit.xml
   args:
-    description: Extra arguments for `merpati run` (e.g. "--bail --env-var key=value").
+    description: Extra arguments for `ternarywire run` (e.g. "--bail --env-var key=value").
     required: false
     default: ""
   version:
-    description: Git ref of Merpati to build (defaults to the ref of this action).
+    description: Git ref of TernaryWire to build (defaults to the ref of this action).
     required: false
     default: ""
 outputs:
@@ -49,23 +49,23 @@ runs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         fi
-    - name: Cache Merpati build
+    - name: Cache TernaryWire build
       uses: actions/cache@v4
       with:
         path: ${{ github.action_path }}/target
-        key: merpati-cli-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
-    - name: Build Merpati CLI
+        key: ternarywire-cli-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
+    - name: Build TernaryWire CLI
       shell: bash
       working-directory: ${{ github.action_path }}
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
         if [ -n "${{ inputs.version }}" ]; then git fetch --depth 1 origin "${{ inputs.version }}" && git checkout FETCH_HEAD; fi
-        cargo build --release --locked -p merpati-cli --bin merpati
+        cargo build --release --locked -p ternarywire-cli --bin ternarywire
         echo "${{ github.action_path }}/target/release" >> "$GITHUB_PATH"
     - name: Run collection
       shell: bash
       env:
-        MERPATI_NO_KEYCHAIN: "1"
+        TERNARYWIRE_NO_KEYCHAIN: "1"
       run: |
         args=(run "${{ inputs.collection }}" -r "${{ inputs.reporters }}" --reporter-junit-export "${{ inputs.junit-export }}")
         [ -n "${{ inputs.collection-name }}" ] && args+=(-c "${{ inputs.collection-name }}")
@@ -73,4 +73,4 @@ runs:
         [ -n "${{ inputs.iteration-data }}" ] && args+=(-d "${{ inputs.iteration-data }}")
         # shellcheck disable=SC2206
         extra=(${{ inputs.args }})
-        merpati "${args[@]}" "${extra[@]}"
+        ternarywire "${args[@]}" "${extra[@]}"

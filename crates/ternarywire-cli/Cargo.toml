@@ -1,0 +1,45 @@
+[package]
+name = "ternarywire-cli"
+description = "TernaryWire command line: run collections in CI, mock servers, import/export, codegen, load tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ternarywire"
+path = "src/main.rs"
+
+[dependencies]
+ternarywire-core = { workspace = true, features = ["keychain"] }
+ternarywire-http.workspace = true
+ternarywire-auth.workspace = true
+ternarywire-script.workspace = true
+ternarywire-convert.workspace = true
+ternarywire-runner.workspace = true
+ternarywire-mock.workspace = true
+ternarywire-flows = { path = "../ternarywire-flows" }
+ternarywire-secrets = { path = "../ternarywire-secrets" }
+tokio.workspace = true
+tokio-util.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+# WebSocket echo server for the session test.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+# Mutual TLS server for the client certificate tests.
+rustls.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }

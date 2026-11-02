@@ -14,8 +14,8 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     env:
-      MERPATI_SECRETS: memory
-      MERPATI_NO_KEYCHAIN: "1"
+      TERNARYWIRE_SECRETS: memory
+      TERNARYWIRE_NO_KEYCHAIN: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -52,12 +52,12 @@ jobs:
       - name: Notary credentials
         if: env.APPLE_ID != ''
         run: |
-          xcrun notarytool store-credentials merpati-notary --apple-id "$APPLE_ID" \
+          xcrun notarytool store-credentials ternarywire-notary --apple-id "$APPLE_ID" \
             --team-id "${{ secrets.APPLE_TEAM_ID }}" --password "${{ secrets.APPLE_APP_PASSWORD }}"
-          echo "MERPATI_NOTARY_PROFILE=merpati-notary" >> "$GITHUB_ENV"
+          echo "TERNARYWIRE_NOTARY_PROFILE=ternarywire-notary" >> "$GITHUB_ENV"
       - name: Package
         env:
-          MERPATI_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+          TERNARYWIRE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
         run: scripts/package-macos.sh
       # Checksums for people checking downloads by hand (the in-app updater
       # also accepts the SHA-256 digest GitHub publishes for each file).
@@ -71,7 +71,7 @@ jobs:
             target/dist-pkg/*.dmg
             target/dist-pkg/*.zip
             target/dist-pkg/*.tar.gz
-            target/dist-pkg/merpati.rb
+            target/dist-pkg/ternarywire.rb
             target/dist-pkg/SHA256SUMS-macos.txt
 
   linux:
@@ -93,7 +93,7 @@ jobs:
             quay.io/pypa/manylinux_2_28_${{ matrix.arch }} bash -ec '
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
               . "$HOME/.cargo/env"
-              cargo build --profile dist --locked -p merpati-app -p merpati-cli'
+              cargo build --profile dist --locked -p ternarywire-app -p ternarywire-cli'
       - run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
       - name: Package (.tar.gz, .deb, .rpm, .AppImage)
         run: scripts/package-linux.sh
@@ -102,7 +102,7 @@ jobs:
           cd target/dist-pkg
           deb=$(ls *.deb); rpm=$(ls *.rpm); appimage=$(ls *.AppImage)
           # Hard dependencies only: the recommended portal and keyring are for desktops.
-          check='merpati --version && if ldd /usr/bin/merpati-app | grep "not found"; then exit 1; fi'
+          check='ternarywire --version && if ldd /usr/bin/ternarywire-app | grep "not found"; then exit 1; fi'
           for image in ubuntu:20.04 ubuntu:24.04 debian:11 debian:12; do
             echo "== $image"
             docker run --rm -v "$PWD:/pkg:ro" "$image" bash -ec \
@@ -117,7 +117,7 @@ jobs:
             "zypper --non-interactive --quiet install --no-recommends --allow-unsigned-rpm /pkg/$rpm >/dev/null && $check"
           echo "== AppImage"
           chmod +x "$appimage"
-          (mkdir -p /tmp/ai && cd /tmp/ai && "$OLDPWD/$appimage" --appimage-extract >/dev/null && squashfs-root/usr/bin/merpati --version)
+          (mkdir -p /tmp/ai && cd /tmp/ai && "$OLDPWD/$appimage" --appimage-extract >/dev/null && squashfs-root/usr/bin/ternarywire --version)
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --profile dist --locked -p merpati-app -p merpati-cli
+      - run: cargo build --profile dist --locked -p ternarywire-app -p ternarywire-cli
       - name: Package (installer and portable .zip)
         shell: pwsh
         run: |
@@ -145,9 +145,9 @@ jobs:
             choco install innosetup --no-progress -y | Out-Null
             $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
           }
-          iscc /Q "/DAppVersion=$v" "/DSourceDir=$PWD\target\dist" "/DOutputDir=$PWD\target\dist-pkg" packaging\windows\merpati.iss
-          Copy-Item target/dist/merpati-app.exe, target/dist/merpati.exe, README.md, LICENSE-MIT, LICENSE-APACHE pkg/
-          Compress-Archive -Path pkg/* -DestinationPath "target/dist-pkg/merpati-$v-windows-x86_64.zip"
+          iscc /Q "/DAppVersion=$v" "/DSourceDir=$PWD\target\dist" "/DOutputDir=$PWD\target\dist-pkg" packaging\windows\ternarywire.iss
+          Copy-Item target/dist/ternarywire-app.exe, target/dist/ternarywire.exe, README.md, LICENSE-MIT, LICENSE-APACHE pkg/
+          Compress-Archive -Path pkg/* -DestinationPath "target/dist-pkg/ternarywire-$v-windows-x86_64.zip"
           Push-Location target/dist-pkg
           Get-ChildItem *.exe, *.zip | ForEach-Object { "$((Get-FileHash -Algorithm SHA256 $_.Name).Hash.ToLower())  $($_.Name)" } |
             Out-File -Encoding ascii SHA256SUMS-windows.txt
@@ -155,19 +155,19 @@ jobs:
       - name: Install, run and uninstall
         shell: pwsh
         run: |
-          $setup = (Get-ChildItem target/dist-pkg/Merpati-Setup-*.exe).FullName
+          $setup = (Get-ChildItem target/dist-pkg/TernaryWire-Setup-*.exe).FullName
           Start-Process -Wait -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER'
-          $dir = "$env:LOCALAPPDATA\Programs\Merpati"
-          & "$dir\merpati.exe" --version
-          if (-not (Test-Path "$dir\merpati-app.exe") -or -not (Test-Path "$dir\unins000.exe")) { throw "not installed" }
+          $dir = "$env:LOCALAPPDATA\Programs\TernaryWire"
+          & "$dir\ternarywire.exe" --version
+          if (-not (Test-Path "$dir\ternarywire-app.exe") -or -not (Test-Path "$dir\unins000.exe")) { throw "not installed" }
           Start-Process -Wait -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           if-no-files-found: error
           path: |
-            target/dist-pkg/Merpati-Setup-*.exe
-            target/dist-pkg/merpati-*-windows-x86_64.zip
+            target/dist-pkg/TernaryWire-Setup-*.exe
+            target/dist-pkg/ternarywire-*-windows-x86_64.zip
             target/dist-pkg/SHA256SUMS-windows.txt
 
   publish:
@@ -193,6 +193,6 @@ jobs:
           ls -la dist
       - uses: softprops/action-gh-release@v2
         with:
-          name: Merpati ${{ github.ref_name }}
+          name: TernaryWire ${{ github.ref_name }}
           body_path: notes.md
           files: dist/*

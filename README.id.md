@@ -1,8 +1,8 @@
-# Merpati
+# TernaryWire
 
 **Klien API yang ringan, ditulis sepenuhnya dengan Rust.**
 
-Merpati adalah alternatif native untuk Postman: satu binary kecil, tanpa Electron, tanpa Node.js,
+TernaryWire adalah alternatif native untuk Postman: satu binary kecil, tanpa Electron, tanpa Node.js,
 tanpa akun. Frame pertamanya tampil dalam sekitar 40 ms, CPU 0 % saat diam, memakai kurang dari 90 MB
 memori, dan respons 100 MB dialirkan ke disk, bukan ke memori. Koleksi berupa berkas JSON biasa di
 folder yang bisa Anda commit ke Git, dan koleksi, environment, serta skrip `pm.*` dari Postman bisa
@@ -10,7 +10,7 @@ diimpor dan dijalankan apa adanya untuk pemakaian umum.
 
 [English](README.md)
 
-![Merpati dalam bahasa Indonesia: koleksi, request, dan hasil tesnya](docs/screenshots/indonesian.png)
+![TernaryWire dalam bahasa Indonesia: koleksi, request, dan hasil tesnya](docs/screenshots/indonesian.png)
 
 ## Sorotan
 
@@ -22,7 +22,7 @@ diimpor dan dijalankan apa adanya untuk pemakaian umum.
 - **Workspace ramah Git**: satu berkas rapi per request, urutan stabil, dan rahasia tidak pernah
   ditulis ke workspace; rahasia disimpan di Keychain.
 - **Collection Runner dan CLI** dengan berkas data, laporan JUnit/HTML/JSON, dan **opsi yang
-  kompatibel dengan newman**, jadi `merpati run` bisa menggantikan `newman run` di CI. Ada juga
+  kompatibel dengan newman**, jadi `ternarywire run` bisa menggantikan `newman run` di CI. Ada juga
   performance test dengan virtual user.
 - **Flows**: kanvas visual yang merangkai request, kondisi, loop, cabang paralel, skrip, dan
   panggilan AI, lalu dijalankan dari aplikasi atau CLI.
@@ -48,70 +48,70 @@ universal), Windows 10 dan 11 (x64), serta Linux x86_64 dan ARM64 dengan glibc 2
 baru: Ubuntu 20.04+, Debian 11+, Fedora, RHEL/Rocky/Alma 8+, openSUSE Leap 15.6+ dan, lewat
 AppImage, sebagian besar distribusi lain (Arch, Manjaro, ...). macOS adalah platform utama; lihat [Batasan](#batasan).
 
-| Sistem | Unduh dari [rilis terbaru](https://github.com/ilhamnadhif/merpati/releases/latest) |
+| Sistem | Unduh dari [rilis terbaru](https://github.com/ilhamnadhif/ternarywire/releases/latest) |
 | --- | --- |
-| macOS | `Merpati-<versi>-universal.dmg`, atau [installer satu baris](#installer-satu-baris-macos-disarankan) |
-| Windows | `Merpati-Setup-<versi>-x64.exe` (installer) atau `merpati-<versi>-windows-x86_64.zip` (portabel) |
-| Ubuntu, Debian, Mint, Pop!_OS | `merpati_<versi>_amd64.deb` / `_arm64.deb` |
-| Fedora, RHEL, Rocky, Alma, openSUSE | `merpati-<versi>-1.x86_64.rpm` / `.aarch64.rpm` |
-| Arch, Manjaro, dan lainnya | `Merpati-<versi>-x86_64.AppImage` / `-aarch64.AppImage` |
-| Linux apa pun, manual | `merpati-<versi>-linux-x86_64.tar.gz` / `-aarch64.tar.gz` |
+| macOS | `TernaryWire-<versi>-universal.dmg`, atau [installer satu baris](#installer-satu-baris-macos-disarankan) |
+| Windows | `TernaryWire-Setup-<versi>-x64.exe` (installer) atau `ternarywire-<versi>-windows-x86_64.zip` (portabel) |
+| Ubuntu, Debian, Mint, Pop!_OS | `ternarywire_<versi>_amd64.deb` / `_arm64.deb` |
+| Fedora, RHEL, Rocky, Alma, openSUSE | `ternarywire-<versi>-1.x86_64.rpm` / `.aarch64.rpm` |
+| Arch, Manjaro, dan lainnya | `TernaryWire-<versi>-x86_64.AppImage` / `-aarch64.AppImage` |
+| Linux apa pun, manual | `ternarywire-<versi>-linux-x86_64.tar.gz` / `-aarch64.tar.gz` |
 
 ### Installer satu baris (macOS, disarankan)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/merpati/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternarywire/master/scripts/install.sh | bash
 ```
 
 Skrip ini mengunduh rilis terbaru, memeriksanya (SHA-256 yang diterbitkan GitHub, bundle id, versi,
-dan tanda tangan kode), menutup Merpati yang sedang berjalan, memasang `Merpati.app` ke
+dan tanda tangan kode), menutup TernaryWire yang sedang berjalan, memasang `TernaryWire.app` ke
 `/Applications`, lalu membukanya. Kalau ada yang gagal, salinan lama tetap di tempatnya. Jalankan
 lagi untuk memperbarui. Untuk versi tertentu, berikan versinya sebagai argumen:
-`… | bash -s -- v0.1.0`. Untuk memasang di folder lain, atur `MERPATI_APP_DIR` untuk bash:
-`… | MERPATI_APP_DIR=~/Applications bash`.
+`… | bash -s -- v0.2.2`. Untuk memasang di folder lain, atur `TERNARYWIRE_APP_DIR` untuk bash:
+`… | TERNARYWIRE_APP_DIR=~/Applications bash`.
 
 ### Disk image
 
-Unduh **`Merpati-<versi>-universal.dmg`** dari
-[rilis terbaru](https://github.com/ilhamnadhif/merpati/releases/latest), buka, lalu seret
-**Merpati** ke **Applications**.
+Unduh **`TernaryWire-<versi>-universal.dmg`** dari
+[rilis terbaru](https://github.com/ilhamnadhif/ternarywire/releases/latest), buka, lalu seret
+**TernaryWire** ke **Applications**.
 
-> **Muncul “Merpati” Not Opened / “Apple could not verify…”?** Build rilis belum dinotarisasi Apple
+> **Muncul “TernaryWire” Not Opened / “Apple could not verify…”?** Build rilis belum dinotarisasi Apple
 > (hanya ditandatangani ad hoc), jadi macOS memblokir aplikasi yang diunduh lewat browser. Sejak
 > macOS 15, cara lama klik kanan → Open sudah tidak bisa. Pilih salah satu cara berikut:
 >
 > - **Pakai installer satu baris** di atas. Berkas yang diunduh lewat `curl` tidak diblokir.
 > - **Izinkan sekali lewat Settings**: klik **Done** di peringatannya, buka **System Settings →
 >   Privacy & Security**, gulir ke bagian **Security**, lalu klik **Open Anyway** di samping
->   “Merpati was blocked…”. Konfirmasi dengan kata sandi, lalu buka Merpati lagi.
+>   “TernaryWire was blocked…”. Konfirmasi dengan kata sandi, lalu buka TernaryWire lagi.
 > - **Atau lewat Terminal**, setelah aplikasi diseret ke Applications:
->   `xattr -dr com.apple.quarantine /Applications/Merpati.app`
+>   `xattr -dr com.apple.quarantine /Applications/TernaryWire.app`
 
 ### Homebrew
 
-Setiap rilis menyertakan berkas cask `merpati.rb`:
+Setiap rilis menyertakan berkas cask `ternarywire.rb`:
 
 ```sh
-curl -fsSLO https://github.com/ilhamnadhif/merpati/releases/latest/download/merpati.rb
-brew install --cask ./merpati.rb
-xattr -dr com.apple.quarantine /Applications/Merpati.app   # selama rilis belum dinotarisasi
+curl -fsSLO https://github.com/ilhamnadhif/ternarywire/releases/latest/download/ternarywire.rb
+brew install --cask ./ternarywire.rb
+xattr -dr com.apple.quarantine /Applications/TernaryWire.app   # selama rilis belum dinotarisasi
 ```
 
-Cask ini juga menautkan `merpati-app` ke folder `bin` milik Homebrew.
+Cask ini juga menautkan `ternarywire-app` ke folder `bin` milik Homebrew.
 
 ### Windows
 
-Jalankan **`Merpati-Setup-<versi>-x64.exe`**. Installer memasang Merpati untuk akun Anda tanpa
+Jalankan **`TernaryWire-Setup-<versi>-x64.exe`**. Installer memasang TernaryWire untuk akun Anda tanpa
 hak administrator (pilih *Install for all users* di dialog pertama untuk memasang ke Program
-Files), menambahkannya ke menu Start, bisa menambahkan tool command line `merpati` ke `PATH`, dan
+Files), menambahkannya ke menu Start, bisa menambahkan tool command line `ternarywire` ke `PATH`, dan
 memasang di atas versi lama saat memperbarui. Uninstall lewat **Settings › Apps** seperti aplikasi
 lain.
 
 Installer belum ditandatangani dengan sertifikat code-signing, jadi SmartScreen bisa menampilkan
 *Windows protected your PC*: pilih **More info › Run anyway**.
 
-Tidak mau installer? Ekstrak **`merpati-<versi>-windows-x86_64.zip`** di mana saja lalu jalankan
-`merpati-app.exe`.
+Tidak mau installer? Ekstrak **`ternarywire-<versi>-windows-x86_64.zip`** di mana saja lalu jalankan
+`ternarywire-app.exe`.
 
 ### Linux
 
@@ -119,24 +119,24 @@ Unduh paket untuk distribusi dan arsitektur Anda (`amd64`/`x86_64` atau `arm64`/
 
 ```sh
 # Ubuntu, Debian, Linux Mint, Pop!_OS, elementary OS
-sudo apt install ./merpati_<versi>_amd64.deb
+sudo apt install ./ternarywire_<versi>_amd64.deb
 
 # Fedora, RHEL, Rocky Linux, AlmaLinux
-sudo dnf install ./merpati-<versi>-1.x86_64.rpm
+sudo dnf install ./ternarywire-<versi>-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install --allow-unsigned-rpm ./merpati-<versi>-1.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./ternarywire-<versi>-1.x86_64.rpm
 
 # Arch, Manjaro, dan lainnya: AppImage berjalan tanpa dipasang
-chmod +x Merpati-<versi>-x86_64.AppImage
-./Merpati-<versi>-x86_64.AppImage
+chmod +x TernaryWire-<versi>-x86_64.AppImage
+./TernaryWire-<versi>-x86_64.AppImage
 ```
 
-Paket menaruh `merpati-app` dan `merpati` di `/usr/bin` dan menambahkan Merpati ke menu aplikasi.
+Paket menaruh `ternarywire-app` dan `ternarywire` di `/usr/bin` dan menambahkan TernaryWire ke menu aplikasi.
 AppImage butuh FUSE, yang sudah ada di distribusi desktop; bila tidak mau jalan, pasang paket
 `fuse`/`fuse2` distribusi Anda atau jalankan dengan `--appimage-extract-and-run`. Berkas `.tar.gz`
 berisi dua binary yang sama beserta berkas `.desktop` dan ikon: ekstrak lalu jalankan
-`./merpati-app`, atau salin binary ke folder di `PATH` (misalnya `~/.local/bin`) dan berkas
+`./ternarywire-app`, atau salin binary ke folder di `PATH` (misalnya `~/.local/bin`) dan berkas
 `.desktop` ke `~/.local/share/applications`.
 
 Semua berkas Linux dan Windows dibangun di GitHub Actions; workflow rilis memasang paketnya di
@@ -146,40 +146,40 @@ SHA-256 setiap berkas (`SHA256SUMS-*.txt`).
 
 ### Hanya command line
 
-CLI juga berupa satu binary. Untuk macOS, ambil `merpati-cli-<versi>-macos-universal.tar.gz` dari
+CLI juga berupa satu binary. Untuk macOS, ambil `ternarywire-cli-<versi>-macos-universal.tar.gz` dari
 rilis (arsip Linux dan Windows di atas juga berisi CLI):
 
 ```sh
-curl -fsSL https://github.com/ilhamnadhif/merpati/releases/download/v0.1.0/merpati-cli-0.1.0-macos-universal.tar.gz | tar -xz
-sudo mv merpati /usr/local/bin/
-merpati --version
+curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.2.2/ternarywire-cli-0.2.2-macos-universal.tar.gz | tar -xz
+sudo mv ternarywire /usr/local/bin/
+ternarywire --version
 ```
 
 Atau bangun dengan Cargo (Rust 1.88 atau lebih baru), atau pakai image Docker:
 
 ```sh
-cargo install --locked --git https://github.com/ilhamnadhif/merpati merpati-cli
+cargo install --locked --git https://github.com/ilhamnadhif/ternarywire ternarywire-cli
 
-docker build -f docker/Dockerfile -t merpati .
-docker run --rm -v "$PWD:/work" merpati run collection.json -e env.json -r cli,junit
+docker build -f docker/Dockerfile -t ternarywire .
+docker run --rm -v "$PWD:/work" ternarywire run collection.json -e env.json -r cli,junit
 ```
 
 ### Pembaruan
 
-Saat dibuka, Merpati menanyakan rilis terbaru ke GitHub. Permintaan itu hanya mengirim versi
+Saat dibuka, TernaryWire menanyakan rilis terbaru ke GitHub. Permintaan itu hanya mengirim versi
 aplikasi sebagai User-Agent; matikan di **Settings › General › Updates** (Pengaturan › Umum ›
 Pembaruan), tempat **Check now** juga bisa langsung memeriksa. Kalau ada versi yang lebih baru,
 sebuah jendela menampilkan catatan rilisnya dengan pilihan untuk memasangnya, diingatkan nanti,
 atau melewati versi itu.
 
 - **Di macOS**, **Install and restart** mengunduh arsip aplikasi
-  (`Merpati-<versi>-macos-universal.zip`), memverifikasinya (SHA-256 yang diterbitkan GitHub,
-  bundle id, versi, dan tanda tangan kode), mengganti `Merpati.app`, lalu membuka versi baru.
+  (`TernaryWire-<versi>-macos-universal.zip`), memverifikasinya (SHA-256 yang diterbitkan GitHub,
+  bundle id, versi, dan tanda tangan kode), mengganti `TernaryWire.app`, lalu membuka versi baru.
 - **Di Linux**, AppImage mengganti dirinya dengan cara yang sama (**Install and restart**).
   Instalasi `.deb` atau `.rpm` mengunduh paket baru dan membukanya di aplikasi pemasang perangkat
   lunak Anda; instalasi `.tar.gz` mengunduh arsip baru.
-- **Di Windows**, Merpati mengunduh installer baru (atau `.zip` untuk salinan portabel) lalu
-  membukanya; installer menutup Merpati, memperbaruinya, dan bisa menjalankannya lagi.
+- **Di Windows**, TernaryWire mengunduh installer baru (atau `.zip` untuk salinan portabel) lalu
+  membukanya; installer menutup TernaryWire, memperbaruinya, dan bisa menjalankannya lagi.
 
 Setiap unduhan diperiksa dengan SHA-256 yang diterbitkan GitHub untuk berkas itu (atau
 `SHA256SUMS-*.txt` dari rilis); unduhan tanpa checksum ditolak.
@@ -189,21 +189,21 @@ Installer satu baris di atas juga bisa memperbarui.
 ### Uninstall
 
 ```sh
-rm -rf /Applications/Merpati.app
-rm -rf ~/Library/Application\ Support/Merpati   # pengaturan, workspace bawaan, cache paket
+rm -rf /Applications/TernaryWire.app
+rm -rf ~/Library/Application\ Support/TernaryWire   # pengaturan, workspace bawaan, cache paket
 ```
 
 Workspace yang Anda buat di tempat lain tetap di tempatnya. Rahasia yang tersimpan adalah item
-Keychain dengan nama service `dev.merpati.workspace`; hapus lewat Keychain Access.
+Keychain dengan nama service `dev.ternarywire.workspace`; hapus lewat Keychain Access.
 
-Di **Windows**, uninstall Merpati lewat **Settings › Apps** dan hapus `%APPDATA%\Merpati` untuk
-pengaturannya. Di **Linux**, hapus paketnya (`sudo apt remove merpati`, `sudo dnf remove merpati`)
-atau AppImage-nya, lalu hapus `~/.config/Merpati`; rahasia ada di keyring Anda (GNOME Keyring atau
+Di **Windows**, uninstall TernaryWire lewat **Settings › Apps** dan hapus `%APPDATA%\TernaryWire` untuk
+pengaturannya. Di **Linux**, hapus paketnya (`sudo apt remove ternarywire`, `sudo dnf remove ternarywire`)
+atau AppImage-nya, lalu hapus `~/.config/TernaryWire`; rahasia ada di keyring Anda (GNOME Keyring atau
 KWallet).
 
 ## Mulai
 
-1. Buka Merpati. Workspace terakhir Anda dibuka, atau **My Workspace** dibuat di folder
+1. Buka TernaryWire. Workspace terakhir Anda dibuka, atau **My Workspace** dibuat di folder
    pengaturannya. Pakai menu workspace (kiri atas) untuk membuat atau membuka workspace di mana
    saja, misalnya di dalam repositori Git.
 2. Klik **Import** (Impor) untuk memasukkan koleksi Postman, berkas OpenAPI, perintah cURL, berkas
@@ -212,7 +212,7 @@ KWallet).
    pointer ke variabel menampilkan nilainya.
 4. Klik kanan koleksi atau folder lalu pilih **Run collection** (Jalankan koleksi) atau **Run
    folder** untuk menjalankan request dan tesnya, atau jalankan koleksi yang sama di terminal dengan
-   `merpati run`.
+   `ternarywire run`.
 
 ## Fitur
 
@@ -300,7 +300,7 @@ Detail: [docs/scripting.md](docs/scripting.md) (bahasa Inggris).
   dan MQTT sebagai sesi berskrip (connect, kirim pesan tersimpan, berhenti setelah N pesan, sebuah
   event, atau saat hening).
 - Performance test dengan virtual user dan ramp-up: persentil latensi (p50 sampai p99), throughput,
-  dan galat, di aplikasi atau lewat `merpati perf`.
+  dan galat, di aplikasi atau lewat `ternarywire perf`.
 
 ### Protokol
 
@@ -334,7 +334,7 @@ Join, Script, AI, Delay, Set Variable, Template, Output, dan Log. Cabang paralel
 bersamaan dan Join menunggu cabang yang bisa mencapainya. Setiap blok menampilkan status dan
 waktunya selama flow berjalan, jawaban AI mengalir langsung di kanvas, dan masalah ditandai sebelum
 Anda menjalankannya. Flow disimpan sebagai `flows/*.flow.json` di workspace dan bisa dijalankan dari
-CLI dengan `merpati flow run`.
+CLI dengan `ternarywire flow run`.
 
 ### Desain API: Spec Hub
 
@@ -347,7 +347,7 @@ CLI dengan `merpati flow run`.
 - **Generate collection** (Buat koleksi) dari spec OpenAPI atau Smithy, atau perbarui koleksi yang
   sudah ada (request ditambah dan diubah, skrip dan tes Anda tetap); ekspor koleksi sebagai OpenAPI.
 - Dokumentasi koleksi sebagai Markdown atau situs HTML statis dengan contoh kode, dari aplikasi
-  atau `merpati docs`.
+  atau `ternarywire docs`.
 
 ### Mock server, webhook, dan penangkapan lalu lintas
 
@@ -395,21 +395,21 @@ CLI dengan `merpati flow run`.
 ## Command line
 
 ```text
-merpati run       Jalankan koleksi (opsi kompatibel newman)
-merpati schedule  Jalankan koleksi berulang (--every 5m), hasil tiap run disimpan
-merpati mock      Mulai mock server dari example sebuah koleksi
-merpati import    Impor Postman, OpenAPI, Insomnia, HAR, cURL, … ke workspace
-merpati export    Ekspor koleksi, environment, atau globals
-merpati convert   Ubah berkas yang bisa diimpor menjadi Postman atau OpenAPI
-merpati validate  Periksa berkas atau workspace dari galat dan variabel yang tidak terdefinisi
-merpati codegen   Buat cuplikan kode untuk sebuah request
-merpati perf      Uji beban request dengan virtual user
-merpati docs      Buat dokumentasi (situs HTML statis atau Markdown)
-merpati flow      Jalankan, daftarkan, dan validasi Flows
-merpati init      Buat workspace kosong
+ternarywire run       Jalankan koleksi (opsi kompatibel newman)
+ternarywire schedule  Jalankan koleksi berulang (--every 5m), hasil tiap run disimpan
+ternarywire mock      Mulai mock server dari example sebuah koleksi
+ternarywire import    Impor Postman, OpenAPI, Insomnia, HAR, cURL, … ke workspace
+ternarywire export    Ekspor koleksi, environment, atau globals
+ternarywire convert   Ubah berkas yang bisa diimpor menjadi Postman atau OpenAPI
+ternarywire validate  Periksa berkas atau workspace dari galat dan variabel yang tidak terdefinisi
+ternarywire codegen   Buat cuplikan kode untuk sebuah request
+ternarywire perf      Uji beban request dengan virtual user
+ternarywire docs      Buat dokumentasi (situs HTML statis atau Markdown)
+ternarywire flow      Jalankan, daftarkan, dan validasi Flows
+ternarywire init      Buat workspace kosong
 ```
 
-`merpati run` menerima berkas koleksi Postman, workspace Merpati, atau folder koleksi, dengan opsi
+`ternarywire run` menerima berkas koleksi Postman, workspace TernaryWire, atau folder koleksi, dengan opsi
 yang Anda kenal dari newman: `-e`, `-g`, `-d`, `-n`, `--folder`, `--env-var`, `--global-var`,
 `--delay-request`, `--timeout`, `--timeout-request`, `--timeout-script`, `-k`, `--bail`, `-x`,
 `-r cli,json,junit,html` dengan `--reporter-*-export`, `--export-environment`, `--export-globals`,
@@ -421,17 +421,17 @@ Authorization dan Cookie, API key, kata sandi di URL, token di query string) dis
 dan keluaran terminal kecuali Anda memberikan `--show-secrets`.
 
 ```sh
-merpati run postman_collection.json -e staging.postman_environment.json -d users.csv \
+ternarywire run postman_collection.json -e staging.postman_environment.json -d users.csv \
   -r cli,junit --reporter-junit-export report.xml
-merpati init my-api && merpati import postman_collection.json -w my-api
-merpati run my-api -e Staging --folder "Smoke tests" --bail
-merpati mock my-api --port 3000 --network slow-3g --fail-rate 0.1 --fail-with timeout
-merpati perf my-api --vus 20 --duration 30s
-merpati flow run my-api "Catalog summary" -e Staging
-merpati docs my-api -o site/ --languages curl,python    # atau --markdown -o API.md
+ternarywire init my-api && ternarywire import postman_collection.json -w my-api
+ternarywire run my-api -e Staging --folder "Smoke tests" --bail
+ternarywire mock my-api --port 3000 --network slow-3g --fail-rate 0.1 --fail-with timeout
+ternarywire perf my-api --vus 20 --duration 30s
+ternarywire flow run my-api "Catalog summary" -e Staging
+ternarywire docs my-api -o site/ --languages curl,python    # atau --markdown -o API.md
 ```
 
-`merpati <perintah> --help` menampilkan semua opsi.
+`ternarywire <perintah> --help` menampilkan semua opsi.
 
 ## GitHub Action
 
@@ -440,7 +440,7 @@ menjalankan koleksi, lalu menulis laporan JUnit:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: ilhamnadhif/merpati@v0.1.0
+- uses: ilhamnadhif/ternarywire@v0.2.2
   with:
     collection: api/                 # berkas koleksi Postman, workspace, atau folder koleksi
     environment: Staging             # berkas environment Postman atau nama environment di workspace
@@ -450,10 +450,10 @@ menjalankan koleksi, lalu menulis laporan JUnit:
   if: always()
   with:
     name: api-tests
-    path: merpati-reports/junit.xml
+    path: ternarywire-reports/junit.xml
 ```
 
-Input lainnya: `collection-name`, `iteration-data`, `junit-export`, dan `version` (ref Git Merpati
+Input lainnya: `collection-name`, `iteration-data`, `junit-export`, dan `version` (ref Git TernaryWire
 yang dibangun). Action ini mengompilasi CLI dengan Cargo dan menyimpan build-nya di cache antar-run.
 Action ini belum pernah dicoba di runner milik GitHub, jadi laporkan bila ada masalah.
 
@@ -461,8 +461,8 @@ Action ini belum pernah dicoba di runner milik GitHub, jadi laporkan bila ada ma
 
 ```text
 my-api/
-  merpati.json                      manifest
-  .gitignore                        mengabaikan .merpati/
+  ternarywire.json                      manifest
+  .gitignore                        mengabaikan .ternarywire/
   globals.json
   environments/staging.json         hanya nilai awal; rahasia dikosongkan
   collections/bookstore-api/
@@ -472,18 +472,18 @@ my-api/
   flows/catalog-summary.flow.json
   specs/bookstore.yaml
   packages/                         modul skrip Anda sendiri
-  .merpati/                         hanya lokal: nilai saat ini, cookie, riwayat, tab terbuka
+  .ternarywire/                         hanya lokal: nilai saat ini, cookie, riwayat, tab terbuka
 ```
 
 ## Privasi dan keamanan
 
-- Tanpa akun dan tanpa telemetri. Merpati hanya terhubung ke server yang Anda kirimi request dan,
+- Tanpa akun dan tanpa telemetri. TernaryWire hanya terhubung ke server yang Anda kirimi request dan,
   bila pemeriksaan pembaruan tetap menyala, ke GitHub sekali saat dibuka (hanya dengan versi
   aplikasi sebagai User-Agent).
 - Variabel bertipe secret, isian autentikasi yang sensitif (kata sandi, token, client secret,
   kunci privat), token OAuth, kata sandi proxy, dan frasa sandi sertifikat disimpan di Keychain
   macOS (satu item per workspace), tidak pernah di berkas workspace, ekspor, riwayat, atau laporan
-  run. Di sistem tanpa keychain (CI, container) rahasia disimpan di `.merpati/secrets.json`, yang
+  run. Di sistem tanpa keychain (CI, container) rahasia disimpan di `.ternarywire/secrets.json`, yang
   dijauhkan dari Git oleh `.gitignore` workspace.
 - Sertifikat TLS diverifikasi secara bawaan. Skrip berjalan di sandbox tanpa akses berkas atau
   jaringan kecuali lewat `pm`, di proses terpisah dengan batas waktu dan memori.
@@ -492,11 +492,11 @@ my-api/
 
 | Apa | Lokasi (macOS) |
 | --- | --- |
-| Pengaturan | `~/Library/Application Support/Merpati/settings.json` |
-| Workspace bawaan | `~/Library/Application Support/Merpati/workspaces/My Workspace` |
-| Cache paket npm/JSR | `~/Library/Application Support/Merpati/package-cache` |
-| Nilai saat ini, cookie, riwayat, tab terbuka | `.merpati/` di dalam setiap workspace |
-| Rahasia | Keychain macOS, service `dev.merpati.workspace` |
+| Pengaturan | `~/Library/Application Support/TernaryWire/settings.json` |
+| Workspace bawaan | `~/Library/Application Support/TernaryWire/workspaces/My Workspace` |
+| Cache paket npm/JSR | `~/Library/Application Support/TernaryWire/package-cache` |
+| Nilai saat ini, cookie, riwayat, tab terbuka | `.ternarywire/` di dalam setiap workspace |
+| Rahasia | Keychain macOS, service `dev.ternarywire.workspace` |
 
 Di Linux folder pengaturannya adalah folder konfigurasi XDG, di Windows `%APPDATA%`.
 
@@ -530,16 +530,16 @@ Butuh toolchain Rust stable (1.88 atau lebih baru, lewat [rustup](https://rustup
 Xcode Command Line Tools, di Linux paket pengembangan `libxkbcommon`, `wayland`, `gtk3`, dan `dbus`.
 
 ```sh
-git clone https://github.com/ilhamnadhif/merpati.git && cd merpati
-cargo run --release -p merpati-app            # aplikasi desktop
-cargo run --release -p merpati-cli -- --help  # CLI
-cargo build --profile dist -p merpati-app     # binary terkecil, seperti yang dirilis (fat LTO, opt-level s)
-scripts/package-macos.sh                      # Merpati.app universal, DMG, zip, tarball CLI, cask Homebrew
+git clone https://github.com/ilhamnadhif/ternarywire.git && cd ternarywire
+cargo run --release -p ternarywire-app            # aplikasi desktop
+cargo run --release -p ternarywire-cli -- --help  # CLI
+cargo build --profile dist -p ternarywire-app     # binary terkecil, seperti yang dirilis (fat LTO, opt-level s)
+scripts/package-macos.sh                      # TernaryWire.app universal, DMG, zip, tarball CLI, cask Homebrew
 scripts/package-macos.sh --native             # hanya arsitektur Mac ini (lebih cepat)
 ```
 
-Penandatanganan dan notarisasi butuh akun Apple Developer: atur `MERPATI_SIGN_IDENTITY` (identitas
-Developer ID Application) dan `MERPATI_NOTARY_PROFILE` (dibuat sekali dengan
+Penandatanganan dan notarisasi butuh akun Apple Developer: atur `TERNARYWIRE_SIGN_IDENTITY` (identitas
+Developer ID Application) dan `TERNARYWIRE_NOTARY_PROFILE` (dibuat sekali dengan
 `xcrun notarytool store-credentials`) sebelum menjalankan `scripts/package-macos.sh`. Tanpa itu
 aplikasi ditandatangani ad hoc. Push tag `v*` menjalankan workflow rilis yang membangun macOS,
 Linux, dan Windows lalu menerbitkan berkasnya beserta checksum.
@@ -548,24 +548,24 @@ Linux, dan Windows lalu menerbitkan berkasnya beserta checksum.
 
 | Crate | Fungsi |
 | --- | --- |
-| `merpati-core` | Model data, variabel (5 cakupan, variabel dinamis, vault), format workspace, rahasia, riwayat, impor/ekspor Postman |
-| `merpati-http` | Mesin HTTP di atas reqwest/hyper/rustls: redirect, cookie, proxy (PAC, WPAD), sertifikat CA dan klien, HTTP/1.1 dan HTTP/2, Unix socket dan named pipe, body besar dialirkan ke disk; klien WebSocket |
-| `merpati-auth` | Semua jenis autentikasi, dari API key sampai OAuth 2.0, AWS SigV4, NTLM, EdgeGrid, dan ASAP |
-| `merpati-script` | Mesin skrip di atas boa (JavaScript Rust murni): API `pm`, Chai, `pm.sendRequest`, paket, sandbox, dan proses pekerja |
-| `merpati-runner` | Alur request yang dipakai bersama oleh aplikasi, Runner, dan CLI; Collection Runner, performance test, reporter |
-| `merpati-convert` | Importer cURL, OpenAPI/Swagger, Insomnia, HAR, Hoppscotch, Thunder Client, WSDL, dan Smithy; ekspor OpenAPI; generator kode; skema GraphQL; dokumentasi |
-| `merpati-mock` | Mock server dari example, simulasi jaringan dan kegagalan; listener webhook |
-| `merpati-grpc` | Klien gRPC dinamis: kompilasi `.proto` atau reflection, keempat jenis panggilan, mTLS |
-| `merpati-mqtt` | MQTT 3.1.1/5 lewat TCP, TLS, dan WebSocket |
-| `merpati-socketio` | Klien Socket.IO v2–v4 (Engine.IO 3/4, polling dan WebSocket) |
-| `merpati-mcp` | Klien Model Context Protocol (stdio, Streamable HTTP, SSE) dengan OAuth, sampling, dan elicitation |
-| `merpati-ai` | Request chat ke OpenAI, Anthropic, Gemini, dan server kompatibel OpenAI, streaming, tools MCP |
-| `merpati-flows` | Flows: model, penyimpanan, validasi, dan eksekutor |
-| `merpati-secrets` | HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, dan 1Password di balik `{{vault:nama}}` |
-| `merpati-proxy` | Proxy penangkap: intersepsi HTTP/HTTPS dengan CA lokal, ekspor HAR |
-| `merpati-html` | Perender subset HTML/CSS untuk egui (visualizer, pratinjau dokumentasi) |
-| `merpati-cli` | Binary `merpati` |
-| `merpati-app` | Aplikasi desktop (egui/eframe di atas wgpu) |
+| `ternarywire-core` | Model data, variabel (5 cakupan, variabel dinamis, vault), format workspace, rahasia, riwayat, impor/ekspor Postman |
+| `ternarywire-http` | Mesin HTTP di atas reqwest/hyper/rustls: redirect, cookie, proxy (PAC, WPAD), sertifikat CA dan klien, HTTP/1.1 dan HTTP/2, Unix socket dan named pipe, body besar dialirkan ke disk; klien WebSocket |
+| `ternarywire-auth` | Semua jenis autentikasi, dari API key sampai OAuth 2.0, AWS SigV4, NTLM, EdgeGrid, dan ASAP |
+| `ternarywire-script` | Mesin skrip di atas boa (JavaScript Rust murni): API `pm`, Chai, `pm.sendRequest`, paket, sandbox, dan proses pekerja |
+| `ternarywire-runner` | Alur request yang dipakai bersama oleh aplikasi, Runner, dan CLI; Collection Runner, performance test, reporter |
+| `ternarywire-convert` | Importer cURL, OpenAPI/Swagger, Insomnia, HAR, Hoppscotch, Thunder Client, WSDL, dan Smithy; ekspor OpenAPI; generator kode; skema GraphQL; dokumentasi |
+| `ternarywire-mock` | Mock server dari example, simulasi jaringan dan kegagalan; listener webhook |
+| `ternarywire-grpc` | Klien gRPC dinamis: kompilasi `.proto` atau reflection, keempat jenis panggilan, mTLS |
+| `ternarywire-mqtt` | MQTT 3.1.1/5 lewat TCP, TLS, dan WebSocket |
+| `ternarywire-socketio` | Klien Socket.IO v2–v4 (Engine.IO 3/4, polling dan WebSocket) |
+| `ternarywire-mcp` | Klien Model Context Protocol (stdio, Streamable HTTP, SSE) dengan OAuth, sampling, dan elicitation |
+| `ternarywire-ai` | Request chat ke OpenAI, Anthropic, Gemini, dan server kompatibel OpenAI, streaming, tools MCP |
+| `ternarywire-flows` | Flows: model, penyimpanan, validasi, dan eksekutor |
+| `ternarywire-secrets` | HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, dan 1Password di balik `{{vault:nama}}` |
+| `ternarywire-proxy` | Proxy penangkap: intersepsi HTTP/HTTPS dengan CA lokal, ekspor HAR |
+| `ternarywire-html` | Perender subset HTML/CSS untuk egui (visualizer, pratinjau dokumentasi) |
+| `ternarywire-cli` | Binary `ternarywire` |
+| `ternarywire-app` | Aplikasi desktop (egui/eframe di atas wgpu) |
 
 Alurnya sama di mana pun: skrip pre-request (koleksi → folder → request), resolusi variabel,
 autentikasi, kirim (dengan pengulangan challenge Digest dan NTLM), lalu skrip post-response dan
@@ -594,15 +594,15 @@ yang butuh layanan sungguhan (socket.io, mosquitto, HashiCorp Vault, Ollama, reg
 - **UI**: baca [docs/design.md](docs/design.md) dulu; semua layar memakai token dan komponen
   bersama.
 - **Terjemahan**: teks yang dibaca pengguna lewat `tr()`/`trf()` dengan entri bahasa Indonesia di
-  `crates/merpati-app/i18n/id.tsv` (sekitar 1.670 entri); sebuah tes gagal bila ada yang belum
+  `crates/ternarywire-app/i18n/id.tsv` (sekitar 1.670 entri); sebuah tes gagal bila ada yang belum
   diterjemahkan.
-- **Variabel lingkungan**: `MERPATI_CONFIG_DIR` (folder pengaturan lain),
-  `MERPATI_SECRETS=file|memory` (tanpa prompt Keychain untuk build yang tidak ditandatangani), dan
-  `MERPATI_AUTOMATION=steps.json` (menggerakkan aplikasi dari daftar langkah dan mengambil tangkapan
-  layar; lihat `crates/merpati-app/src/automation.rs`).
-- **Server uji** untuk tab protokol: `cargo run -p merpati-grpc --example greeter_server`,
-  `cargo run -p merpati-socketio --example echo_server -- 3000`, dan `target/debug/fake_mcp_server`
-  (server MCP stdio, dibangun dengan `cargo build -p merpati-mcp`).
+- **Variabel lingkungan**: `TERNARYWIRE_CONFIG_DIR` (folder pengaturan lain),
+  `TERNARYWIRE_SECRETS=file|memory` (tanpa prompt Keychain untuk build yang tidak ditandatangani), dan
+  `TERNARYWIRE_AUTOMATION=steps.json` (menggerakkan aplikasi dari daftar langkah dan mengambil tangkapan
+  layar; lihat `crates/ternarywire-app/src/automation.rs`).
+- **Server uji** untuk tab protokol: `cargo run -p ternarywire-grpc --example greeter_server`,
+  `cargo run -p ternarywire-socketio --example echo_server -- 3000`, dan `target/debug/fake_mcp_server`
+  (server MCP stdio, dibangun dengan `cargo build -p ternarywire-mcp`).
 
 Issue dan pull request dipersilakan.
 
@@ -610,7 +610,7 @@ Issue dan pull request dipersilakan.
 
 - Build rilis belum ditandatangani dengan Apple Developer ID dan belum dinotarisasi, jadi macOS
   memberi peringatan bila diunduh lewat browser; lihat catatan di bagian [Instalasi](#disk-image).
-- macOS adalah tempat Merpati dibangun, diukur, dan diuji langsung. Build Linux dan Windows berasal
+- macOS adalah tempat TernaryWire dibangun, diukur, dan diuji langsung. Build Linux dan Windows berasal
   dari CI dan kurang teruji: CI menjalankan seluruh tes di Linux, memasang paketnya di beberapa
   distribusi, dan memasang installer Windows di Windows, tetapi belum ada yang memakainya
   langsung. Laporan sangat diterima.
@@ -627,17 +627,17 @@ Issue dan pull request dipersilakan.
 - Dependensi Smithy hanya dibaca dari repositori Maven lokal (tidak diunduh), dan plugin serta
   projection `smithy-build.json` tidak dipakai.
 - Fitur tim dari platform API berbasis cloud (sinkronisasi cloud, monitor, workspace publik) di luar
-  cakupan: workspace adalah folder yang Anda bagikan lewat Git, `merpati schedule` menjalankan
+  cakupan: workspace adalah folder yang Anda bagikan lewat Git, `ternarywire schedule` menjalankan
   koleksi berkala, dan webhook diterima secara lokal.
 
 ## Lisensi
 
-Merpati berlisensi ganda [MIT](LICENSE-MIT) atau [Apache-2.0](LICENSE-APACHE), sesuai pilihan Anda.
+TernaryWire berlisensi ganda [MIT](LICENSE-MIT) atau [Apache-2.0](LICENSE-APACHE), sesuai pilihan Anda.
 
 Pustaka JavaScript yang dibundel tetap memakai lisensinya sendiri, tercantum di
-`crates/merpati-script/js/vendor/THIRD_PARTY_LICENSES.txt`. Font Inter dan JetBrains Mono yang
+`crates/ternarywire-script/js/vendor/THIRD_PARTY_LICENSES.txt`. Font Inter dan JetBrains Mono yang
 dibundel berlisensi SIL Open Font License 1.1 dan ikon Phosphor berlisensi MIT; berkas lisensinya ada
-di `crates/merpati-app/assets/fonts`.
+di `crates/ternarywire-app/assets/fonts`.
 
-Postman adalah merek dagang Postman, Inc. Merpati tidak berafiliasi dengan Postman dan tidak
+Postman adalah merek dagang Postman, Inc. TernaryWire tidak berafiliasi dengan Postman dan tidak
 memakai nama, logo, atau aset Postman di dalam aplikasi.

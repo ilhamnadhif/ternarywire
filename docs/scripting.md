@@ -1,7 +1,7 @@
 # Scripting
 
-Merpati runs Postman-style JavaScript in a sandbox built on the pure-Rust
-[boa](https://boajs.dev) engine (`crates/merpati-script`). Scripts cannot touch
+TernaryWire runs Postman-style JavaScript in a sandbox built on the pure-Rust
+[boa](https://boajs.dev) engine (`crates/ternarywire-script`). Scripts cannot touch
 the file system or the network except through the APIs below. This page covers
 the `pm` API for HTTP requests, scripts for the other protocols (PRD FR-S7), and
 packages: npm, JSR and the local Package Library (PRD section 8).
@@ -17,7 +17,7 @@ packages: npm, JSR and the local Package Library (PRD section 8).
 ## Execution model
 
 Each request, folder and collection has three scripts (`Scripts` in
-`merpati-core`):
+`ternarywire-core`):
 
 | Script | `pm.info.eventName` | Runs |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ the next script still runs. A job has a wall-clock timeout (settings: script
 timeout, default 30 s); runaway loops are stopped by a loop-iteration limit.
 
 In the app and the CLI, jobs run in a separate worker process (the same
-executable, started with `--merpati-script-worker`, kept for reuse). A
+executable, started with `--ternarywire-script-worker`, kept for reuse). A
 script that crashes the JavaScript engine (for example `JSON.stringify` of
 data nested hundreds of thousands of levels deep), keeps running in native
 code after its timeout (a catastrophic regular expression), or uses more
@@ -81,7 +81,7 @@ The `pm` object follows Postman's API:
   `crypto-js`, `tv4`, `ajv` (on tv4), `uuid`, `atob`, `btoa`, `xml2js`,
   `buffer`, `url`, `querystring`, `util`, `events`, `timers`, `assert`. Node
   built-ins such as `fs`, `child_process`, `net` or `http` throw
-  `Cannot find module 'fs'. Node.js built-in modules are not available in Merpati scripts.`
+  `Cannot find module 'fs'. Node.js built-in modules are not available in TernaryWire scripts.`
 
 GraphQL requests are HTTP requests: `pm.request.body.graphql` holds `query`,
 `variables` and `operationName`, and the usual pre-request/post-response
@@ -185,7 +185,7 @@ pm.test('temperature in range', () => pm.expect(pm.message.json().celsius).to.be
 
 ### Sessions in the Collection Runner
 
-The Collection Runner and `merpati run` run WebSocket, Socket.IO and MQTT
+The Collection Runner and `ternarywire run` run WebSocket, Socket.IO and MQTT
 requests as scripted sessions: the pre-request script runs once before
 connecting, the saved messages are sent in order (MQTT subscribes to the
 enabled subscriptions first; Socket.IO waits for each acknowledgement it asked
@@ -253,8 +253,8 @@ pm.test('cheap', () => pm.expect(pm.response.usage.outputTokens).to.be.below(500
 ## Intl and Web Streams
 
 boa is built without ICU (its data would add megabytes to the app), so `Intl`
-and the Web Streams API are JavaScript polyfills bundled with Merpati
-(`crates/merpati-script/js/intl.js`, `js/streams.js`). They are installed on
+and the Web Streams API are JavaScript polyfills bundled with TernaryWire
+(`crates/ternarywire-script/js/intl.js`, `js/streams.js`). They are installed on
 first use (`Intl`, `toLocaleString`, `localeCompare`, `ReadableStream`,
 `Blob.prototype.stream()`, ...): scripts that do not use them pay nothing, and
 the first use costs about 20 ms per script worker.
@@ -278,7 +278,7 @@ English (CLDR `en`, i.e. US English) output matches Node.js and Chrome for:
 - Time zones: the local zone (the default, consistent with the `Date`
   getters), `UTC`, offsets (`+05:30`) and IANA names (`America/New_York`) with
   daylight saving time, read from the system tz database (macOS, Linux), or
-  from a copy built into Merpati where the system has none (Windows, slim
+  from a copy built into TernaryWire where the system has none (Windows, slim
   containers). Common zones have long
   names (`Eastern Daylight Time`, `Western Indonesia Time`); others use
   `GMT+07:00`.
@@ -397,9 +397,9 @@ How fetching works:
   packages that need `fs`, `child_process`, `net`, `tls`, `dgram`, `dns`,
   `http`, `https`, `http2`, `cluster`, `worker_threads`, `inspector`, `vm`,
   `repl` or `readline` fail with
-  `... needs the Node.js built-in module 'fs', which is not available in Merpati scripts`.
+  `... needs the Node.js built-in module 'fs', which is not available in TernaryWire scripts`.
 - Every fetched module is cached on disk (the host's cache directory, by
-  default `<config dir>/Merpati/package-cache`), so later runs work offline.
+  default `<config dir>/TernaryWire/package-cache`), so later runs work offline.
   With network access turned off, a module missing from the cache fails with
   `... is not in the package cache (...) and network access is off`.
 
@@ -471,14 +471,14 @@ pm.request.headers.upsert({ key: 'X-Signature', value: sign(pm.environment.get('
 
 ## Host integration
 
-The contract lives in `merpati_core::script` and is implemented by
-`merpati_script::BoaEngine`.
+The contract lives in `ternarywire_core::script` and is implemented by
+`ternarywire_script::BoaEngine`.
 
 **HTTP** (unchanged): `ScriptJob::new(event, scripts, ScriptRequest)`, plus
 `response` for post-response jobs. Set `packages` to enable packages.
 
 **Other protocols**: build the context with the helpers in
-`merpati_core::script::protocol` and run
+`ternarywire_core::script::protocol` and run
 `ScriptJob::for_protocol(event, scripts, ctx)`; fill `info`, `variables`,
 `http`, `timeout`, `cancel` and `packages` as for HTTP. The scripts are
 `Scripts::code(event)` along the collection → folder → request chain.

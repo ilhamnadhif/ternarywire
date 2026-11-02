@@ -3598,511 +3598,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "merpati-ai"
-version = "0.2.1"
-dependencies = [
- "axum",
- "futures-util",
- "merpati-core",
- "merpati-http",
- "merpati-mcp",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "merpati-app"
-version = "0.2.1"
-dependencies = [
- "arboard",
- "base64 0.22.1",
- "chrono",
- "eframe",
- "egui",
- "egui_extras",
- "egui_kittest",
- "egui_system_font_provider",
- "image",
- "indexmap",
- "merpati-ai",
- "merpati-auth",
- "merpati-convert",
- "merpati-core",
- "merpati-flows",
- "merpati-grpc",
- "merpati-html",
- "merpati-http",
- "merpati-mcp",
- "merpati-mock",
- "merpati-mqtt",
- "merpati-proxy",
- "merpati-runner",
- "merpati-script",
- "merpati-secrets",
- "merpati-socketio",
- "muda",
- "open",
- "parking_lot",
- "reqwest",
- "rfd",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "winit",
-]
-
-[[package]]
-name = "merpati-auth"
-version = "0.2.1"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono",
- "hex",
- "hmac 0.12.1",
- "jsonwebtoken",
- "md-5",
- "merpati-core",
- "merpati-http",
- "p521",
- "percent-encoding",
- "rand 0.9.5",
- "rcgen",
- "reqwest",
- "rsa",
- "rustls",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-rustls",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "merpati-cli"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "futures-util",
- "indexmap",
- "merpati-auth",
- "merpati-convert",
- "merpati-core",
- "merpati-flows",
- "merpati-http",
- "merpati-mock",
- "merpati-runner",
- "merpati-script",
- "merpati-secrets",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "merpati-convert"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "flate2",
- "indexmap",
- "merpati-core",
- "percent-encoding",
- "quick-xml 0.38.4",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror 2.0.21",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "merpati-core"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "indexmap",
- "keyring",
- "parking_lot",
- "percent-encoding",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "merpati-flows"
-version = "0.2.1"
-dependencies = [
- "axum",
- "chrono",
- "futures-util",
- "indexmap",
- "merpati-ai",
- "merpati-core",
- "merpati-http",
- "merpati-runner",
- "merpati-script",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "merpati-grpc"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-util",
- "http",
- "hyper-util",
- "merpati-core",
- "merpati-http",
- "miette",
- "prost",
- "prost-reflect",
- "prost-types",
- "protox",
- "rcgen",
- "rustls",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tonic-prost",
- "tonic-reflection",
- "tower",
- "tower-service",
-]
-
-[[package]]
-name = "merpati-html"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "eframe",
- "egui",
- "egui_extras",
- "handlebars",
- "html5ever",
- "image",
- "percent-encoding",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "merpati-http"
-version = "0.2.1"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "boa_engine",
- "bytes",
- "cookie",
- "cookie_store",
- "futures-util",
- "hex",
- "http",
- "hyper-util",
- "md-5",
- "merpati-core",
- "p12-keystore",
- "parking_lot",
- "percent-encoding",
- "pkcs8 0.11.0",
- "publicsuffix",
- "rcgen",
- "reqwest",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "system-configuration",
- "tempfile",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "url",
- "windows-registry",
-]
-
-[[package]]
-name = "merpati-mcp"
-version = "0.2.1"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "bytes",
- "futures-util",
- "libc",
- "merpati-core",
- "merpati-http",
- "parking_lot",
- "rand 0.9.5",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "url",
-]
-
-[[package]]
-name = "merpati-mock"
-version = "0.2.1"
-dependencies = [
- "axum",
- "bytes",
- "chrono",
- "futures-util",
- "http",
- "merpati-core",
- "parking_lot",
- "percent-encoding",
- "rand 0.9.5",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "merpati-mqtt"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "futures-util",
- "merpati-core",
- "merpati-http",
- "parking_lot",
- "percent-encoding",
- "rand 0.9.5",
- "rcgen",
- "rumqttc",
- "rustls",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "url",
-]
-
-[[package]]
-name = "merpati-proxy"
-version = "0.2.1"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "brotli",
- "brotli-decompressor",
- "bytes",
- "chrono",
- "flate2",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "merpati-core",
- "merpati-http",
- "parking_lot",
- "percent-encoding",
- "rand 0.9.5",
- "rcgen",
- "reqwest",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "url",
- "x509-parser",
-]
-
-[[package]]
-name = "merpati-runner"
-version = "0.2.1"
-dependencies = [
- "axum",
- "bytes",
- "chrono",
- "csv",
- "futures-util",
- "indexmap",
- "merpati-ai",
- "merpati-auth",
- "merpati-core",
- "merpati-grpc",
- "merpati-http",
- "merpati-mcp",
- "merpati-mqtt",
- "merpati-script",
- "merpati-socketio",
- "parking_lot",
- "quick-junit",
- "rand 0.9.5",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "merpati-script"
-version = "0.2.1"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "boa_engine",
- "boa_gc",
- "bytes",
- "chrono",
- "hex",
- "hmac 0.12.1",
- "iana-time-zone",
- "indexmap",
- "jiff-tzdb",
- "libc",
- "md-5",
- "merpati-core",
- "parking_lot",
- "percent-encoding",
- "rand 0.9.5",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tracing",
- "url",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "merpati-secrets"
-version = "0.2.1"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono",
- "hex",
- "hmac 0.12.1",
- "merpati-auth",
- "merpati-core",
- "merpati-http",
- "parking_lot",
- "percent-encoding",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "merpati-socketio"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "futures-util",
- "http",
- "hyper",
- "merpati-core",
- "merpati-http",
- "rcgen",
- "reqwest",
- "rustls",
- "serde_json",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "url",
-]
-
-[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6901,6 +6396,511 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "ternarywire-ai"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "futures-util",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "ternarywire-core",
+ "ternarywire-http",
+ "ternarywire-mcp",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "ternarywire-app"
+version = "0.2.1"
+dependencies = [
+ "arboard",
+ "base64 0.22.1",
+ "chrono",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_kittest",
+ "egui_system_font_provider",
+ "image",
+ "indexmap",
+ "muda",
+ "open",
+ "parking_lot",
+ "reqwest",
+ "rfd",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tempfile",
+ "ternarywire-ai",
+ "ternarywire-auth",
+ "ternarywire-convert",
+ "ternarywire-core",
+ "ternarywire-flows",
+ "ternarywire-grpc",
+ "ternarywire-html",
+ "ternarywire-http",
+ "ternarywire-mcp",
+ "ternarywire-mock",
+ "ternarywire-mqtt",
+ "ternarywire-proxy",
+ "ternarywire-runner",
+ "ternarywire-script",
+ "ternarywire-secrets",
+ "ternarywire-socketio",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "winit",
+]
+
+[[package]]
+name = "ternarywire-auth"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "jsonwebtoken",
+ "md-5",
+ "p521",
+ "percent-encoding",
+ "rand 0.9.5",
+ "rcgen",
+ "reqwest",
+ "rsa",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tempfile",
+ "ternarywire-core",
+ "ternarywire-http",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ternarywire-cli"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "futures-util",
+ "indexmap",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ternarywire-auth",
+ "ternarywire-convert",
+ "ternarywire-core",
+ "ternarywire-flows",
+ "ternarywire-http",
+ "ternarywire-mock",
+ "ternarywire-runner",
+ "ternarywire-script",
+ "ternarywire-secrets",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ternarywire-convert"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "flate2",
+ "indexmap",
+ "percent-encoding",
+ "quick-xml 0.38.4",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "ternarywire-core",
+ "thiserror 2.0.21",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "ternarywire-core"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "indexmap",
+ "keyring",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ternarywire-flows"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "futures-util",
+ "indexmap",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ternarywire-ai",
+ "ternarywire-core",
+ "ternarywire-http",
+ "ternarywire-runner",
+ "ternarywire-script",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "ternarywire-grpc"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "http",
+ "hyper-util",
+ "miette",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "protox",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "ternarywire-core",
+ "ternarywire-http",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-reflection",
+ "tower",
+ "tower-service",
+]
+
+[[package]]
+name = "ternarywire-html"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "handlebars",
+ "html5ever",
+ "image",
+ "percent-encoding",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ternarywire-http"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "boa_engine",
+ "bytes",
+ "cookie",
+ "cookie_store",
+ "futures-util",
+ "hex",
+ "http",
+ "hyper-util",
+ "md-5",
+ "p12-keystore",
+ "parking_lot",
+ "percent-encoding",
+ "pkcs8 0.11.0",
+ "publicsuffix",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "system-configuration",
+ "tempfile",
+ "ternarywire-core",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "windows-registry",
+]
+
+[[package]]
+name = "ternarywire-mcp"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "libc",
+ "parking_lot",
+ "rand 0.9.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ternarywire-core",
+ "ternarywire-http",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "ternarywire-mock"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "http",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.5",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "ternarywire-core",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "ternarywire-mqtt"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.5",
+ "rcgen",
+ "rumqttc",
+ "rustls",
+ "ternarywire-core",
+ "ternarywire-http",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
+name = "ternarywire-proxy"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "brotli",
+ "brotli-decompressor",
+ "bytes",
+ "chrono",
+ "flate2",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.5",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "ternarywire-core",
+ "ternarywire-http",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "x509-parser",
+]
+
+[[package]]
+name = "ternarywire-runner"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "bytes",
+ "chrono",
+ "csv",
+ "futures-util",
+ "indexmap",
+ "parking_lot",
+ "quick-junit",
+ "rand 0.9.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ternarywire-ai",
+ "ternarywire-auth",
+ "ternarywire-core",
+ "ternarywire-grpc",
+ "ternarywire-http",
+ "ternarywire-mcp",
+ "ternarywire-mqtt",
+ "ternarywire-script",
+ "ternarywire-socketio",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ternarywire-script"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "boa_engine",
+ "boa_gc",
+ "bytes",
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "iana-time-zone",
+ "indexmap",
+ "jiff-tzdb",
+ "libc",
+ "md-5",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.5",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tempfile",
+ "ternarywire-core",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ternarywire-secrets"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "parking_lot",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "ternarywire-auth",
+ "ternarywire-core",
+ "ternarywire-http",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "ternarywire-socketio"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "http",
+ "hyper",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "ternarywire-core",
+ "ternarywire-http",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]

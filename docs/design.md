@@ -1,9 +1,9 @@
-# Merpati UI design guide
+# TernaryWire UI design guide
 
 The app is drawn with egui. Every screen uses the same tokens and components so
 it looks like one product. Read this before changing UI code.
 
-## Tokens (`crates/merpati-app/src/theme.rs`)
+## Tokens (`crates/ternarywire-app/src/theme.rs`)
 
 - Colors: `theme::pal(ui)` returns the `Palette` of the current theme:
   `canvas` (content background), `chrome` (top bar, sidebar, tab strip, status
@@ -24,14 +24,14 @@ it looks like one product. Read this before changing UI code.
 - Spacing: 8 px between controls in a row, 12–16 px between groups, 18 px page
   margin (set by the shell).
 
-## Icons (`crates/merpati-app/src/icons.rs`)
+## Icons (`crates/ternarywire-app/src/icons.rs`)
 
 Phosphor icons, usable inside any text: `format!("{} {}", icons::PLUS, tr("New"))`
 or `kit::with_icon(icons::PLUS, tr("New"))` for menu items. Do not use emoji or
 symbol characters as icons (🗀 ⚙ ▶ ⋯ ✕ …). To add an icon, add its Phosphor name
 to `ICONS` in `scripts/build-fonts.py` and rerun the script (see its header).
 
-## Components (`crates/merpati-app/src/kit.rs`)
+## Components (`crates/ternarywire-app/src/kit.rs`)
 
 | Need | Use |
 | --- | --- |
@@ -68,7 +68,7 @@ third screen needs it.
 
 - **Menu bar** (`menu.rs`, muda): the app, File, Edit, View, Window and Help
   menus. An item with a shortcut hands egui the same key press (or
-  Copy/Cut/Paste) the shortcut would have, so `MerpatiApp::shortcuts` and text
+  Copy/Cut/Paste) the shortcut would have, so `TernaryWireApp::shortcuts` and text
   editing stay the one place that handles keys on every platform. Add new
   shortcuts there first, then a menu item that sends the key.
 - **Scrolling**: trackpad gestures stick to one axis (`scroll_lock.rs`), so text
@@ -92,15 +92,15 @@ third screen needs it.
 - Empty, loading and error states are designed (empty state with an action,
   spinner with text, error with icon, cause and next step).
 - Text that users read goes through `tr()`/`trf()` with an Indonesian entry in
-  `crates/merpati-app/i18n/id.tsv`.
+  `crates/ternarywire-app/i18n/id.tsv`.
 - Check both themes (`{"theme": "light"}` / `{"theme": "dark"}` automation
   steps) and a narrow window (`{"window": [900, 640]}`).
 - Screenshots without a window: the ignored test `automation::tests::offscreen`
-  runs a `MERPATI_AUTOMATION` script on the real app drawn on the GPU, with
-  settings from a scratch `MERPATI_CONFIG_DIR` (`MERPATI_SIZE=1280x820`,
-  `MERPATI_PPP=2`), and lists widgets that have no accessible name:
+  runs a `TERNARYWIRE_AUTOMATION` script on the real app drawn on the GPU, with
+  settings from a scratch `TERNARYWIRE_CONFIG_DIR` (`TERNARYWIRE_SIZE=1280x820`,
+  `TERNARYWIRE_PPP=2`), and lists widgets that have no accessible name:
 
   ```sh
-  MERPATI_CONFIG_DIR=/tmp/m/config MERPATI_SECRETS=memory MERPATI_AUTOMATION=steps.json \
-    cargo test -p merpati-app offscreen -- --ignored --nocapture
+  TERNARYWIRE_CONFIG_DIR=/tmp/m/config TERNARYWIRE_SECRETS=memory TERNARYWIRE_AUTOMATION=steps.json \
+    cargo test -p ternarywire-app offscreen -- --ignored --nocapture
   ```

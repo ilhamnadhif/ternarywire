@@ -1,23 +1,23 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/merpati-app", "crates/merpati-cli"]
+default-members = ["crates/ternarywire-app", "crates/ternarywire-cli"]
 
 [workspace.package]
 version = "0.2.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ilhamnadhif/merpati"
+repository = "https://github.com/ilhamnadhif/ternarywire"
 rust-version = "1.88"
 
 [workspace.dependencies]
-merpati-core = { path = "crates/merpati-core" }
-merpati-http = { path = "crates/merpati-http" }
-merpati-auth = { path = "crates/merpati-auth" }
-merpati-script = { path = "crates/merpati-script" }
-merpati-convert = { path = "crates/merpati-convert" }
-merpati-runner = { path = "crates/merpati-runner" }
-merpati-mock = { path = "crates/merpati-mock" }
+ternarywire-core = { path = "crates/ternarywire-core" }
+ternarywire-http = { path = "crates/ternarywire-http" }
+ternarywire-auth = { path = "crates/ternarywire-auth" }
+ternarywire-script = { path = "crates/ternarywire-script" }
+ternarywire-convert = { path = "crates/ternarywire-convert" }
+ternarywire-runner = { path = "crates/ternarywire-runner" }
+ternarywire-mock = { path = "crates/ternarywire-mock" }
 
 anyhow = "1"
 thiserror = "2"
@@ -83,7 +83,7 @@ panic = "unwind"
 
 # Shipped binaries: slower to build, app 31 MB instead of ~40 MB with opt-level 3.
 # Cold start is the same and the runner ~10% slower.
-# `cargo build --profile dist -p merpati-app`
+# `cargo build --profile dist -p ternarywire-app`
 [profile.dist]
 inherits = "release"
 lto = "fat"

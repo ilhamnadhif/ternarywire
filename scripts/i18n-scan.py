@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lists UI string literals in crates/merpati-app that bypass the translation
+"""Lists UI string literals in crates/ternarywire-app that bypass the translation
 system (`tr`/`trf`), and `tr` keys missing from i18n/id.tsv.
 
     python3 scripts/i18n-scan.py            # report
@@ -12,7 +12,7 @@ import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent / "crates" / "merpati-app"
+ROOT = pathlib.Path(__file__).resolve().parent.parent / "crates" / "ternarywire-app"
 SRC = ROOT / "src"
 TSV = ROOT / "i18n" / "id.tsv"
 

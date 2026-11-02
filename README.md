@@ -1,8 +1,8 @@
-# Merpati
+# TernaryWire
 
 **A lightweight API client, written entirely in Rust.**
 
-Merpati is a native alternative to Postman: one small binary, no Electron, no Node.js, no account.
+TernaryWire is a native alternative to Postman: one small binary, no Electron, no Node.js, no account.
 It draws its first frame in about 40 ms, idles at 0 % CPU and uses under 90 MB of memory, and a
 100 MB response streams to disk instead of into memory. Collections are plain JSON files in a
 folder you can commit to Git, and Postman collections, environments and `pm.*` scripts import and
@@ -10,7 +10,7 @@ run unchanged for common use.
 
 [Bahasa Indonesia](README.id.md)
 
-![Merpati: a collection, a request and its response with test results](docs/screenshots/hero.png)
+![TernaryWire: a collection, a request and its response with test results](docs/screenshots/hero.png)
 
 ## Highlights
 
@@ -22,7 +22,7 @@ run unchanged for common use.
 - **Git-friendly workspaces**: one pretty-printed file per request, stable ordering, and secrets
   never written to the workspace; they live in the Keychain.
 - **Collection Runner and CLI** with data files, JUnit/HTML/JSON reports and **newman-compatible
-  options**, so `merpati run` can replace `newman run` in CI. Performance tests with virtual users.
+  options**, so `ternarywire run` can replace `newman run` in CI. Performance tests with virtual users.
 - **Flows**: a visual canvas that chains requests, conditions, loops, parallel branches, scripts and
   AI calls, and runs from the app or the CLI.
 - **Spec Hub** for OpenAPI, AsyncAPI, Protobuf, GraphQL and Smithy files with live validation, a
@@ -47,68 +47,68 @@ Windows 10 and 11 (x64), and Linux on x86_64 and ARM64 with glibc 2.28 or later:
 Debian 11+, Fedora, RHEL/Rocky/Alma 8+, openSUSE Leap 15.6+ and, through the AppImage, most
 other distributions (Arch, Manjaro, ...). macOS is the main platform; see [Known limitations](#known-limitations).
 
-| System | Download from the [latest release](https://github.com/ilhamnadhif/merpati/releases/latest) |
+| System | Download from the [latest release](https://github.com/ilhamnadhif/ternarywire/releases/latest) |
 | --- | --- |
-| macOS | `Merpati-<version>-universal.dmg`, or the [one-line installer](#one-line-installer-macos-recommended) |
-| Windows | `Merpati-Setup-<version>-x64.exe` (installer) or `merpati-<version>-windows-x86_64.zip` (portable) |
-| Ubuntu, Debian, Mint, Pop!_OS | `merpati_<version>_amd64.deb` / `_arm64.deb` |
-| Fedora, RHEL, Rocky, Alma, openSUSE | `merpati-<version>-1.x86_64.rpm` / `.aarch64.rpm` |
-| Arch, Manjaro and others | `Merpati-<version>-x86_64.AppImage` / `-aarch64.AppImage` |
-| Any Linux, by hand | `merpati-<version>-linux-x86_64.tar.gz` / `-aarch64.tar.gz` |
+| macOS | `TernaryWire-<version>-universal.dmg`, or the [one-line installer](#one-line-installer-macos-recommended) |
+| Windows | `TernaryWire-Setup-<version>-x64.exe` (installer) or `ternarywire-<version>-windows-x86_64.zip` (portable) |
+| Ubuntu, Debian, Mint, Pop!_OS | `ternarywire_<version>_amd64.deb` / `_arm64.deb` |
+| Fedora, RHEL, Rocky, Alma, openSUSE | `ternarywire-<version>-1.x86_64.rpm` / `.aarch64.rpm` |
+| Arch, Manjaro and others | `TernaryWire-<version>-x86_64.AppImage` / `-aarch64.AppImage` |
+| Any Linux, by hand | `ternarywire-<version>-linux-x86_64.tar.gz` / `-aarch64.tar.gz` |
 
 ### One-line installer (macOS, recommended)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/merpati/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternarywire/master/scripts/install.sh | bash
 ```
 
 The script downloads the latest release, checks it (the SHA-256 GitHub publishes, the bundle id,
-the version and the code signature), quits a running Merpati, installs `Merpati.app` into
+the version and the code signature), quits a running TernaryWire, installs `TernaryWire.app` into
 `/Applications` and opens it. If anything fails, the copy you had stays in place. Run it again to
-update. To install a specific version, pass it as an argument: `… | bash -s -- v0.1.0`. To install
-somewhere else, set `MERPATI_APP_DIR` for bash: `… | MERPATI_APP_DIR=~/Applications bash`.
+update. To install a specific version, pass it as an argument: `… | bash -s -- v0.2.2`. To install
+somewhere else, set `TERNARYWIRE_APP_DIR` for bash: `… | TERNARYWIRE_APP_DIR=~/Applications bash`.
 
 ### Disk image
 
-Download **`Merpati-<version>-universal.dmg`** from the
-[latest release](https://github.com/ilhamnadhif/merpati/releases/latest), open it and drag
-**Merpati** onto **Applications**.
+Download **`TernaryWire-<version>-universal.dmg`** from the
+[latest release](https://github.com/ilhamnadhif/ternarywire/releases/latest), open it and drag
+**TernaryWire** onto **Applications**.
 
-> **“Merpati” Not Opened / “Apple could not verify…”?** Release builds are not notarized by Apple
+> **“TernaryWire” Not Opened / “Apple could not verify…”?** Release builds are not notarized by Apple
 > yet (they are signed ad hoc), so macOS blocks apps downloaded with a browser. Since macOS 15, the
 > old right-click → Open trick no longer works. Do one of these:
 >
 > - **Use the one-line installer** above. Nothing downloaded with `curl` is blocked.
 > - **Allow it once in Settings**: click **Done** in the warning, open **System Settings → Privacy &
->   Security**, scroll down to **Security**, and click **Open Anyway** next to “Merpati was
->   blocked…”. Confirm with your password, then open Merpati again.
+>   Security**, scroll down to **Security**, and click **Open Anyway** next to “TernaryWire was
+>   blocked…”. Confirm with your password, then open TernaryWire again.
 > - **Or in Terminal**, after dragging the app to Applications:
->   `xattr -dr com.apple.quarantine /Applications/Merpati.app`
+>   `xattr -dr com.apple.quarantine /Applications/TernaryWire.app`
 
 ### Homebrew
 
-Each release includes a cask file, `merpati.rb`:
+Each release includes a cask file, `ternarywire.rb`:
 
 ```sh
-curl -fsSLO https://github.com/ilhamnadhif/merpati/releases/latest/download/merpati.rb
-brew install --cask ./merpati.rb
-xattr -dr com.apple.quarantine /Applications/Merpati.app   # until releases are notarized
+curl -fsSLO https://github.com/ilhamnadhif/ternarywire/releases/latest/download/ternarywire.rb
+brew install --cask ./ternarywire.rb
+xattr -dr com.apple.quarantine /Applications/TernaryWire.app   # until releases are notarized
 ```
 
-The cask also links `merpati-app` into Homebrew's `bin`.
+The cask also links `ternarywire-app` into Homebrew's `bin`.
 
 ### Windows
 
-Run **`Merpati-Setup-<version>-x64.exe`**. It installs Merpati for your user account without
+Run **`TernaryWire-Setup-<version>-x64.exe`**. It installs TernaryWire for your user account without
 administrator rights (choose *Install for all users* in the first dialog to put it in Program
-Files), adds it to the Start menu, can add the `merpati` command-line tool to `PATH`, and installs
+Files), adds it to the Start menu, can add the `ternarywire` command-line tool to `PATH`, and installs
 over an older version when you update. Uninstall it from **Settings › Apps** like any other app.
 
 The installer isn't signed with a code-signing certificate yet, so SmartScreen may say *Windows
 protected your PC*: choose **More info › Run anyway**.
 
-Prefer no installer? Unpack **`merpati-<version>-windows-x86_64.zip`** anywhere and run
-`merpati-app.exe`.
+Prefer no installer? Unpack **`ternarywire-<version>-windows-x86_64.zip`** anywhere and run
+`ternarywire-app.exe`.
 
 ### Linux
 
@@ -117,23 +117,23 @@ Download the package for your distribution and architecture (`amd64`/`x86_64` or
 
 ```sh
 # Ubuntu, Debian, Linux Mint, Pop!_OS, elementary OS
-sudo apt install ./merpati_<version>_amd64.deb
+sudo apt install ./ternarywire_<version>_amd64.deb
 
 # Fedora, RHEL, Rocky Linux, AlmaLinux
-sudo dnf install ./merpati-<version>-1.x86_64.rpm
+sudo dnf install ./ternarywire-<version>-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install --allow-unsigned-rpm ./merpati-<version>-1.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./ternarywire-<version>-1.x86_64.rpm
 
 # Arch, Manjaro and anything else: the AppImage runs without installing
-chmod +x Merpati-<version>-x86_64.AppImage
-./Merpati-<version>-x86_64.AppImage
+chmod +x TernaryWire-<version>-x86_64.AppImage
+./TernaryWire-<version>-x86_64.AppImage
 ```
 
-The packages put `merpati-app` and `merpati` in `/usr/bin` and add Merpati to the application
+The packages put `ternarywire-app` and `ternarywire` in `/usr/bin` and add TernaryWire to the application
 menu. The AppImage needs FUSE, which desktop distributions have; if it won't start, install your
 distribution's `fuse`/`fuse2` package or run it with `--appimage-extract-and-run`. The `.tar.gz`
-holds the same two binaries with a `.desktop` file and an icon: unpack it and run `./merpati-app`,
+holds the same two binaries with a `.desktop` file and an icon: unpack it and run `./ternarywire-app`,
 or copy the binaries to a folder on your `PATH` (such as `~/.local/bin`) and the `.desktop` file
 to `~/.local/share/applications`.
 
@@ -144,39 +144,39 @@ SHA-256 of every file (`SHA256SUMS-*.txt`).
 
 ### Command line only
 
-The CLI is a single binary as well. For macOS, take `merpati-cli-<version>-macos-universal.tar.gz`
+The CLI is a single binary as well. For macOS, take `ternarywire-cli-<version>-macos-universal.tar.gz`
 from the release (the Linux and Windows archives above contain it too):
 
 ```sh
-curl -fsSL https://github.com/ilhamnadhif/merpati/releases/download/v0.1.0/merpati-cli-0.1.0-macos-universal.tar.gz | tar -xz
-sudo mv merpati /usr/local/bin/
-merpati --version
+curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.2.2/ternarywire-cli-0.2.2-macos-universal.tar.gz | tar -xz
+sudo mv ternarywire /usr/local/bin/
+ternarywire --version
 ```
 
 Or build it with Cargo (Rust 1.88 or later), or use the Docker image:
 
 ```sh
-cargo install --locked --git https://github.com/ilhamnadhif/merpati merpati-cli
+cargo install --locked --git https://github.com/ilhamnadhif/ternarywire ternarywire-cli
 
-docker build -f docker/Dockerfile -t merpati .
-docker run --rm -v "$PWD:/work" merpati run collection.json -e env.json -r cli,junit
+docker build -f docker/Dockerfile -t ternarywire .
+docker run --rm -v "$PWD:/work" ternarywire run collection.json -e env.json -r cli,junit
 ```
 
 ### Updates
 
-When it starts, Merpati asks GitHub for the latest release. That request sends only the app's
+When it starts, TernaryWire asks GitHub for the latest release. That request sends only the app's
 version as its User-Agent; turn it off in **Settings › General › Updates** (where **Check now**
 checks right away). When a newer version is out, a window shows its release notes with the choice
 to install it, be reminded later, or skip that version.
 
 - **On macOS**, **Install and restart** downloads the app archive
-  (`Merpati-<version>-macos-universal.zip`), verifies it (the SHA-256 GitHub publishes, the bundle
-  id, the version and the code signature), replaces `Merpati.app` and opens the new version.
+  (`TernaryWire-<version>-macos-universal.zip`), verifies it (the SHA-256 GitHub publishes, the bundle
+  id, the version and the code signature), replaces `TernaryWire.app` and opens the new version.
 - **On Linux**, the AppImage replaces itself the same way (**Install and restart**). A `.deb` or
   `.rpm` install downloads the new package and opens it in your software installer; a `.tar.gz`
   install downloads the new archive.
-- **On Windows**, Merpati downloads the new installer (or the `.zip` for a portable copy) and opens
-  it; the installer closes Merpati, updates it and can start it again.
+- **On Windows**, TernaryWire downloads the new installer (or the `.zip` for a portable copy) and opens
+  it; the installer closes TernaryWire, updates it and can start it again.
 
 Every download is checked against the SHA-256 that GitHub publishes for the file (or the release's
 `SHA256SUMS-*.txt`); a download without a checksum is refused.
@@ -186,21 +186,21 @@ The one-line installer above also updates.
 ### Uninstall
 
 ```sh
-rm -rf /Applications/Merpati.app
-rm -rf ~/Library/Application\ Support/Merpati   # settings, the default workspace, package cache
+rm -rf /Applications/TernaryWire.app
+rm -rf ~/Library/Application\ Support/TernaryWire   # settings, the default workspace, package cache
 ```
 
 Workspaces you created elsewhere stay where you put them. Saved secrets are Keychain items with the
-service name `dev.merpati.workspace`; remove them in Keychain Access.
+service name `dev.ternarywire.workspace`; remove them in Keychain Access.
 
-On **Windows**, uninstall Merpati in **Settings › Apps** and delete `%APPDATA%\Merpati` for its
-settings. On **Linux**, remove the package (`sudo apt remove merpati`, `sudo dnf remove merpati`)
-or the AppImage, and delete `~/.config/Merpati`; secrets are in your keyring (GNOME Keyring or
+On **Windows**, uninstall TernaryWire in **Settings › Apps** and delete `%APPDATA%\TernaryWire` for its
+settings. On **Linux**, remove the package (`sudo apt remove ternarywire`, `sudo dnf remove ternarywire`)
+or the AppImage, and delete `~/.config/TernaryWire`; secrets are in your keyring (GNOME Keyring or
 KWallet).
 
 ## Getting started
 
-1. Open Merpati. It opens your last workspace, or creates **My Workspace** in its settings folder.
+1. Open TernaryWire. It opens your last workspace, or creates **My Workspace** in its settings folder.
    Use the workspace menu (top left) to create or open a workspace anywhere, for example inside a
    Git repository.
 2. Click **Import** to bring in a Postman collection, an OpenAPI file, a cURL command, a HAR file
@@ -208,7 +208,7 @@ KWallet).
 3. Pick an environment (`⌘E`), type a URL and press `⌘↩`. `{{variables}}` are highlighted, and
    hovering one shows its value.
 4. Right-click a collection or folder and choose **Run collection** (or **Run folder**) to run its
-   requests and tests, or run the same collection in a terminal with `merpati run`.
+   requests and tests, or run the same collection in a terminal with `ternarywire run`.
 
 ## Features
 
@@ -297,7 +297,7 @@ Details: [docs/scripting.md](docs/scripting.md).
   scripted sessions (connect, send the saved messages, stop after N messages, an event or a quiet
   period).
 - Performance tests with virtual users and ramp-up: latency percentiles (p50 to p99), throughput
-  and errors, in the app or with `merpati perf`.
+  and errors, in the app or with `ternarywire perf`.
 
 ### Protocols
 
@@ -332,7 +332,7 @@ Script, AI, Delay, Set Variable, Template, Output and Log. Parallel branches rea
 time and a Join waits for the branches that can reach it. Each block shows its status and timing
 while the flow runs, AI answers stream onto the canvas, and problems are flagged before you run.
 Flows are saved as `flows/*.flow.json` in the workspace and run from the CLI with
-`merpati flow run`.
+`ternarywire flow run`.
 
 ### API design: Spec Hub
 
@@ -345,7 +345,7 @@ Flows are saved as `flows/*.flow.json` in the workspace and run from the CLI wit
 - **Generate collection** from an OpenAPI or Smithy spec, or update an existing one (requests are
   added and changed, your scripts and tests stay); export a collection as OpenAPI.
 - Documentation for a collection as Markdown or a static HTML site with code samples, from the
-  app or `merpati docs`.
+  app or `ternarywire docs`.
 
 ### Mock server, webhooks and capture
 
@@ -393,21 +393,21 @@ Flows are saved as `flows/*.flow.json` in the workspace and run from the CLI wit
 ## Command line
 
 ```text
-merpati run       Run a collection (newman-compatible options)
-merpati schedule  Run a collection repeatedly (--every 5m), keeping each run's results
-merpati mock      Start a mock server from a collection's examples
-merpati import    Import Postman, OpenAPI, Insomnia, HAR, cURL, … into a workspace
-merpati export    Export a collection, environment or globals
-merpati convert   Convert any importable file to Postman or OpenAPI
-merpati validate  Check a file or workspace for errors and undefined variables
-merpati codegen   Generate a code snippet for a request
-merpati perf      Load test requests with virtual users
-merpati docs      Generate documentation (static HTML site or Markdown)
-merpati flow      Run, list and validate Flows
-merpati init      Create an empty workspace
+ternarywire run       Run a collection (newman-compatible options)
+ternarywire schedule  Run a collection repeatedly (--every 5m), keeping each run's results
+ternarywire mock      Start a mock server from a collection's examples
+ternarywire import    Import Postman, OpenAPI, Insomnia, HAR, cURL, … into a workspace
+ternarywire export    Export a collection, environment or globals
+ternarywire convert   Convert any importable file to Postman or OpenAPI
+ternarywire validate  Check a file or workspace for errors and undefined variables
+ternarywire codegen   Generate a code snippet for a request
+ternarywire perf      Load test requests with virtual users
+ternarywire docs      Generate documentation (static HTML site or Markdown)
+ternarywire flow      Run, list and validate Flows
+ternarywire init      Create an empty workspace
 ```
 
-`merpati run` takes a Postman collection file, a Merpati workspace or a collection folder, and the
+`ternarywire run` takes a Postman collection file, a TernaryWire workspace or a collection folder, and the
 options you know from newman: `-e`, `-g`, `-d`, `-n`, `--folder`, `--env-var`, `--global-var`,
 `--delay-request`, `--timeout`, `--timeout-request`, `--timeout-script`, `-k`, `--bail`, `-x`,
 `-r cli,json,junit,html` with `--reporter-*-export`, `--export-environment`, `--export-globals`,
@@ -419,17 +419,17 @@ passwords in URLs, tokens in query strings) are masked in reports and terminal o
 pass `--show-secrets`.
 
 ```sh
-merpati run postman_collection.json -e staging.postman_environment.json -d users.csv \
+ternarywire run postman_collection.json -e staging.postman_environment.json -d users.csv \
   -r cli,junit --reporter-junit-export report.xml
-merpati init my-api && merpati import postman_collection.json -w my-api
-merpati run my-api -e Staging --folder "Smoke tests" --bail
-merpati mock my-api --port 3000 --network slow-3g --fail-rate 0.1 --fail-with timeout
-merpati perf my-api --vus 20 --duration 30s
-merpati flow run my-api "Catalog summary" -e Staging
-merpati docs my-api -o site/ --languages curl,python    # or --markdown -o API.md
+ternarywire init my-api && ternarywire import postman_collection.json -w my-api
+ternarywire run my-api -e Staging --folder "Smoke tests" --bail
+ternarywire mock my-api --port 3000 --network slow-3g --fail-rate 0.1 --fail-with timeout
+ternarywire perf my-api --vus 20 --duration 30s
+ternarywire flow run my-api "Catalog summary" -e Staging
+ternarywire docs my-api -o site/ --languages curl,python    # or --markdown -o API.md
 ```
 
-`merpati <command> --help` lists every option.
+`ternarywire <command> --help` lists every option.
 
 ## GitHub Action
 
@@ -438,7 +438,7 @@ collection, writing a JUnit report:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: ilhamnadhif/merpati@v0.1.0
+- uses: ilhamnadhif/ternarywire@v0.2.2
   with:
     collection: api/                 # Postman collection file, workspace or collection folder
     environment: Staging             # Postman environment file or workspace environment name
@@ -448,19 +448,19 @@ collection, writing a JUnit report:
   if: always()
   with:
     name: api-tests
-    path: merpati-reports/junit.xml
+    path: ternarywire-reports/junit.xml
 ```
 
 Other inputs: `collection-name`, `iteration-data`, `junit-export` and `version` (the Git ref of
-Merpati to build). The action compiles the CLI with Cargo and caches the build between runs. It
+TernaryWire to build). The action compiles the CLI with Cargo and caches the build between runs. It
 has not been tried on GitHub's own runners yet, so please report any problem.
 
 ## Workspace format
 
 ```text
 my-api/
-  merpati.json                      manifest
-  .gitignore                        ignores .merpati/
+  ternarywire.json                      manifest
+  .gitignore                        ignores .ternarywire/
   globals.json
   environments/staging.json         initial values only; secrets left blank
   collections/bookstore-api/
@@ -470,18 +470,18 @@ my-api/
   flows/catalog-summary.flow.json
   specs/bookstore.yaml
   packages/                         your own script modules
-  .merpati/                         local only: current values, cookies, history, open tabs
+  .ternarywire/                         local only: current values, cookies, history, open tabs
 ```
 
 ## Privacy and security
 
-- No account and no telemetry. Merpati connects only to the servers you send requests to and, if
+- No account and no telemetry. TernaryWire connects only to the servers you send requests to and, if
   you leave the update check on, to GitHub once at start (with only the app version as
   User-Agent).
 - Secret-type variables, sensitive auth fields (passwords, tokens, client secrets, private keys),
   OAuth tokens, proxy passwords and certificate passphrases go to the macOS Keychain (one item per
   workspace), never to workspace files, exports, history or run reports. On systems without a
-  keychain (CI, containers) they go to `.merpati/secrets.json`, which the workspace's `.gitignore`
+  keychain (CI, containers) they go to `.ternarywire/secrets.json`, which the workspace's `.gitignore`
   keeps out of Git.
 - TLS certificates are verified by default. Scripts run in a sandbox without file or network
   access except through `pm`, in a separate process with time and memory limits.
@@ -490,11 +490,11 @@ my-api/
 
 | What | Where (macOS) |
 | --- | --- |
-| Settings | `~/Library/Application Support/Merpati/settings.json` |
-| Default workspace | `~/Library/Application Support/Merpati/workspaces/My Workspace` |
-| npm/JSR package cache | `~/Library/Application Support/Merpati/package-cache` |
-| Current values, cookies, history, open tabs | `.merpati/` inside each workspace |
-| Secrets | macOS Keychain, service `dev.merpati.workspace` |
+| Settings | `~/Library/Application Support/TernaryWire/settings.json` |
+| Default workspace | `~/Library/Application Support/TernaryWire/workspaces/My Workspace` |
+| npm/JSR package cache | `~/Library/Application Support/TernaryWire/package-cache` |
+| Current values, cookies, history, open tabs | `.ternarywire/` inside each workspace |
+| Secrets | macOS Keychain, service `dev.ternarywire.workspace` |
 
 On Linux the settings folder is the XDG config folder, on Windows `%APPDATA%`.
 
@@ -528,16 +528,16 @@ Xcode Command Line Tools, on Linux the development packages of `libxkbcommon`, `
 and `dbus`.
 
 ```sh
-git clone https://github.com/ilhamnadhif/merpati.git && cd merpati
-cargo run --release -p merpati-app            # the desktop app
-cargo run --release -p merpati-cli -- --help  # the CLI
-cargo build --profile dist -p merpati-app     # smallest binary, as shipped (fat LTO, opt-level s)
-scripts/package-macos.sh                      # universal Merpati.app, DMG, zip, CLI tarball, Homebrew cask
+git clone https://github.com/ilhamnadhif/ternarywire.git && cd ternarywire
+cargo run --release -p ternarywire-app            # the desktop app
+cargo run --release -p ternarywire-cli -- --help  # the CLI
+cargo build --profile dist -p ternarywire-app     # smallest binary, as shipped (fat LTO, opt-level s)
+scripts/package-macos.sh                      # universal TernaryWire.app, DMG, zip, CLI tarball, Homebrew cask
 scripts/package-macos.sh --native             # this Mac's architecture only (faster)
 ```
 
-Signing and notarization need an Apple Developer account: set `MERPATI_SIGN_IDENTITY` (a
-Developer ID Application identity) and `MERPATI_NOTARY_PROFILE` (made once with
+Signing and notarization need an Apple Developer account: set `TERNARYWIRE_SIGN_IDENTITY` (a
+Developer ID Application identity) and `TERNARYWIRE_NOTARY_PROFILE` (made once with
 `xcrun notarytool store-credentials`) before running `scripts/package-macos.sh`. Without them the
 app is signed ad hoc. Pushing a `v*` tag runs the release workflow, which builds macOS, Linux and
 Windows and publishes the files with their checksums.
@@ -546,24 +546,24 @@ Windows and publishes the files with their checksums.
 
 | Crate | What it does |
 | --- | --- |
-| `merpati-core` | Data model, variables (5 scopes, dynamic variables, vault), workspace format, secrets, history, Postman import/export |
-| `merpati-http` | HTTP engine on reqwest/hyper/rustls: redirects, cookies, proxies (PAC, WPAD), CA and client certificates, HTTP/1.1 and HTTP/2, Unix sockets and named pipes, streaming large bodies to disk; WebSocket client |
-| `merpati-auth` | All auth types, from API key to OAuth 2.0, AWS SigV4, NTLM, EdgeGrid and ASAP |
-| `merpati-script` | Script engine on boa (pure-Rust JavaScript): `pm` API, Chai, `pm.sendRequest`, packages, sandbox and worker processes |
-| `merpati-runner` | The request pipeline shared by the app, Runner and CLI; Collection Runner, performance tests, reporters |
-| `merpati-convert` | cURL, OpenAPI/Swagger, Insomnia, HAR, Hoppscotch, Thunder Client, WSDL and Smithy importers; OpenAPI export; code generators; GraphQL schema; documentation |
-| `merpati-mock` | Mock server from examples, network and failure simulation; webhook listener |
-| `merpati-grpc` | Dynamic gRPC client: `.proto` compilation or reflection, all four call types, mTLS |
-| `merpati-mqtt` | MQTT 3.1.1/5 over TCP, TLS and WebSocket |
-| `merpati-socketio` | Socket.IO v2–v4 client (Engine.IO 3/4, polling and WebSocket) |
-| `merpati-mcp` | Model Context Protocol client (stdio, Streamable HTTP, SSE) with OAuth, sampling and elicitation |
-| `merpati-ai` | Chat requests to OpenAI, Anthropic, Gemini and OpenAI-compatible servers, streaming, MCP tools |
-| `merpati-flows` | Flows: model, storage, validation and executor |
-| `merpati-secrets` | HashiCorp Vault, AWS Secrets Manager, Azure Key Vault and 1Password behind `{{vault:name}}` |
-| `merpati-proxy` | Capture proxy: HTTP/HTTPS interception with a local CA, HAR export |
-| `merpati-html` | HTML/CSS subset renderer for egui (visualizer, docs preview) |
-| `merpati-cli` | The `merpati` binary |
-| `merpati-app` | The desktop app (egui/eframe on wgpu) |
+| `ternarywire-core` | Data model, variables (5 scopes, dynamic variables, vault), workspace format, secrets, history, Postman import/export |
+| `ternarywire-http` | HTTP engine on reqwest/hyper/rustls: redirects, cookies, proxies (PAC, WPAD), CA and client certificates, HTTP/1.1 and HTTP/2, Unix sockets and named pipes, streaming large bodies to disk; WebSocket client |
+| `ternarywire-auth` | All auth types, from API key to OAuth 2.0, AWS SigV4, NTLM, EdgeGrid and ASAP |
+| `ternarywire-script` | Script engine on boa (pure-Rust JavaScript): `pm` API, Chai, `pm.sendRequest`, packages, sandbox and worker processes |
+| `ternarywire-runner` | The request pipeline shared by the app, Runner and CLI; Collection Runner, performance tests, reporters |
+| `ternarywire-convert` | cURL, OpenAPI/Swagger, Insomnia, HAR, Hoppscotch, Thunder Client, WSDL and Smithy importers; OpenAPI export; code generators; GraphQL schema; documentation |
+| `ternarywire-mock` | Mock server from examples, network and failure simulation; webhook listener |
+| `ternarywire-grpc` | Dynamic gRPC client: `.proto` compilation or reflection, all four call types, mTLS |
+| `ternarywire-mqtt` | MQTT 3.1.1/5 over TCP, TLS and WebSocket |
+| `ternarywire-socketio` | Socket.IO v2–v4 client (Engine.IO 3/4, polling and WebSocket) |
+| `ternarywire-mcp` | Model Context Protocol client (stdio, Streamable HTTP, SSE) with OAuth, sampling and elicitation |
+| `ternarywire-ai` | Chat requests to OpenAI, Anthropic, Gemini and OpenAI-compatible servers, streaming, MCP tools |
+| `ternarywire-flows` | Flows: model, storage, validation and executor |
+| `ternarywire-secrets` | HashiCorp Vault, AWS Secrets Manager, Azure Key Vault and 1Password behind `{{vault:name}}` |
+| `ternarywire-proxy` | Capture proxy: HTTP/HTTPS interception with a local CA, HAR export |
+| `ternarywire-html` | HTML/CSS subset renderer for egui (visualizer, docs preview) |
+| `ternarywire-cli` | The `ternarywire` binary |
+| `ternarywire-app` | The desktop app (egui/eframe on wgpu) |
 
 The pipeline is the same everywhere: pre-request scripts (collection → folder → request), variable
 resolution, auth, send (with Digest and NTLM challenge retries), then post-response scripts and
@@ -591,14 +591,14 @@ need real services (socket.io, mosquitto, HashiCorp Vault, Ollama, the npm regis
 
 - **UI**: read [docs/design.md](docs/design.md) first; screens use shared tokens and components.
 - **Translations**: text users read goes through `tr()`/`trf()` with an Indonesian entry in
-  `crates/merpati-app/i18n/id.tsv` (about 1,670 entries); a test fails when one is missing.
-- **Environment variables**: `MERPATI_CONFIG_DIR` (another settings folder),
-  `MERPATI_SECRETS=file|memory` (no Keychain prompts with unsigned builds) and
-  `MERPATI_AUTOMATION=steps.json` (drive the app from a list of steps and take screenshots; see
-  `crates/merpati-app/src/automation.rs`).
-- **Test servers** for the protocol tabs: `cargo run -p merpati-grpc --example greeter_server`,
-  `cargo run -p merpati-socketio --example echo_server -- 3000`, and `target/debug/fake_mcp_server`
-  (an MCP stdio server, built with `cargo build -p merpati-mcp`).
+  `crates/ternarywire-app/i18n/id.tsv` (about 1,670 entries); a test fails when one is missing.
+- **Environment variables**: `TERNARYWIRE_CONFIG_DIR` (another settings folder),
+  `TERNARYWIRE_SECRETS=file|memory` (no Keychain prompts with unsigned builds) and
+  `TERNARYWIRE_AUTOMATION=steps.json` (drive the app from a list of steps and take screenshots; see
+  `crates/ternarywire-app/src/automation.rs`).
+- **Test servers** for the protocol tabs: `cargo run -p ternarywire-grpc --example greeter_server`,
+  `cargo run -p ternarywire-socketio --example echo_server -- 3000`, and `target/debug/fake_mcp_server`
+  (an MCP stdio server, built with `cargo build -p ternarywire-mcp`).
 
 Issues and pull requests are welcome.
 
@@ -606,7 +606,7 @@ Issues and pull requests are welcome.
 
 - Release builds are not signed with an Apple Developer ID or notarized yet, so macOS warns when
   they are downloaded with a browser; see the note under [Install](#disk-image).
-- macOS is where Merpati is built, measured and tested by hand. The Linux and Windows builds come
+- macOS is where TernaryWire is built, measured and tested by hand. The Linux and Windows builds come
   from CI and are less tested: CI runs the whole test suite on Linux, installs the packages on
   several distributions and the Windows installer on Windows, but nobody has used them by hand yet.
   Reports are welcome.
@@ -623,17 +623,17 @@ Issues and pull requests are welcome.
 - Smithy dependencies are read only from the local Maven repository (not downloaded), and
   `smithy-build.json` plugins and projections are not applied.
 - Team features of hosted API platforms (cloud sync, monitors, public workspaces) are out of scope:
-  workspaces are folders you share with Git, `merpati schedule` runs collections on a timer, and
+  workspaces are folders you share with Git, `ternarywire schedule` runs collections on a timer, and
   webhooks are received locally.
 
 ## License
 
-Merpati is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+TernaryWire is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 
 The bundled JavaScript libraries keep their own licenses, listed in
-`crates/merpati-script/js/vendor/THIRD_PARTY_LICENSES.txt`. The bundled Inter and JetBrains Mono
+`crates/ternarywire-script/js/vendor/THIRD_PARTY_LICENSES.txt`. The bundled Inter and JetBrains Mono
 fonts are under the SIL Open Font License 1.1 and the Phosphor icons under MIT; their license files
-are in `crates/merpati-app/assets/fonts`.
+are in `crates/ternarywire-app/assets/fonts`.
 
-Postman is a trademark of Postman, Inc. Merpati is not affiliated with Postman and uses none of its
+Postman is a trademark of Postman, Inc. TernaryWire is not affiliated with Postman and uses none of its
 names, logos or assets in the app.

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TernaryWire
+Comment=Lightweight native API client
+Exec=ternarywire-app %f
+Icon=ternarywire
+StartupWMClass=ternarywire
+Terminal=false
+Categories=Development;Network;
+Keywords=API;HTTP;REST;GraphQL;gRPC;WebSocket;Postman;

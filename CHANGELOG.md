@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Merpati. The newest version comes first.
+All notable changes to TernaryWire. The newest version comes first.
 
 ## 0.2.1 — 2026-10-31
 
@@ -27,21 +27,21 @@ All notable changes to Merpati. The newest version comes first.
 ## 0.2.0 — 2026-10-30
 
 ### Added
-- **Native macOS menu bar**: Merpati, File, Edit, View, Window and Help menus with the usual
+- **Native macOS menu bar**: TernaryWire, File, Edit, View, Window and Help menus with the usual
   shortcuts, **Check for Updates…**, Settings…, links to the repository, release notes and issues.
   On Linux and Windows, **Check for updates…** is in the workspace menu.
 - **Linux packages**: `.deb` (Ubuntu, Debian, Mint, Pop!_OS), `.rpm` (Fedora, RHEL, Rocky, Alma,
   openSUSE), AppImage (Arch, Manjaro and others) and `.tar.gz`, for x86_64 and ARM64, built
   against glibc 2.28. The release workflow installs them on Ubuntu 20.04/24.04, Debian 11/12,
   Fedora 41, Rocky Linux 8/9 and openSUSE Leap 15.6 before publishing.
-- **Windows installer** (`Merpati-Setup-<version>-x64.exe`): per-user or all-users install, Start
-  menu entry, optional `merpati` on `PATH`, updates in place; the portable `.zip` stays.
+- **Windows installer** (`TernaryWire-Setup-<version>-x64.exe`): per-user or all-users install, Start
+  menu entry, optional `ternarywire` on `PATH`, updates in place; the portable `.zip` stays.
 - **Updates per kind of install**: an AppImage replaces itself and restarts like the macOS app; a
   `.deb`/`.rpm` install gets the new package, Windows the new installer (or `.zip`).
 - **Response folding**: line numbers and fold carets in the Pretty view for JSON, XML/HTML and
   YAML (`"address": { … } 3 keys`), Expand all / Collapse all and collapse to level 1 or 2.
 - **JSONPath filter** on JSON responses (`$.data[?(@.price < 10)].title`) with a match count, in
-  the Pretty and Tree views; the evaluator lives in `merpati-core` and is tested against
+  the Pretty and Tree views; the evaluator lives in `ternarywire-core` and is tested against
   Goessner's examples.
 - **Value actions**: right-click a value to copy it or its path, **Set as variable…** (environment,
   collection or globals; optionally also set on every run by a script line) or **Add test for this
@@ -53,7 +53,7 @@ All notable changes to Merpati. The newest version comes first.
 - **Maximize and minimize the response panel**, in both layouts.
 - **Copy as cURL (as sent)** in the response menu.
 - New request tabs put the caret in the URL field; the active tab scrolls into view.
-- If Merpati ever closes unexpectedly, the details are written to `crash.log` in its settings
+- If TernaryWire ever closes unexpectedly, the details are written to `crash.log` in its settings
   folder (only on this computer) and the next start says so.
 
 ### Fixed
@@ -106,7 +106,7 @@ Linux and Windows.
 - Collection Runner with environments, iterations, delays, CSV/JSON data, `setNextRequest`,
   custom order, failure simulation and JSON/JUnit/HTML export; every protocol can run in it.
 - Performance tests with virtual users, ramp-up and latency percentiles.
-- `merpati` CLI: `run` with newman-compatible options, `schedule`, `mock`, `import`, `export`,
+- `ternarywire` CLI: `run` with newman-compatible options, `schedule`, `mock`, `import`, `export`,
   `convert`, `validate`, `codegen`, `perf`, `docs`, `flow` and `init`; exit codes 0/1/2 for CI.
 - A Dockerfile for the CLI and a GitHub Action that runs a collection in CI.
 
@@ -122,13 +122,13 @@ Linux and Windows.
 ### Flows
 - A visual canvas with Start, Request, Condition, Loop, Parallel, Join, Script, AI, Delay, Set
   Variable, Template, Output and Log blocks; parallel branches, streaming AI output, validation.
-- Flows are saved in `flows/` and run from the app or with `merpati flow run`.
+- Flows are saved in `flows/` and run from the app or with `ternarywire flow run`.
 
 ### API design
 - Spec Hub for OpenAPI, Swagger, AsyncAPI, Protobuf, GraphQL SDL and Smithy with live validation
   and a live documentation preview.
 - Generate or update a collection from an OpenAPI or Smithy spec; export a collection as OpenAPI.
-- Documentation as Markdown or a static HTML site, from the app or `merpati docs`.
+- Documentation as Markdown or a static HTML site, from the app or `ternarywire docs`.
 
 ### Mock and capture
 - Mock server from examples with Postman-style matching, templating, network and failure
@@ -139,7 +139,7 @@ Linux and Windows.
 ### App
 - Design system: Inter, JetBrains Mono and Phosphor icons, light and dark themes, browser-like
   tabs, command palette and quick search; tabs are restored after a restart or crash.
-- Updates: on start Merpati checks GitHub for a new release (it can be turned off in Settings ›
+- Updates: on start TernaryWire checks GitHub for a new release (it can be turned off in Settings ›
   General › Updates); on macOS **Install and restart** downloads, verifies and installs it;
   elsewhere the archive is downloaded and checked against the release checksums.
 - One-line installer for macOS (`scripts/install.sh`), a universal DMG, an app archive, a
