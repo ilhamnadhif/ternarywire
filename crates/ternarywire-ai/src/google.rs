@@ -359,22 +359,39 @@ impl StreamAcc for GoogleStream {
         }
         let v: Value =
             serde_json::from_str(data).map_err(|e| AiError::Parse(format!("invalid stream chunk ({e}): {data}")))?;
-        let v = match v {
-            Value::Array(mut a) if !a.is_empty() => a.remove(0),
-            other => other,
-        };
+        // Some proxies send several responses as one array.
+        match v {
+            Value::Array(items) => items.iter().try_for_each(|v| self.response(v, delta)),
+            other => self.response(&other, delta),
+        }
+    }
+
+    fn finish(self: Box<Self>) -> Result<Round, AiError> {
+        let raw = json!({
+            "candidates": [{"content": {"role": "model", "parts": self.parts}, "finishReason": self.finish_reason}],
+            "usageMetadata": self.usage.get("usageMetadata").cloned().unwrap_or(Value::Null),
+            "modelVersion": self.model,
+            "responseId": self.response_id,
+        });
+        Ok(round_from_parts(self.parts, self.finish_reason, self.model, &self.usage, raw))
+    }
+}
+
+impl GoogleStream {
+    /// One `GenerateContentResponse` of the stream.
+    fn response(&mut self, v: &Value, delta: &mut dyn FnMut(&str)) -> Result<(), AiError> {
         if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
             return Err(AiError::Api(msg.to_string()));
         }
         if v.get("candidates").is_none()
-            && let Some(e) = blocked(&v)
+            && let Some(e) = blocked(v)
         {
             return Err(e);
         }
-        if let Some(m) = str_of(&v, "modelVersion") {
+        if let Some(m) = str_of(v, "modelVersion") {
             self.model = Some(m);
         }
-        if let Some(id) = str_of(&v, "responseId") {
+        if let Some(id) = str_of(v, "responseId") {
             self.response_id = Some(id);
         }
         if v.get("usageMetadata").is_some() {
@@ -402,21 +419,29 @@ impl StreamAcc for GoogleStream {
         }
         Ok(())
     }
-
-    fn finish(self: Box<Self>) -> Result<Round, AiError> {
-        let raw = json!({
-            "candidates": [{"content": {"role": "model", "parts": self.parts}, "finishReason": self.finish_reason}],
-            "usageMetadata": self.usage.get("usageMetadata").cloned().unwrap_or(Value::Null),
-            "modelVersion": self.model,
-            "responseId": self.response_id,
-        });
-        Ok(round_from_parts(self.parts, self.finish_reason, self.model, &self.usage, raw))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_events_with_several_responses_keep_them_all() {
+        let data = json!([
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "Hel"}]}}]},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "lo"}]}, "finishReason": "STOP"}],
+             "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2}}
+        ])
+        .to_string();
+        let mut acc = GoogleStream::default();
+        let mut text = String::new();
+        acc.event(&SseEvent { event: "message".into(), data, ..Default::default() }, &mut |t| text.push_str(t))
+            .unwrap();
+        assert_eq!(text, "Hello");
+        let round = Box::new(acc).finish().unwrap();
+        assert_eq!((round.text.as_str(), round.finish_reason.as_deref()), ("Hello", Some("STOP")));
+        assert_eq!((round.input_tokens, round.output_tokens), (Some(3), Some(2)));
+    }
 
     #[test]
     fn schema_is_reduced_to_the_supported_subset() {
