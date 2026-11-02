@@ -69,8 +69,14 @@ fn entry(e: &CaptureEntry) -> Value {
     }
     let decoded = e.decoded_response_body();
     // The length of the whole (decoded) body: without a content encoding
-    // that is the size on the wire, even when only a prefix was kept.
-    let size = if decoded.encoding.is_none() { e.response_body.size } else { decoded.data.len() as u64 };
+    // that is the size on the wire, even when only a prefix was kept. A
+    // decoded prefix says nothing about the rest: unknown, -1 as for the
+    // other HAR sizes.
+    let size = match &decoded.encoding {
+        None => e.response_body.size as i64,
+        Some(_) if decoded.truncated => -1,
+        Some(_) => decoded.data.len() as i64,
+    };
     let mut content = json!({
         "size": size,
         "mimeType": e.response_header("content-type").unwrap_or(""),
@@ -201,6 +207,24 @@ mod tests {
         assert_eq!(resp["bodySize"], size);
         assert_eq!(resp["content"]["size"], 5000);
         assert_eq!(resp["content"]["text"].as_str().map(str::len), Some(5000));
+    }
+
+    #[test]
+    fn content_size_of_a_truncated_compressed_body_is_unknown() {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let text: Vec<u8> = (0..200_000u32).flat_map(|i| i.to_string().into_bytes()).collect();
+        gz.write_all(&text).unwrap();
+        let gz = gz.finish().unwrap();
+        // Only the first half of the compressed body was kept.
+        let kept = Bytes::copy_from_slice(&gz[..gz.len() / 2]);
+        let size = gz.len() as u64;
+        let e = entry(&[("content-encoding", "gzip")], CapturedBody { data: kept, size, truncated: true });
+        let resp = &to_har([&e])["log"]["entries"][0]["response"];
+        assert_eq!(resp["bodySize"], size);
+        assert_eq!(resp["content"]["size"], -1);
+        // What was kept is still shown.
+        let shown = resp["content"]["text"].as_str().unwrap();
+        assert!(!shown.is_empty() && text.starts_with(shown.as_bytes()));
     }
 
     #[test]
