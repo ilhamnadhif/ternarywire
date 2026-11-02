@@ -243,6 +243,8 @@ async fn token_request_within(
     }
 }
 
+/// The error chain, without the query string reqwest quotes with the URL
+/// (token endpoints can get extra parameters there).
 fn describe_reqwest(e: &reqwest::Error) -> String {
     let mut msg = e.to_string();
     let mut src = std::error::Error::source(e);
@@ -251,7 +253,7 @@ fn describe_reqwest(e: &reqwest::Error) -> String {
         msg.push_str(&s.to_string());
         src = s.source();
     }
-    msg
+    ternarywire_http::error::redact_urls(&msg)
 }
 
 fn push_common(auth: &Auth, form: &mut Vec<(String, String)>) {

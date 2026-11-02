@@ -289,6 +289,11 @@ async fn classified_errors() {
     // Port 9 on localhost is almost certainly closed.
     let err = e.send(&req("GET", "http://127.0.0.1:9/".into()), &SendOptions::default()).await.unwrap_err();
     assert_eq!(err.kind, HttpErrorKind::ConnectionRefused, "{err:?}");
+    // The console shows the detail: it names the URL, not its query string.
+    let url = "http://127.0.0.1:9/items?api_key=s3cret&X-Amz-Signature=abc";
+    let err = e.send(&req("GET", url.into()), &SendOptions::default()).await.unwrap_err();
+    assert!(err.detail.contains("http://127.0.0.1:9/items"), "{err:?}");
+    assert!(!err.detail.contains("s3cret") && !err.detail.contains("abc"), "{err:?}");
     let err = e.send(&req("GET", "http://does-not-exist.invalid/".into()), &SendOptions::default()).await.unwrap_err();
     assert_eq!(err.kind, HttpErrorKind::Dns, "{err:?}");
     let err = e.send(&req("GET", "ftp://x/".into()), &SendOptions::default()).await.unwrap_err();

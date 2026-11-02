@@ -124,10 +124,42 @@ pub(crate) fn is_unreachable(err: &reqwest::Error) -> bool {
     refused || chain(err).iter().any(|m| m.to_lowercase().contains("dns error"))
 }
 
+/// `text` with the userinfo, query and fragment of every URL in it
+/// removed. reqwest's messages quote the request URL, and a query string
+/// can carry an API key, OAuth 1.0 parameters or a presigned signature.
+pub fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let is_scheme = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
+        let start = rest[..i].rfind(|c: char| !is_scheme(c)).map_or(0, |j| j + 1);
+        let len = rest[i..].find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '<' | '>'));
+        let end = len.map_or(rest.len(), |j| i + j);
+        out.push_str(&rest[..start]);
+        out.push_str(&redact_url(&rest[start..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `url` without userinfo, query and fragment; also for text that does not
+/// parse as a URL.
+pub(crate) fn redact_url(url: &str) -> String {
+    let url = url.find(['?', '#']).map_or(url, |i| &url[..i]);
+    let Some(i) = url.find("://") else { return url.to_string() };
+    let (scheme, rest) = url.split_at(i + 3);
+    let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
+    match authority.rfind('@') {
+        Some(at) => format!("{scheme}{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
+}
+
 /// Turns a reqwest error into a classified [`HttpError`]. `host` and
 /// `timeout_ms` only improve the message.
 pub fn classify(err: &reqwest::Error, host: &str, timeout_ms: Option<u128>) -> HttpError {
-    let parts = chain(err);
+    let parts: Vec<String> = chain(err).iter().map(|p| redact_urls(p)).collect();
     let detail = parts.join(": ");
     let lower = detail.to_lowercase();
 
@@ -192,4 +224,24 @@ pub fn classify(err: &reqwest::Error, host: &str, timeout_ms: Option<u128>) -> H
     }
     let msg = parts.last().cloned().unwrap_or_else(|| "request failed".into());
     HttpError::new(HttpErrorKind::Protocol, msg).with_detail(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_in_error_text_lose_credentials_and_query() {
+        assert_eq!(
+            redact_urls("error sending request for url (https://u:p%40ss@api.test:8443/v1/x?api_key=s3cret#f): boom"),
+            "error sending request for url (https://api.test:8443/v1/x): boom"
+        );
+        assert_eq!(
+            redact_urls("\"http://a.test/?to=http://b.test/?k=1\" and ws://c.test/p?q ok"),
+            "\"http://a.test/\" and ws://c.test/p ok"
+        );
+        assert_eq!(redact_urls("no url: a@b?c"), "no url: a@b?c");
+        assert_eq!(redact_url("https://user@h/p@x?y"), "https://h/p@x");
+        assert_eq!(redact_url("not a url?key=1"), "not a url");
+    }
 }

@@ -26,7 +26,7 @@ use ternarywire_core::settings::{AppSettings, CertificateSettings, ProxySettings
 
 use crate::certs::SecretResolver;
 use crate::cookies::CookieJar;
-use crate::error::{HttpError, HttpErrorKind, classify};
+use crate::error::{HttpError, HttpErrorKind, classify, redact_url};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineConfig {
@@ -279,8 +279,9 @@ impl HttpEngine {
             Some((sock, u)) => (Some(sock), u),
             None => (None, req.url.clone()),
         };
-        let mut url = Url::parse(&initial_url)
-            .map_err(|e| HttpError::new(HttpErrorKind::InvalidUrl, format!("Invalid URL \"{}\": {e}", req.url)))?;
+        let mut url = Url::parse(&initial_url).map_err(|e| {
+            HttpError::new(HttpErrorKind::InvalidUrl, format!("Invalid URL \"{}\": {e}", redact_url(&req.url)))
+        })?;
         if !matches!(url.scheme(), "http" | "https") {
             return Err(HttpError::new(
                 HttpErrorKind::InvalidUrl,
@@ -426,6 +427,7 @@ impl HttpEngine {
                     ));
                 }
                 let next_url = url.join(&next).map_err(|e| {
+                    let next = redact_url(&next);
                     HttpError::new(HttpErrorKind::InvalidUrl, format!("Invalid redirect location \"{next}\": {e}"))
                 })?;
                 let to_get = status == 303 && method != reqwest::Method::HEAD
