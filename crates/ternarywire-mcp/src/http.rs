@@ -442,7 +442,10 @@ impl HttpConn {
         }
         let mut message = error_message(&body);
         if status == 404 && self.session_id.lock().is_some() {
-            return Err(McpError::Closed("the server no longer knows this session (HTTP 404); reconnect".into()));
+            // The session is over (the spec asks for a new one): so is this connection.
+            let reason = "the server no longer knows this session (HTTP 404); reconnect".to_string();
+            self.shared.mark_closed(reason.clone());
+            return Err(McpError::Closed(reason));
         }
         if status == 401 || status == 403 {
             message = unauthorized_message(message, www, self.auth.is_some());

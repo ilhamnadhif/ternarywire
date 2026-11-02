@@ -305,11 +305,17 @@ async fn get_stream_delivers_server_notifications() {
 #[tokio::test]
 async fn expired_session_is_reported() {
     let (url, state) = spawn_server(false).await;
+    let (events, on_event) = recorder();
     let cfg = McpConfig::from_request(&request(&url, Some("test-token")), &|s| s.to_string());
-    let client = McpClient::connect(cfg, |_| {}).await.unwrap();
+    let client = McpClient::connect(cfg, on_event).await.unwrap();
     state.deleted.store(true, Ordering::SeqCst);
     let err = client.list_tools().await.unwrap_err();
     assert!(matches!(&err, McpError::Closed(m) if m.contains("404")), "{err:?}");
+    // The session is over: so is the connection (a new one must be started).
+    assert!(client.is_closed());
+    assert!(client.closed_reason().is_some_and(|r| r.contains("404")), "{:?}", client.closed_reason());
+    assert_eq!(events.lock().iter().filter(|e| matches!(e, McpEvent::Closed(_))).count(), 1);
+    assert!(matches!(client.ping().await, Err(McpError::Closed(_))));
 }
 
 #[tokio::test]
