@@ -1091,6 +1091,7 @@ impl TernaryWireApp {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let ws = self.ws_gen;
+        let base = self.ws.root().to_path_buf();
         self.rt.spawn(async move {
             let mut vars = before.clone();
             let cancel = CancellationToken::new();
@@ -1101,6 +1102,7 @@ impl TernaryWireApp {
                 &prepared,
                 &response,
                 &mut vars,
+                Some(&base),
                 &cancel,
             )
             .await;

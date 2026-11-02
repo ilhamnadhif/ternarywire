@@ -641,7 +641,9 @@ pub fn standalone(name: &str, request: HttpRequest) -> (Collection, String) {
 }
 
 /// Re-runs post-response scripts against an existing response without
-/// sending the request again (FR-S6).
+/// sending the request again (FR-S6). `base_dir` is the working directory
+/// for files the scripts send, as in [`ExecuteInput::base_dir`].
+#[allow(clippy::too_many_arguments)]
 pub async fn rerun_post_response(
     services: &Services,
     collection: &Collection,
@@ -649,6 +651,7 @@ pub async fn rerun_post_response(
     prepared: &PreparedRequest,
     response: &HttpResponse,
     vars: &mut VariableScopes,
+    base_dir: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Execution {
     let mut exec = Execution { request_id: request_id.to_string(), ..Default::default() };
@@ -670,7 +673,9 @@ pub async fn rerun_post_response(
     job.variables = before.clone();
     job.response = Some(script_response(response));
     job.cookies = services.http.cookies().for_url(&prepared.url);
-    job.http = Some(Arc::new(crate::script_http::PipelineHttp::new(services.clone()).with_cancel(cancel.clone())));
+    job.http = Some(Arc::new(
+        crate::script_http::PipelineHttp::new(services.clone()).with_base_dir(base_dir).with_cancel(cancel.clone()),
+    ));
     let mut outcome = run_scripts(services, job, cancel).await;
     exec.absorb(ScriptEvent::PostResponse, &mut outcome);
     merge_script_scopes(vars, &before, outcome.variables);

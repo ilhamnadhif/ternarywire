@@ -1898,7 +1898,13 @@ impl<'r, 'a> Run<'r, 'a> {
             collection_name: flow.name.clone(),
         };
         job.variables = scopes;
-        job.http = Some(Arc::new(ternarywire_runner::script_http::PipelineHttp::new(services.clone())));
+        // Files the script sends must come from inside the working directory,
+        // and its requests stop with the run.
+        job.http = Some(Arc::new(
+            ternarywire_runner::script_http::PipelineHttp::new(services.clone())
+                .with_base_dir(self.env().base_dir.as_deref())
+                .with_cancel(self.sh.halt.clone()),
+        ));
         let outcome = js::run_job(services, job, &self.sh.halt).await;
         self.sh.note_cancel();
         for c in &outcome.console {

@@ -296,6 +296,7 @@ fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
                 ramp_up: Duration::from_secs(tab.ramp_s),
                 request_ids: Some(order),
             };
+            let base = app.ws.root().to_path_buf();
             app.rt.spawn(async move {
                 let tx2 = tx.clone();
                 let ctx2 = ctx.clone();
@@ -303,8 +304,16 @@ fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
                     let _ = tx2.send(Msg::Perf { tab: tab_id, event: PerfMsg::Sample(s.clone()) });
                     ctx2.request_repaint();
                 };
-                let report =
-                    ternarywire_runner::perf::run_perf(&services, &c, &before, opts, &mut on_sample, &cancel).await;
+                let report = ternarywire_runner::perf::run_perf_in_dir(
+                    &services,
+                    &c,
+                    &before,
+                    opts,
+                    Some(&base),
+                    &mut on_sample,
+                    &cancel,
+                )
+                .await;
                 let _ = tx.send(Msg::Perf { tab: tab_id, event: PerfMsg::Done(Box::new(report)) });
                 ctx.request_repaint();
             });
@@ -1201,6 +1210,10 @@ fn perf_results(ui: &mut Ui, tab: &mut RunnerTab) {
         return;
     }
     egui::ScrollArea::vertical().id_salt("perf-results").auto_shrink([false; 2]).show(ui, |ui| {
+        if let Some(e) = tab.perf_report.as_ref().and_then(|r| r.error.as_ref()) {
+            ui.label(RichText::new(trf("The load test could not run: {}", &[e])).color(p.err));
+            ui.add_space(8.0);
+        }
         if let Some(r) = &tab.perf_report {
             let err_color = (r.errors > 0).then_some(p.err);
             stat_cards(

@@ -44,6 +44,7 @@ fn bearer_user(h: &HeaderMap) -> Option<String> {
 async fn server() -> (String, Mock) {
     let mock = Mock::default();
     let app = Router::new()
+        .route("/echo", post(|body: String| async move { body }))
         .route(
             "/login",
             post(|body: String| async move {
@@ -2540,4 +2541,39 @@ async fn flow_references_inside_variables_reach_requests() {
         assert!(r.success, "{scope}: {r:#?}");
         assert_eq!(r.outputs["user"], json!("ada"), "{scope}");
     }
+}
+
+/// Script blocks may send files with `pm.sendRequest`, but only from inside
+/// the working directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn script_blocks_send_files_only_from_the_working_directory() {
+    let (base, _) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "hello file").unwrap();
+    let send = |src: &str| {
+        format!(
+            "try {{ const r = await pm.sendRequest({{ url: pm.environment.get('baseUrl') + '/echo', method: 'POST', \
+             body: {{ mode: 'file', file: {{ src: {src:?} }} }} }}); return r.text(); }} catch (e) {{ return 'refused'; }}"
+        )
+    };
+    let outside = dir.path().parent().unwrap().join("outside.txt");
+    let f = flow(
+        vec![
+            script("inside", &send("note.txt")),
+            script("outside", &send(&outside.to_string_lossy())),
+            output("inside_out", "inside", "{{blocks.inside.output}}"),
+            output("outside_out", "outside", "{{blocks.outside.output}}"),
+        ],
+        &[
+            ("start", "next", "inside"),
+            ("inside", "success", "outside"),
+            ("outside", "success", "inside_out"),
+            ("inside_out", "next", "outside_out"),
+        ],
+    );
+    let env = FlowEnv { services: services(), collections: Vec::new(), base_dir: Some(dir.path().to_path_buf()) };
+    let r = run_with(&f, &env, &base, FlowRunOptions::default(), &CancellationToken::new()).await.result;
+    assert!(r.success, "{r:#?}");
+    assert_eq!(r.outputs["inside"], json!("hello file"));
+    assert_eq!(r.outputs["outside"], json!("refused"));
 }

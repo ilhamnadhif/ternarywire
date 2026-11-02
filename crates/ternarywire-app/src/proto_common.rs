@@ -1697,7 +1697,10 @@ pub fn run_scripts(
         collection.as_deref().and_then(|c| app.ws.data.collection(c)).map(|c| c.name.clone()).unwrap_or_default();
     job.packages = services.packages.clone();
     job.timeout = services.script_timeout;
-    job.http = Some(Arc::new(ternarywire_runner::script_http::PipelineHttp::new(services.clone())));
+    // Files the scripts send must come from inside the workspace folder.
+    job.http = Some(Arc::new(
+        ternarywire_runner::script_http::PipelineHttp::new(services.clone()).with_base_dir(Some(app.ws.root())),
+    ));
     let engine = services.scripts.clone();
     let tx = app.tx.clone();
     let ctx = app.ctx.clone();

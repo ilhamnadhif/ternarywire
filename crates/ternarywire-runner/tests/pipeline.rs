@@ -807,6 +807,7 @@ async fn scripts_see_the_cookies_of_the_resolved_url() {
         &prepared,
         &response,
         &mut vars,
+        None,
         &CancellationToken::new(),
     )
     .await;

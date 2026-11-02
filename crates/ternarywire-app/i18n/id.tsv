@@ -1845,3 +1845,4 @@ headers {} · body {}	header {} · body {}
 {} req/s · {} users · avg {}	{} req/dtk · {} pengguna · rata-rata {}
 Could not read the response body	Body respons tidak bisa dibaca
 Searching…	Mencari…
+The load test could not run: {}	Uji beban tidak bisa dijalankan: {}
