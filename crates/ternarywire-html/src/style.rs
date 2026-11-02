@@ -39,6 +39,8 @@ pub(crate) enum Inner {
     FlowRoot,
     Flex,
     Grid,
+    /// `display: inline-table`: an inline-level box holding a table.
+    Table,
 }
 
 /// Computed `line-height`. Like in CSS, a number is inherited as a number
@@ -775,7 +777,8 @@ fn apply(c: &mut Computed, d: &Decl, parent: &Computed) {
                 "flex" => (Display::Flex, Inner::Flex),
                 "grid" => (Display::Grid, Inner::Grid),
                 "inline" => (Display::Inline, Inner::Flow),
-                "inline-block" | "inline-table" => (Display::InlineBlock, Inner::Flow),
+                "inline-block" => (Display::InlineBlock, Inner::Flow),
+                "inline-table" => (Display::InlineBlock, Inner::Table),
                 "inline-flex" => (Display::InlineBlock, Inner::Flex),
                 "inline-grid" => (Display::InlineBlock, Inner::Grid),
                 "list-item" => (Display::ListItem, Inner::Flow),

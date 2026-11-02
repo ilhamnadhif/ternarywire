@@ -329,6 +329,7 @@ fn blockify(mut c: Computed) -> Computed {
     c.display = match (c.display, c.inner) {
         (Display::Inline | Display::InlineBlock, Inner::Flex) => Display::Flex,
         (Display::Inline | Display::InlineBlock, Inner::Grid) => Display::Grid,
+        (Display::Inline | Display::InlineBlock, Inner::Table) => Display::Table,
         (Display::Inline | Display::InlineBlock, _) => Display::Block,
         (d, _) => d,
     };
@@ -445,7 +446,7 @@ impl Builder<'_> {
         let tag = self.dom.tag(el).unwrap_or("").to_string();
         let mut block =
             Block { tag: tag.clone(), classes: self.classes(el), style: box_style(c), key, ..Default::default() };
-        if c.display == Display::Table {
+        if c.display == Display::Table || c.inner == Inner::Table {
             block.content = Content::Table(Box::new(self.table(el, c)));
             return block;
         }

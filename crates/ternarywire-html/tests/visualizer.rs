@@ -419,3 +419,17 @@ fn large_tables_parse_quickly() {
     assert_eq!(t.rows[1].background, Some(Color32::from_gray(0xee)));
     eprintln!("5000-row table parsed in {elapsed:?}");
 }
+
+#[test]
+fn inline_tables_keep_their_table_layout() {
+    let doc = Document::from_html(
+        "<div>Totals: <table style='display: inline-table'><tr><td>a</td><td>b</td></tr></table> \
+         <span class=t style='display: inline-table'><span style='display: table-row'>\
+         <span style='display: table-cell'>c</span></span></span> done</div>",
+    );
+    let table = doc.root.find("table").expect("table");
+    assert!(matches!(&table.content, Content::Table(t) if t.ncols == 2 && t.rows.len() == 1), "{}", doc.outline());
+    let span = doc.root.find_class("t").expect("inline table");
+    assert!(matches!(&span.content, Content::Table(t) if t.ncols == 1), "{}", doc.outline());
+    assert!(doc.root.text().contains("Totals:") && doc.root.text().contains("done"));
+}
