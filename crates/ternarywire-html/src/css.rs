@@ -246,20 +246,37 @@ impl Stylesheet {
     }
 }
 
+/// Removes `/* comments */`, but not their look-alikes in strings and in
+/// unquoted `url(...)` (`content: "/*"`, `url(a/*b.png)`).
 fn strip_comments(css: &str) -> String {
+    let b = css.as_bytes();
     let mut out = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        match rest[start + 2..].find("*/") {
-            Some(end) => rest = &rest[start + 2 + end + 2..],
-            None => {
-                rest = "";
-                break;
+    let (mut i, mut start) = (0, 0);
+    let mut quote = None;
+    while i < b.len() {
+        match quote {
+            Some(_) if b[i] == b'\\' => i += 1,
+            Some(q) if b[i] == q => quote = None,
+            Some(_) => {}
+            None if b[i] == b'"' || b[i] == b'\'' => quote = Some(b[i]),
+            None if b[i..].starts_with(b"/*") => {
+                out.push_str(&css[start..i]);
+                let Some(end) = css[i + 2..].find("*/") else { return out };
+                i += 2 + end + 2;
+                start = i;
+                continue;
             }
+            None if b[i..].len() >= 4 && b[i..i + 4].eq_ignore_ascii_case(b"url(") => {
+                let arg = css[i + 4..].trim_start();
+                if !arg.starts_with(['"', '\'']) {
+                    i = css[i..].find(')').map_or(b.len(), |e| i + e);
+                }
+            }
+            None => {}
         }
+        i += 1;
     }
-    out.push_str(rest);
+    out.push_str(&css[start..]);
     out
 }
 
@@ -390,7 +407,8 @@ pub(crate) fn split_top_level(s: &str, sep: char) -> Vec<&str> {
             match c {
                 '"' | '\'' => quote = Some(c),
                 '(' | '[' => depth += 1,
-                ')' | ']' => depth -= 1,
+                // A stray closing one must not stop all further splitting.
+                ')' | ']' => depth = (depth - 1).max(0),
                 c if c == sep && depth == 0 => {
                     out.push(&s[start..i]);
                     start = i + c.len_utf8();
@@ -473,7 +491,8 @@ struct Compound {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
-    attrs: Vec<(String, AttrOp)>,
+    /// Name, operator, and whether the value compares ignoring case.
+    attrs: Vec<(String, AttrOp, bool)>,
     pseudos: Vec<Pseudo>,
 }
 
@@ -527,17 +546,21 @@ impl SelParser<'_> {
         self.i > start
     }
 
+    /// Up to `end` outside parentheses and quotes (`[title="a]b"]`).
     fn until(&mut self, end: char) -> Option<String> {
         let mut depth = 0;
+        let mut quote = None;
         let mut s = String::new();
         while let Some(c) = self.peek() {
             self.i += 1;
-            if c == '(' {
-                depth += 1;
-            } else if c == end && depth == 0 {
-                return Some(s);
-            } else if c == ')' {
-                depth -= 1;
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '(' => depth += 1,
+                None if c == end && depth == 0 => return Some(s),
+                None if c == ')' => depth -= 1,
+                None => {}
             }
             s.push(c);
         }
@@ -595,30 +618,42 @@ impl SelParser<'_> {
     }
 }
 
-fn parse_attr(inner: &str) -> Option<(String, AttrOp)> {
-    let ops = ["~=", "^=", "$=", "*=", "|=", "="];
-    for op in ops {
-        if let Some((name, value)) = inner.split_once(op) {
-            let name = name.trim().to_ascii_lowercase();
-            let mut value = value.trim();
-            // Case-insensitivity flag `[a=b i]`.
-            if let Some(v) = value.strip_suffix(" i").or_else(|| value.strip_suffix(" s")) {
-                value = v.trim();
-            }
-            let value = value.trim_matches(|c| c == '"' || c == '\'').to_string();
-            let op = match op {
-                "~=" => AttrOp::Word(value),
-                "^=" => AttrOp::Prefix(value),
-                "$=" => AttrOp::Suffix(value),
-                "*=" => AttrOp::Contains(value),
-                "|=" => AttrOp::Dash(value),
-                _ => AttrOp::Eq(value),
-            };
-            return (!name.is_empty()).then_some((name, op));
+/// `name`, `name op value` or `name op "value" i`: the name, the operator
+/// and whether the value compares ignoring case.
+fn parse_attr(inner: &str) -> Option<(String, AttrOp, bool)> {
+    // The operator ends at the first `=`: a name has none, a quoted value may.
+    let Some(eq) = inner.find('=') else {
+        let name = inner.trim().to_ascii_lowercase();
+        return (!name.is_empty()).then_some((name, AttrOp::Exists, false));
+    };
+    let (name, op) = match inner.as_bytes()[..eq].last() {
+        Some(&c @ (b'~' | b'^' | b'$' | b'*' | b'|')) => (&inner[..eq - 1], c),
+        _ => (&inner[..eq], b'='),
+    };
+    let name = name.trim().to_ascii_lowercase();
+    let rest = inner[eq + 1..].trim();
+    let (value, flag) = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => {
+            let end = rest[1..].find(q)? + 1;
+            (&rest[1..end], rest[end + 1..].trim())
         }
-    }
-    let name = inner.trim().to_ascii_lowercase();
-    (!name.is_empty()).then_some((name, AttrOp::Exists))
+        _ => rest.split_once(char::is_whitespace).map_or((rest, ""), |(v, f)| (v, f.trim())),
+    };
+    let icase = match flag {
+        "" | "s" | "S" => false,
+        "i" | "I" => true,
+        _ => return None,
+    };
+    let value = if icase { value.to_lowercase() } else { value.to_string() };
+    let op = match op {
+        b'~' => AttrOp::Word(value),
+        b'^' => AttrOp::Prefix(value),
+        b'$' => AttrOp::Suffix(value),
+        b'*' => AttrOp::Contains(value),
+        b'|' => AttrOp::Dash(value),
+        _ => AttrOp::Eq(value),
+    };
+    (!name.is_empty()).then_some((name, op, icase))
 }
 
 /// `an+b` (`odd`, `even`, `3`, `-n+2`, `2n`).
@@ -852,8 +887,15 @@ fn matches_compound(c: &Compound, dom: &Dom, el: NodeId) -> bool {
             return false;
         }
     }
-    for (name, op) in &c.attrs {
+    for (name, op, icase) in &c.attrs {
         let Some(v) = dom.attr(el, name) else { return false };
+        let lower;
+        let v = if *icase {
+            lower = v.to_lowercase();
+            lower.as_str()
+        } else {
+            v
+        };
         let ok = match op {
             AttrOp::Exists => true,
             AttrOp::Eq(x) => v == x,
@@ -1504,6 +1546,32 @@ const NAMED_COLORS: &[(&str, u32)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attribute_selectors_split_at_the_operator_and_honour_the_i_flag() {
+        let dom = Dom::parse("<a href='https://Example.com/a~=b' title='Hello World' data-v='a]b'></a>");
+        let a = dom.find_all("a")[0];
+        let m = |sel: &str| Selector::parse(sel).unwrap_or_else(|| panic!("{sel}")).matches(&dom, a);
+        assert!(m("[href^='https://Example']"));
+        assert!(!m("[href^='https://example']"));
+        assert!(m("[href^='https://example' i]"));
+        assert!(m("a[href^=\"HTTPS://EXAMPLE\"i]"));
+        assert!(m("[href$='a~=b']") && m("[href*=\"m/a~\"]"));
+        assert!(m("[title~=world i]") && !m("[title~=world]") && m("[title*='lo W' s]"));
+        assert!(m("[data-v='a]b']") && m("[ title ]"));
+        assert!(Selector::parse("[a=b x]").is_none());
+    }
+
+    #[test]
+    fn comments_in_strings_and_urls_stay() {
+        assert_eq!(strip_comments("a { content: \"/* x */\" } /* c */b{}"), "a { content: \"/* x */\" } b{}");
+        assert_eq!(strip_comments("p { background: URL(x/*y.png) } /* gone */q"), "p { background: URL(x/*y.png) } q");
+        assert_eq!(strip_comments("p { b: url('/*') } /**/q /* open"), "p { b: url('/*') } q ");
+        assert_eq!(strip_comments("é/* x */ü"), "éü");
+        // A stray `)` does not end the splitting of what follows.
+        let d = parse_declarations("width: 1px); color: red; margin: 0");
+        assert_eq!(d.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["width", "color", "margin"]);
+    }
 
     #[test]
     fn combinators_do_not_backtrack_exponentially() {
