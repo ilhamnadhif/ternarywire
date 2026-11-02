@@ -2607,6 +2607,7 @@
   // Hooks driven by the Rust worker
   // ---------------------------------------------------------------------
   let baseline = null;
+  let firingTimers = false;
 
   const mp = {
     begin(json) {
@@ -2677,15 +2678,23 @@
       return Math.max(0, due - Date.now());
     },
     fireTimers() {
-      const now = Date.now();
-      const due = [];
-      S.timers.forEach((t) => { if (t.due <= now) due.push(t); });
-      due.sort((a, b) => a.due - b.due || a.id - b.id);
-      for (const t of due) {
-        if (!S.timers.has(t.id)) continue;
-        if (t.interval) t.due = now + t.interval;
-        else S.timers.delete(t.id);
-        guard(() => t.fn(...t.args), t.location);
+      // Also reachable from scripts (it is on the global `__mp`): a call
+      // from inside a timer must not fire an interval twice.
+      if (!S || firingTimers) return;
+      firingTimers = true;
+      try {
+        const now = Date.now();
+        const due = [];
+        S.timers.forEach((t) => { if (t.due <= now) due.push(t); });
+        due.sort((a, b) => a.due - b.due || a.id - b.id);
+        for (const t of due) {
+          if (!S.timers.has(t.id)) continue;
+          if (t.interval) t.due = now + t.interval;
+          else S.timers.delete(t.id);
+          guard(() => t.fn(...t.args), t.location);
+        }
+      } finally {
+        firingTimers = false;
       }
     },
     clearTimers() { if (S) S.timers.clear(); },
@@ -2766,16 +2775,53 @@
       return t;
     },
   };
-  // Frozen and non-writable: user scripts are compiled as `__mp.exec(...)`,
-  // so a replaced hook would see every later job of the worker.
+  // Only `exec` (user scripts are compiled as `__mp.exec(...)`) and
+  // `fireTimers` are global; the worker gets the other hooks from
+  // `__mp_snapshot()`, so user code cannot end, restart or feed its job
+  // through them. Frozen and non-writable: a replaced hook would see every
+  // later job of the worker.
   Object.freeze(mp);
-  defProp(G, '__mp', { value: mp, writable: false, configurable: false, enumerable: false });
+  defProp(G, '__mp', {
+    value: Object.freeze({ exec: mp.exec, fireTimers: mp.fireTimers }),
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
 
   // Built-in objects whose own properties are restored after every job.
-  const INTRINSICS = [Object, Object.prototype, Function.prototype, Array, Array.prototype, String, String.prototype,
-    Number, Number.prototype, Boolean.prototype, Symbol, JSON, Math, Date, Date.prototype, Promise, Promise.prototype,
-    RegExp, RegExp.prototype, Error, Error.prototype, TypeError.prototype, Map.prototype, Set.prototype,
-    WeakMap.prototype, Reflect, BigInt.prototype, Uint8Array.prototype];
+  const INTRINSICS = [Object, Object.prototype, Function, Function.prototype, Array, Array.prototype,
+    Array.prototype[Symbol.unscopables], String, String.prototype, Number, Number.prototype, Boolean,
+    Boolean.prototype, Symbol, Symbol.prototype, BigInt, BigInt.prototype, JSON, Math, Reflect, Date, Date.prototype,
+    Promise, Promise.prototype, RegExp, RegExp.prototype, Map, Map.prototype, Set, Set.prototype, WeakMap,
+    WeakMap.prototype, WeakSet, WeakSet.prototype, ArrayBuffer, ArrayBuffer.prototype, DataView, DataView.prototype];
+  // Constructors, and their prototypes, that not every build of boa has.
+  ['Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError', 'AggregateError',
+    'Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array',
+    'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'SharedArrayBuffer', 'WeakRef',
+    'FinalizationRegistry', 'Iterator', 'Proxy', 'Atomics'].forEach((name) => {
+    const C = G[name];
+    if (C === undefined || C === null) return;
+    INTRINSICS.push(C);
+    if (isObject(C.prototype)) INTRINSICS.push(C.prototype);
+  });
+  // Prototypes only reachable through instances. The prelude itself
+  // iterates (`for...of`, spread), so a patched `next` would otherwise run
+  // inside the next job's `pm` calls.
+  {
+    const arrayIterator = getProto([][Symbol.iterator]());
+    const generatorFn = getProto(function* () {});
+    const asyncFn = getProto(async function () {});
+    const asyncGeneratorFn = getProto(async function* () {});
+    const typedArray = getProto(Int8Array);
+    [arrayIterator, getProto(arrayIterator), getProto(''[Symbol.iterator]()), getProto(new Map()[Symbol.iterator]()),
+      getProto(new Set()[Symbol.iterator]()), getProto(/a/[Symbol.matchAll]('')), generatorFn, generatorFn.prototype,
+      generatorFn.constructor, asyncFn, asyncFn.constructor, asyncGeneratorFn, asyncGeneratorFn.prototype,
+      getProto(asyncGeneratorFn.prototype), asyncGeneratorFn.constructor, typedArray, typedArray.prototype]
+      .forEach((o) => { if (isObject(o) || typeof o === 'function') INTRINSICS.push(o); });
+  }
+  for (let i = INTRINSICS.length - 1; i >= 0; i--) {
+    if (INTRINSICS.indexOf(INTRINSICS[i]) !== i) INTRINSICS.splice(i, 1);
+  }
   // The sandbox API and its classes live as long as the worker too, so a
   // patch such as `console.log = ...` or a change to a class prototype is
   // undone the same way.
@@ -2810,7 +2856,7 @@
   }
 
   // A descriptor without a prototype, so `Object.prototype.get` and the like
-  // cannot leak into `defineProperty`.
+  // cannot leak into `defineProperty`, nor run when a field is read.
   function plainDesc(d) {
     setProto(d, null);
     return d;
@@ -2840,7 +2886,7 @@
     for (let i = 0; i < entry.names.length; i++) {
       const desc = entry.descs[i];
       const cur = getDesc(o, entry.names[i]);
-      if (!cur || !sameDescriptor(cur, desc)) {
+      if (!cur || !sameDescriptor(plainDesc(cur), desc)) {
         try { defProp(o, entry.names[i], desc); } catch (e) { tainted = true; }
       }
     }
@@ -2856,7 +2902,13 @@
     const dataNames = entry.dataNames;
     const dataValues = entry.dataValues;
     for (let i = 0; i < dataNames.length; i++) {
-      const v = o[dataNames[i]];
+      // Through the descriptor: reading `o[name]` would run a getter the job
+      // put there, which could patch objects already restored.
+      const d = getDesc(o, dataNames[i]);
+      if (!d) return true;
+      plainDesc(d);
+      if (d.get !== undefined || d.set !== undefined) return true;
+      const v = d.value;
       // `!==`, except that NaN (`Number.NaN`, `globalThis.NaN`) equals itself.
       if (v !== dataValues[i] && (v === v || dataValues[i] === dataValues[i])) return true; // eslint-disable-line no-self-compare
     }
@@ -2864,7 +2916,7 @@
     for (let i = 0; i < accessors.length; i++) {
       const d = entry.descs[accessors[i]];
       const cur = getDesc(o, entry.names[accessors[i]]);
-      if (!cur || cur.get !== d.get || cur.set !== d.set) return true;
+      if (!cur || plainDesc(cur).get !== d.get || cur.set !== d.set) return true;
     }
     return false;
   }
@@ -2924,5 +2976,6 @@
     delete G.__mp_install_chai_postman;
     baseline = snapshotEntry(G);
     intrinsicBaseline = INTRINSICS.concat(API_OBJECTS).map(snapshotEntry);
+    return mp;
   });
 })(globalThis);

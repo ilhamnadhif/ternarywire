@@ -670,3 +670,61 @@ fn replace_in_substitutes_inside_objects_and_arrays() {
          {{host}} true [\"example.com\"]"
     );
 }
+
+#[test]
+fn patched_iterators_and_other_built_ins_do_not_reach_later_jobs() {
+    // One worker serves both jobs. The prelude iterates with `for...of`, so a
+    // patched array iterator would run inside the next job's `pm` calls.
+    let e = BoaEngine::with_config(EngineConfig { max_idle_workers: 1, ..Default::default() });
+    let out = e.run(job(
+        ScriptEvent::PreRequest,
+        "const ai = Object.getPrototypeOf([][Symbol.iterator]());\n\
+         const next = ai.next;\n\
+         ai.next = function () { try { pm.environment.set('stolen', 'yes'); } catch (err) {} return next.call(this); };\n\
+         Object.getPrototypeOf(ai).leak = 1;\n\
+         Object.getPrototypeOf(new Map().entries()).leak = 1;\n\
+         Object.getPrototypeOf(function* () {}).prototype.leak = 1;\n\
+         Object.getPrototypeOf(Int8Array).prototype.leak = 1;\n\
+         ArrayBuffer.prototype.leak = 1;\n\
+         RangeError.prototype.leak = 1;\n\
+         Map.groupBy = () => 'hacked';\n\
+         Promise.resolve = () => 'hacked';\n\
+         const parse = JSON.parse;\n\
+         Object.defineProperty(JSON, 'parse', { configurable: true, get() { Object.prototype.polluted = 1; return parse; } });",
+    ));
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    let mut j = job(
+        ScriptEvent::PreRequest,
+        "pm.variables.get('x');\n\
+         const leaks = [[][Symbol.iterator](), new Map().entries(), (function* () {})(), new Uint8Array(1),\n\
+           new ArrayBuffer(1), new RangeError('x'), {}].filter((o) => o.leak !== undefined || o.polluted !== undefined);\n\
+         console.log(leaks.length, typeof Map.groupBy([1], (x) => x), Promise.resolve(1) instanceof Promise);",
+    );
+    j.variables.environment.insert("x".into(), "1".into());
+    let out = e.run(j);
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(out.console[0].message, "0 object true");
+    assert_eq!(out.variables.environment.get("stolen"), None);
+}
+#[test]
+fn scripts_cannot_reach_the_worker_hooks() {
+    let e = BoaEngine::new();
+    let out = e.run(job(
+        ScriptEvent::PreRequest,
+        "const hooks = ['begin', 'beginScript', 'endScript', 'recordError', 'nextTimer', 'clearTimers', 'finish',\n\
+           'takeTainted', 'importValue'].filter((h) => typeof __mp[h] === 'function');\n\
+         console.log(hooks.join(',') || 'none');\n\
+         try { __mp.finish(); } catch (err) {}\n\
+         try { __mp.begin('{}'); } catch (err) {}\n\
+         let fired = 0;\n\
+         const id = setInterval(() => { fired++; __mp.fireTimers(); }, 0);\n\
+         setTimeout(() => { clearInterval(id); pm.environment.set('fired', fired); }, 30);\n\
+         pm.environment.set('x', '1');\n\
+         pm.test('kept', () => {});",
+    ));
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(out.console[0].message, "none");
+    assert_eq!(out.variables.environment["x"], "1");
+    assert!(out.variables.environment["fired"].parse::<u32>().unwrap() >= 1);
+    assert!(out.tests[0].passed, "{:?}", out.tests);
+}

@@ -10,7 +10,7 @@ use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use boa_engine::context::ContextBuilder;
-use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, Script, Source, js_string};
+use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, Script, Source};
 use ternarywire_core::script::{ScriptError, ScriptJob, ScriptOutcome};
 
 use crate::executor::Executor;
@@ -152,15 +152,14 @@ impl Worker {
             limits.set_stack_size_limit(config.stack_size_limit);
         }
         host::register(&mut ctx).map_err(|e| e.to_string())?;
+        // `__mp_snapshot()` hands over the hooks: they are not reachable
+        // from user code.
         let src = format!("{PRELUDE}\n;\n{CHAI_POSTMAN}\n;\n__mp_snapshot();\n");
-        ctx.eval(Source::from_bytes(src.as_bytes()))
-            .map_err(|e| format!("prelude failed: {}", js_err_to_string(e, &mut ctx)))?;
         let mp = ctx
-            .global_object()
-            .get(js_string!("__mp"), &mut ctx)
-            .map_err(|e| e.to_string())?
+            .eval(Source::from_bytes(src.as_bytes()))
+            .map_err(|e| format!("prelude failed: {}", js_err_to_string(e, &mut ctx)))?
             .as_object()
-            .ok_or("prelude did not define __mp")?;
+            .ok_or("prelude did not return its hooks")?;
         let mut hook = |name: &str| get_fn(&mp, name, &mut ctx).map_err(|e| e.to_string());
         let hooks = Hooks {
             begin: hook("begin")?,
