@@ -218,9 +218,10 @@
     if (typeof v === 'string') return v;
     if (v === undefined) return '';
     if (isObject(v)) {
-      try { return JSON.stringify(v); } catch (e) { return String(v); }
+      try { return JSON.stringify(v); } catch (e) { /* circular, BigInt inside, throwing toJSON */ }
     }
-    return String(v);
+    // A value no conversion works for must not lose the whole job's results.
+    try { return String(v); } catch (e) { return '[object Object]'; }
   }
 
   const MAX_DEPTH = 10;
@@ -2432,6 +2433,19 @@
     return { id: r.id, name: r.name, url: r.url.toString(), method: r.method, headers: r.headers.toObject(true, true), data };
   }
 
+  // Iteration data goes back as JSON values. One that does not serialize
+  // (`1n`, a circular object, a throwing `toJSON`) is stored as text instead
+  // of failing the whole job; the copy cannot change while it is written.
+  function dataSnapshot(scope) {
+    const o = {};
+    mapEach(scope._values, (v, k) => {
+      let text;
+      try { text = jsonStringify(v); } catch (e) { text = jsonStringify(storeString(v)); }
+      if (text !== undefined) setKey(o, k, jsonParse(text));
+    });
+    return o;
+  }
+
   function scopesSnapshot() {
     const sc = S.scopes;
     const types = {};
@@ -2445,7 +2459,7 @@
       collection: sc.collection._strings(),
       environment: sc.environment._strings(),
       environment_name: sc.environment._name === undefined ? null : sc.environment._name,
-      data: sc.data.toObject(),
+      data: dataSnapshot(sc.data),
       local: sc.local._strings(),
       types,
     };
@@ -2768,7 +2782,15 @@
         out.next_request = S.next === undefined ? null : S.next;
         out.skip_request = S.skip;
         out.visualization = S.visualization;
-        out = jsonStringify(out);
+        try {
+          out = jsonStringify(out);
+        } catch (e) {
+          // Keep the tests and console even if a variable cannot be written back.
+          recordError('', 'Could not save the variables: ' + errorMessage(e));
+          out.variables = S.input.variables || {};
+          out.errors = S.errors;
+          out = jsonStringify(out);
+        }
       } finally {
         S = null;
         // After collecting the results, which can run code from the job

@@ -706,6 +706,7 @@ fn patched_iterators_and_other_built_ins_do_not_reach_later_jobs() {
     assert_eq!(out.console[0].message, "0 object true");
     assert_eq!(out.variables.environment.get("stolen"), None);
 }
+
 #[test]
 fn scripts_cannot_reach_the_worker_hooks() {
     let e = BoaEngine::new();
@@ -727,4 +728,27 @@ fn scripts_cannot_reach_the_worker_hooks() {
     assert_eq!(out.variables.environment["x"], "1");
     assert!(out.variables.environment["fired"].parse::<u32>().unwrap() >= 1);
     assert!(out.tests[0].passed, "{:?}", out.tests);
+}
+
+#[test]
+fn values_that_do_not_serialize_keep_the_job_results() {
+    let e = BoaEngine::new();
+    let out = e.run(job(
+        ScriptEvent::PreRequest,
+        "pm.iterationData.set('big', 10n);\n\
+         const loop = {}; loop.self = loop;\n\
+         pm.iterationData.set('loop', loop);\n\
+         pm.iterationData.set('ok', {a: [1]});\n\
+         const bare = Object.create(null); bare.self = bare;\n\
+         pm.environment.set('bare', bare);\n\
+         pm.test('kept', () => {});\n\
+         console.log('still here');",
+    ));
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(out.console[0].message, "still here");
+    assert!(out.tests[0].passed, "{:?}", out.tests);
+    assert_eq!(out.variables.data["big"], serde_json::json!("10"));
+    assert_eq!(out.variables.data["loop"], serde_json::json!("[object Object]"));
+    assert_eq!(out.variables.data["ok"], serde_json::json!({"a": [1]}));
+    assert_eq!(out.variables.environment["bare"], "[object Object]");
 }
