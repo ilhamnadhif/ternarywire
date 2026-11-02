@@ -1,6 +1,7 @@
 //! gRPC request tab (FR-X2): schema via server reflection or `.proto` files,
 //! service/method picker, unary and streaming calls with JSON messages.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -72,8 +73,11 @@ pub struct GrpcTab {
     pub auto_load: bool,
     pub auto_invoke: bool,
     pub scripts: ScriptState,
-    received: Vec<serde_json::Value>,
-    queue: Vec<Queued>,
+    /// Messages of the current call for the post-response script, and the
+    /// script inputs not run yet (a tab in the background is not drawn):
+    /// the latest [`pc::MAX_INBOX`] messages of a long stream.
+    received: VecDeque<serde_json::Value>,
+    queue: VecDeque<Queued>,
 }
 
 impl GrpcTab {
@@ -99,8 +103,8 @@ impl GrpcTab {
             auto_load: false,
             auto_invoke: false,
             scripts: ScriptState::default(),
-            received: Vec::new(),
-            queue: Vec::new(),
+            received: VecDeque::new(),
+            queue: VecDeque::new(),
         }
     }
 
@@ -142,8 +146,13 @@ impl GrpcTab {
                     let dir = if direction == Direction::Received { Dir::In } else { Dir::Out };
                     if direction == Direction::Received {
                         let m = proto::message(proto::json_or_text(&json), proto::Direction::Incoming, at_ms);
-                        self.received.push(m.clone());
-                        self.queue.push(Queued::Message(m));
+                        pc::queue_message(&mut self.received, m.clone());
+                        self.queue.push_back(Queued::Message(m));
+                        if self.queue.len() > pc::MAX_INBOX
+                            && let Some(i) = self.queue.iter().position(|q| matches!(q, Queued::Message(_)))
+                        {
+                            self.queue.remove(i);
+                        }
                     }
                     self.log.push(dir, "", json, at_ms);
                 }
@@ -157,10 +166,10 @@ impl GrpcTab {
                         &message,
                         &self.headers,
                         &self.trailers,
-                        std::mem::take(&mut self.received),
+                        std::mem::take(&mut self.received).into(),
                         elapsed_ms,
                     );
-                    self.queue.push(Queued::Response(resp));
+                    self.queue.push_back(Queued::Response(resp));
                     self.status = Some((code, code_name, message, elapsed_ms));
                     self.call = None;
                     self.started = None;
@@ -890,4 +899,29 @@ fn invoke(app: &mut TernaryWireApp, tab_id: u64, tab: &mut GrpcTab, item: &terna
 
 fn short(service: &str) -> &str {
     service.rsplit('.').next().unwrap_or(service)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A long server stream (or one in a tab in the background, whose script
+    /// queue is not drained) keeps the latest messages, like the other
+    /// protocol tabs; the response still reaches the post-response script.
+    #[test]
+    fn long_streams_are_bounded() {
+        let mut tab = GrpcTab::new(ItemSlot::default());
+        for i in 0..pc::MAX_INBOX + 100 {
+            let json = format!("{{\"n\": {i}}}");
+            tab.on_msg(GrpcMsg::Event(GrpcEvent::Message { direction: Direction::Received, json, at_ms: 0 }));
+        }
+        assert_eq!(tab.received.len(), pc::MAX_INBOX);
+        assert_eq!(tab.queue.len(), pc::MAX_INBOX);
+        let finished = GrpcEvent::Finished { code: 0, code_name: "OK".into(), message: String::new(), elapsed_ms: 1.0 };
+        tab.on_msg(GrpcMsg::Event(finished));
+        assert!(tab.received.is_empty());
+        assert!(matches!(tab.queue.back(), Some(Queued::Response(_))));
+        let oldest = proto::message(proto::json_or_text("{\"n\": 100}"), proto::Direction::Incoming, 0);
+        assert!(matches!(tab.queue.front(), Some(Queued::Message(m)) if *m == oldest), "the oldest are dropped");
+    }
 }
