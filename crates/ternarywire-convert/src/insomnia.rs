@@ -6,8 +6,6 @@
 //! `{{$timestamp}}`/`{{$isoTimestamp}}`, `{% faker 'x' %}` -> `{{$x}}`.
 //! Other tags (response chaining, base64, ...) are kept verbatim and reported.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 use serde_json::Value;
 use ternarywire_core::model::{
@@ -411,7 +409,8 @@ fn sort_key(v: &Value) -> f64 {
 
 fn import_v4(v: &Value, warnings: &mut Vec<String>) -> (Vec<Collection>, Vec<Environment>) {
     let resources = arr(v, "resources");
-    let mut by_parent: HashMap<String, Vec<&Value>> = HashMap::new();
+    // In document order: partial exports list their roots from it.
+    let mut by_parent: IndexMap<String, Vec<&Value>> = IndexMap::new();
     for r in resources {
         by_parent.entry(str_of(r, "parentId")).or_default().push(r);
     }
@@ -429,7 +428,7 @@ fn import_v4(v: &Value, warnings: &mut Vec<String>) -> (Vec<Collection>, Vec<Env
     /// repeats an enclosing one would recurse forever.
     fn children(
         parent: &str,
-        by_parent: &HashMap<String, Vec<&Value>>,
+        by_parent: &IndexMap<String, Vec<&Value>>,
         t: &mut Templates,
         skipped: &mut IndexMap<String, usize>,
         open: &mut Vec<String>,
@@ -720,5 +719,20 @@ mod tests {
         assert_eq!(h.body.raw, "{\"n\": 1}");
         assert_eq!(r.scripts.pre_request, "pm.environment.set('a', 1);");
         assert_eq!(cols[0].items[1].name(), "Ping");
+    }
+
+    #[test]
+    fn partial_export_roots_keep_document_order() {
+        // No workspace: the roots are the parents that are not resources.
+        let resources: Vec<Value> = (0..24)
+            .map(|i| {
+                serde_json::json!({"_id": format!("req_{i}"), "_type": "request", "parentId": format!("fld_{i}"),
+                    "name": format!("r{i}"), "method": "GET", "url": "https://h.test/"})
+            })
+            .collect();
+        let doc = serde_json::json!({"_type": "export", "__export_format": 4, "resources": resources});
+        let (c, _, _) = import(&doc.to_string()).unwrap();
+        let names: Vec<String> = c[0].requests().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, (0..24).map(|i| format!("r{i}")).collect::<Vec<_>>());
     }
 }
