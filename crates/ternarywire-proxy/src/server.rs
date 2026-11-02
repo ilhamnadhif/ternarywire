@@ -421,7 +421,11 @@ async fn forward(
     let authority = if intercepted { header_host.or(uri_authority) } else { uri_authority.or(header_host) }
         .unwrap_or_else(|| origin.default_authority());
     let path = if asterisk { "*" } else { parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/") }.to_owned();
-    let url = if path == "*" { format!("{scheme}://{authority}") } else { format!("{scheme}://{authority}{path}") };
+    // Inside a CONNECT the request goes to the tunnel's host, whatever the
+    // client's Host names: the capture names the server it reached (the
+    // Host sent is in the headers).
+    let reached = if intercepted { origin.default_authority() } else { authority.clone() };
+    let url = if path == "*" { format!("{scheme}://{reached}") } else { format!("{scheme}://{reached}{path}") };
 
     let mut headers = parts.headers.clone();
     clean_hop_by_hop(&mut headers, upgrade.is_some());

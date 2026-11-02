@@ -908,3 +908,38 @@ async fn real_world_https_with_curl() {
     }
     proxy.stop().await;
 }
+
+/// A TLS client inside a CONNECT tunnel to `target`, trusting `ca_pem`.
+async fn tls_in_tunnel(
+    proxy: &CaptureProxy,
+    target: &str,
+    name: &str,
+    ca_pem: &str,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    let tunnel = connect_tunnel(proxy, target).await;
+    let name = rustls::pki_types::ServerName::try_from(name.to_owned()).unwrap();
+    tokio_rustls::TlsConnector::from(client_tls_config(ca_pem)).connect(name, tunnel).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn intercepted_requests_name_the_server_they_reached() {
+    let cert = ca_signed_cert();
+    let upstream = spawn_https(&cert, &[b"http/1.1"]).await;
+    let (proxy, ca) = start_proxy(|c| c.extra_upstream_roots_pem = Some(cert.ca_pem.clone())).await;
+    // The tunnel goes to 127.0.0.1, the Host header names another server.
+    let target = format!("127.0.0.1:{}", upstream.port());
+    let mut tls = tls_in_tunnel(&proxy, &target, "127.0.0.1", ca.cert_pem()).await;
+    tls.write_all(b"GET /hello HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut answer = String::new();
+    let _ = tls.read_to_string(&mut answer).await;
+    assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with("hello world"), "{answer}");
+
+    let e = &finished(&proxy, 1).await[0];
+    assert!(e.tls_intercepted);
+    assert_eq!(e.url, format!("https://{target}/hello"));
+    assert_eq!((e.host.as_str(), e.port), ("127.0.0.1", upstream.port()));
+    // What the client sent is still what was forwarded and recorded.
+    assert_eq!(e.request_header("host"), Some("other.test"));
+    proxy.stop().await;
+}
+
