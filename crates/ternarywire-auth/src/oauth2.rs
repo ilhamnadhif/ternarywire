@@ -201,7 +201,10 @@ async fn token_request_within(
             form.push(("client_secret".into(), client_secret.into()));
         }
     } else {
-        headers.push(("Authorization".into(), format!("Basic {}", B64.encode(format!("{client_id}:{client_secret}")))));
+        // RFC 6749 section 2.3.1: both form-urlencoded, so a `:` in the id survives.
+        let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+        let credentials = format!("{}:{}", enc(client_id), enc(client_secret));
+        headers.push(("Authorization".into(), format!("Basic {}", B64.encode(credentials))));
     }
     let mut target = url::Url::parse(url).map_err(|_| AuthError::Url(url.to_string()))?;
     for p in extra_params(auth, extra_key) {

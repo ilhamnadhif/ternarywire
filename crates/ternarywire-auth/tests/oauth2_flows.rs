@@ -36,9 +36,28 @@ async fn authorize(State(s): State<Shared>, Query(q): Query<HashMap<String, Stri
     Redirect::to(&format!("{redirect}?code=the-code&state={state}")).into_response()
 }
 
+/// A client with characters that must be encoded in the Basic header.
+const ODD_CLIENT: (&str, &str) = ("app:1+x", "s3c/r+t=:%&");
+
+/// client_secret_basic (RFC 6749 section 2.3.1): both parts of the Basic
+/// credentials form-urlencoded.
 fn basic_ok(headers: &HeaderMap) -> bool {
-    // base64("cid:secret")
-    headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Basic Y2lkOnNlY3JldA==")
+    use base64::Engine;
+    let client = || {
+        let value = headers.get("authorization")?.to_str().ok()?.strip_prefix("Basic ")?;
+        let text = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(value).ok()?).ok()?;
+        let (id, secret) = text.split_once(':')?;
+        let decode = |s: &str| -> Option<String> {
+            // A raw `&` is not form-urlencoded.
+            if s.contains('&') {
+                return None;
+            }
+            url::form_urlencoded::parse(format!("x={s}").as_bytes()).next().map(|(_, v)| v.into_owned())
+        };
+        Some((decode(id)?, decode(secret)?))
+    };
+    matches!(client(), Some((id, secret)) if (id.as_str(), secret.as_str()) == ("cid", "secret")
+        || (id.as_str(), secret.as_str()) == ODD_CLIENT)
 }
 
 async fn token(State(s): State<Shared>, headers: HeaderMap, Form(f): Form<HashMap<String, String>>) -> Response {
@@ -152,6 +171,19 @@ async fn client_credentials_auto_fetch_then_reuse() {
     let mut r = req(base_auth(&server, "client_credentials").with("clientSecret", "nope"), "col-2");
     let err = ternarywire_auth::apply(&mut r, &ctx).await.unwrap_err();
     assert_eq!(err.to_string(), "OAuth 2.0 server returned `invalid_client`: rejected");
+}
+
+#[tokio::test]
+async fn client_secret_basic_is_form_urlencoded() {
+    let (server, _) = start().await;
+    let http = client();
+    let tokens = MemoryTokenStore::default();
+    let ctx = AuthContext { tokens: &tokens, http: &http };
+    let (id, secret) = ODD_CLIENT;
+    let auth = base_auth(&server, "client_credentials").with("clientId", id).with("clientSecret", secret);
+    let mut r = req(auth, "col-odd");
+    ternarywire_auth::apply(&mut r, &ctx).await.unwrap();
+    assert_eq!(r.header("authorization"), Some("Bearer cc-token"));
 }
 
 #[tokio::test]
