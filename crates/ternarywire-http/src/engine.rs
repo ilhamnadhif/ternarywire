@@ -18,6 +18,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use ternarywire_core::auth::{Auth, AuthType};
 use ternarywire_core::model::HttpVersion;
 use ternarywire_core::prepared::{MultipartValue, PreparedBody, PreparedRequest, ResolvedSettings};
 use ternarywire_core::response::{HttpResponse, ResponseBody, Timings};
@@ -417,8 +418,8 @@ impl HttpEngine {
                         !k.eq_ignore_ascii_case("content-type") && !k.eq_ignore_ascii_case("content-length")
                     });
                 }
-                if next_url.origin() != url.origin() && !req.settings.follow_auth_header {
-                    headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+                if next_url.origin() != url.origin() {
+                    strip_for_other_origin(&mut headers, &req.auth, req.settings.follow_auth_header);
                 }
                 redirects.push(url.to_string());
                 url = next_url;
@@ -578,6 +579,37 @@ fn wants_tls_binding(headers: &[(String, String)]) -> bool {
     crate::challenge::parse_challenges(values)
         .iter()
         .any(|c| matches!(c.scheme.as_str(), "ntlm" | "negotiate") && c.token68.is_some())
+}
+
+/// Before following a redirect to another origin, drops the headers meant
+/// for the previous one only: a user-set `Host` (wrong for the new host) and
+/// `Proxy-Authorization` (the next hop may use another proxy, or none), and
+/// unless `keep_credentials` (`follow_auth_header`) the credentials, like
+/// curl without `--location-trusted`: `Authorization`, a user-set `Cookie`
+/// (the jar still adds its own for the new host) and the other headers the
+/// auth scheme put a secret in.
+fn strip_for_other_origin(headers: &mut Vec<(String, String)>, auth: &Auth, keep_credentials: bool) {
+    let auth_headers = auth_secret_headers(auth);
+    headers.retain(|(k, _)| {
+        let k = k.trim();
+        let is = |name: &str| k.eq_ignore_ascii_case(name);
+        if is("host") || is("proxy-authorization") {
+            return false;
+        }
+        keep_credentials || !(is("authorization") || is("cookie") || auth_headers.iter().any(|h| is(h)))
+    });
+}
+
+/// Headers besides `Authorization` that `ternarywire-auth` puts a secret
+/// in: the header of an API key and the AWS session token.
+fn auth_secret_headers(auth: &Auth) -> Vec<&str> {
+    match auth.kind {
+        AuthType::ApiKey if !auth.get("in").eq_ignore_ascii_case("query") => {
+            Some(auth.get("key").trim()).filter(|k| !k.is_empty()).into_iter().collect()
+        }
+        AuthType::AwsV4 => vec!["x-amz-security-token"],
+        _ => Vec::new(),
+    }
 }
 
 fn file_err(e: std::io::Error) -> HttpError {

@@ -44,6 +44,14 @@ async fn spawn() -> String {
         .route("/see-other", post(|| async { Redirect::to("/echo") }))
         .route("/found", any(|| async { (StatusCode::FOUND, [(header::LOCATION, "/echo")]) }))
         .route("/temp", any(|| async { (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, "/echo")]) }))
+        .route(
+            "/away",
+            any(
+                |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, q["to"].clone())])
+                },
+            ),
+        )
         .route("/set-cookie", get(|| async { ([(header::SET_COOKIE, "sid=xyz; Path=/")], "ok") }))
         .route(
             "/utf8-location",
@@ -157,6 +165,56 @@ async fn redirect_method_semantics() {
     let v = json(&e.send(&r, &SendOptions::default()).await.unwrap());
     assert_eq!(v["method"], "PUT", "307 keeps the method and body");
     assert_eq!(v["body"], "keep");
+}
+
+#[tokio::test]
+async fn redirects_to_another_origin_drop_credentials_and_host() {
+    let (first, other) = (spawn().await, spawn().await);
+    let e = engine();
+    let mut r = req("GET", format!("{first}/away?to={other}/echo"));
+    r.auth = ternarywire_core::Auth::api_key("X-Api-Key", "k3y", false);
+    for (k, v) in [
+        ("X-Api-Key", "k3y"),
+        ("Authorization", "Bearer t0ken"),
+        ("Cookie", "sid=s3ssion"),
+        ("Proxy-Authorization", "Basic cHJveHk="),
+        ("Host", "first.test"),
+        ("X-Other", "kept"),
+    ] {
+        r.headers.push((k.into(), v.into()));
+    }
+    let received = |v: &serde_json::Value| -> Vec<(String, String)> {
+        let pairs = v["headers"].as_array().unwrap().iter();
+        pairs.map(|h| (h[0].as_str().unwrap().to_string(), h[1].as_str().unwrap().to_string())).collect()
+    };
+    let has = |h: &[(String, String)], name: &str| h.iter().any(|(k, _)| k == name);
+    let other_host = other.trim_start_matches("http://");
+
+    let h = received(&json(&e.send(&r, &SendOptions::default()).await.unwrap()));
+    for name in ["x-api-key", "authorization", "cookie", "proxy-authorization"] {
+        assert!(!has(&h, name), "{name} reached the other origin: {h:?}");
+    }
+    assert!(h.contains(&("host".into(), other_host.into())), "{h:?}");
+    assert!(h.contains(&("x-other".into(), "kept".into())), "{h:?}");
+
+    // "Follow Authorization header" keeps the credentials, not the first
+    // origin's Host nor the proxy credentials.
+    r.settings.follow_auth_header = true;
+    let h = received(&json(&e.send(&r, &SendOptions::default()).await.unwrap()));
+    for name in ["x-api-key", "authorization", "cookie"] {
+        assert!(has(&h, name), "{name} was dropped: {h:?}");
+    }
+    assert!(!has(&h, "proxy-authorization"), "{h:?}");
+    assert!(h.contains(&("host".into(), other_host.into())), "{h:?}");
+
+    // The same origin gets everything.
+    r.settings.follow_auth_header = false;
+    r.url = format!("{first}/away?to=/echo");
+    r.headers.retain(|(k, _)| k != "Host");
+    let h = received(&json(&e.send(&r, &SendOptions::default()).await.unwrap()));
+    for name in ["x-api-key", "authorization", "cookie", "proxy-authorization"] {
+        assert!(has(&h, name), "{name} was dropped: {h:?}");
+    }
 }
 
 #[tokio::test]
