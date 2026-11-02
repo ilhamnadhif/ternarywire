@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::response::Response;
 use http::header::{HeaderName, HeaderValue};
@@ -306,11 +306,43 @@ fn dropped_connection() -> Response {
     Response::new(Body::from_stream(stream))
 }
 
+/// Reads a request body of at most [`MAX_REQUEST_BODY`] bytes: 413 when it
+/// is larger, 400 when it cannot be read (the client went away).
+async fn read_body(body: Body) -> Result<Bytes, StatusCode> {
+    use futures_util::StreamExt;
+    if axum::body::HttpBody::size_hint(&body).lower() > MAX_REQUEST_BODY as u64 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let mut stream = body.into_data_stream();
+    let mut buf = bytes::BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if buf.len() + chunk.len() > MAX_REQUEST_BODY {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.freeze())
+}
+
+fn unreadable_body(status: StatusCode) -> Response {
+    let (name, message) = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        ("mockRequestTooLarge", format!("The request body is larger than {} MiB.", MAX_REQUEST_BODY >> 20))
+    } else {
+        ("mockBadRequest", "The request body could not be read.".to_string())
+    };
+    json_response(status, serde_json::json!({"error": {"name": name, "message": message}}))
+}
+
 async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
     let started = Instant::now();
     let timestamp_ms = chrono::Utc::now().timestamp_millis();
     let (parts, body) = req.into_parts();
-    let body = to_bytes(body, MAX_REQUEST_BODY).await.unwrap_or_default();
+    // A body that is not read whole would match (and be logged) as empty.
+    let (body, unread) = match read_body(body).await {
+        Ok(b) => (b, None),
+        Err(status) => (Bytes::new(), Some(status)),
+    };
     let incoming = IncomingRequest {
         method: parts.method.as_str().to_uppercase(),
         path: parts.uri.path().to_string(),
@@ -322,48 +354,50 @@ async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
 
     let mut matched = None;
     let mut dropped = false;
-    let mut res =
-        if cfg.cors && parts.method == Method::OPTIONS && incoming.header("access-control-request-method").is_some() {
-            preflight(&incoming)
-        } else {
-            let jitter = match cfg.network.jitter_ms {
-                0 => 0,
-                j => rand::rng().random_range(0..=j),
-            };
-            let delay = cfg.delay_ms + cfg.network.latency_ms + jitter;
-            if delay > 0 {
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-            }
-            let failure = cfg.failure.as_ref().filter(|f| f.rate > 0.0 && rand::rng().random::<f32>() < f.rate);
-            match failure.map(|f| f.kind) {
-                Some(FailureKind::Status(code)) => {
-                    let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                    json_response(
-                        status,
-                        serde_json::json!({"error": {"name": "mockSimulatedFailure", "message": "Simulated failure"}}),
-                    )
-                }
-                Some(FailureKind::Drop) => {
-                    dropped = true;
-                    dropped_connection()
-                }
-                Some(FailureKind::Timeout) => {
-                    tokio::time::sleep(Duration::from_secs(300)).await;
-                    dropped = true;
-                    dropped_connection()
-                }
-                None => {
-                    let collection = shared.collection.read().clone();
-                    match find_match(&collection, &cfg.variables, &incoming) {
-                        Some(m) => {
-                            matched = Some(m.label());
-                            example_response(&m, &shared, &incoming)
-                        }
-                        None => not_found(),
-                    }
-                }
-            }
+    let mut res = if let Some(status) = unread {
+        unreadable_body(status)
+    } else if cfg.cors && parts.method == Method::OPTIONS && incoming.header("access-control-request-method").is_some()
+    {
+        preflight(&incoming)
+    } else {
+        let jitter = match cfg.network.jitter_ms {
+            0 => 0,
+            j => rand::rng().random_range(0..=j),
         };
+        let delay = cfg.delay_ms + cfg.network.latency_ms + jitter;
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        let failure = cfg.failure.as_ref().filter(|f| f.rate > 0.0 && rand::rng().random::<f32>() < f.rate);
+        match failure.map(|f| f.kind) {
+            Some(FailureKind::Status(code)) => {
+                let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                json_response(
+                    status,
+                    serde_json::json!({"error": {"name": "mockSimulatedFailure", "message": "Simulated failure"}}),
+                )
+            }
+            Some(FailureKind::Drop) => {
+                dropped = true;
+                dropped_connection()
+            }
+            Some(FailureKind::Timeout) => {
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                dropped = true;
+                dropped_connection()
+            }
+            None => {
+                let collection = shared.collection.read().clone();
+                match find_match(&collection, &cfg.variables, &incoming) {
+                    Some(m) => {
+                        matched = Some(m.label());
+                        example_response(&m, &shared, &incoming)
+                    }
+                    None => not_found(),
+                }
+            }
+        }
+    };
     if cfg.cors {
         add_cors(&mut res, &incoming);
     }

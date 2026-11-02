@@ -226,3 +226,56 @@ async fn concurrent_requests_and_clean_stop() {
     let fresh = reqwest::Client::builder().no_proxy().pool_max_idle_per_host(0).build().unwrap();
     assert!(fresh.get(format!("http://{addr}/users/1")).send().await.is_err());
 }
+
+/// Sends `head` and then `body` on a raw connection and returns the answer.
+async fn raw_request(addr: std::net::SocketAddr, head: String, body: Vec<Vec<u8>>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut rd, mut wr) = stream.into_split();
+    let writer = tokio::spawn(async move {
+        wr.write_all(head.as_bytes()).await?;
+        for chunk in body {
+            wr.write_all(&chunk).await?;
+        }
+        Ok::<_, std::io::Error>(wr)
+    });
+    let mut out = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(20), rd.read_to_end(&mut out)).await;
+    assert!(read.is_ok(), "no answer");
+    let _ = writer.await;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[tokio::test]
+async fn oversized_request_bodies_are_refused() {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    let server = MockServer::start(collection(), config()).await.unwrap();
+    // Announced too large: answered without reading it.
+    let head = format!(
+        "POST /users HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        LIMIT + 1
+    );
+    let answer = raw_request(server.addr(), head, Vec::new()).await;
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+    assert!(answer.contains("mockRequestTooLarge"), "{answer}");
+    // Chunked: refused once more than the limit arrived.
+    let head = "POST /users HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_string();
+    let mut chunks: Vec<Vec<u8>> = (0..17)
+        .map(|_| {
+            let mut c = format!("{:x}\r\n", 1 << 20).into_bytes();
+            c.extend(std::iter::repeat_n(b'x', 1 << 20));
+            c.extend_from_slice(b"\r\n");
+            c
+        })
+        .collect();
+    chunks.push(b"0\r\n\r\n".to_vec());
+    let answer = raw_request(server.addr(), head, chunks).await;
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer:.200}");
+
+    let logs = server.logs();
+    assert_eq!(logs.iter().map(|l| l.status).collect::<Vec<_>>(), [413, 413]);
+    assert!(logs.iter().all(|l| l.matched.is_none() && l.body.is_empty()));
+    // A body at the limit is still matched.
+    let res = client().post(format!("{}/users", server.url())).body(vec![b'x'; LIMIT]).send().await.unwrap();
+    assert_eq!(res.status(), 201);
+}
