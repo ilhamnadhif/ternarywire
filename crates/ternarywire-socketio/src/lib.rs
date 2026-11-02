@@ -808,7 +808,13 @@ impl Session {
     /// Collects an attachment of the pending binary packet; `true` when the
     /// session is over.
     fn on_binary(&mut self, data: Vec<u8>) -> bool {
-        let Some(partial) = &mut self.partial else { return false };
+        let Some(partial) = &mut self.partial else {
+            self.emit_event(SocketIoEvent::Error(format!(
+                "Ignored a binary message ({} bytes) that no packet announced",
+                data.len()
+            )));
+            return false;
+        };
         partial.bytes += data.len();
         if partial.bytes > MAX_ATTACHMENT_BYTES {
             return self.protocol_error(format!(

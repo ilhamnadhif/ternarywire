@@ -2,8 +2,8 @@
 //! Engine.IO 3 or 4 over HTTP long-polling and/or WebSocket, with the
 //! probe/upgrade handshake, optional TLS, a sticky-session cookie, and a
 //! small set of test events (`echo`, `info`, `binary`, `binary-ack`,
-//! `kick`, `close-transport`, `go-silent`, `ask`, and the oversized `huge`,
-//! `many-attachments` and `big-attachments`).
+//! `kick`, `close-transport`, `go-silent`, `ask`, `stray-binary`, and the
+//! oversized `huge`, `many-attachments` and `big-attachments`).
 
 #![allow(dead_code)]
 
@@ -666,6 +666,11 @@ fn on_text(state: &State, sess: &Arc<Sess>, text: &str) {
                     for _ in 0..5 {
                         sess.push(Out::Binary(vec![7u8; 15 * 1024 * 1024]));
                     }
+                }
+                // A binary message no BINARY_EVENT announced, then an event.
+                "stray-binary" => {
+                    sess.push(Out::Binary(vec![9, 9]));
+                    sess.push(Out::Text(format!("{}{}", prefix(2), json!(["after-stray"]))));
                 }
                 "kick" => sess.push(Out::Text(prefix(1))),
                 "close-transport" => sess.close_transport(),

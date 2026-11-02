@@ -529,6 +529,18 @@ async fn binary_attachments_become_base64() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unannounced_binary_messages_are_reported() {
+    for (transport, version) in matrix() {
+        let server = server(version).await;
+        let (s, mut ev, _) = connect(config(server.url(), "/", transport, version)).await;
+        s.emit("stray-binary", vec![], false);
+        ev.incoming("after-stray").await;
+        let errors = ev.errors();
+        assert!(errors.iter().any(|e| e.contains("binary message (2 bytes)")), "{transport:?} {version:?}: {errors:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_arguments_are_sent_as_attachments() {
     let p = r#"{"_placeholder":true,"num":"#;
     for (transport, version) in matrix() {
