@@ -2315,9 +2315,21 @@ impl TernaryWireApp {
             TabKind::Flow(t) => crate::flow_tab::show(self, ui, tab_id, t),
             TabKind::Capture(t) => crate::capture_tab::show(self, ui, tab_id, t),
         });
-        // The tab may have been closed or moved while shown.
-        if let Some(slot) = self.tabs.iter_mut().find(|t| t.id == 0) {
-            *slot = tab;
+        self.put_back(tab);
+    }
+
+    /// Puts the tab [`central`](Self::central) showed back in place of its
+    /// placeholder. It may have been moved meanwhile, or closed: then it is
+    /// closed itself, so what it runs stops (only the placeholder was).
+    fn put_back(&mut self, tab: Tab) {
+        match self.tabs.iter_mut().find(|t| t.id == 0) {
+            Some(slot) => *slot = tab,
+            None => {
+                let active = self.active;
+                self.tabs.push(tab);
+                self.close_tab(self.tabs.len() - 1);
+                self.active = active.min(self.tabs.len().saturating_sub(1));
+            }
         }
     }
 }
@@ -3097,5 +3109,26 @@ mod tests {
         app.add_tab(TabKind::Flow(Box::new(crate::flow_tab::FlowTab::blank("Second"))));
         app.shutdown();
         assert_eq!(names(&app), ["Draft", "Second"]);
+    }
+
+    /// A tab closed while it was being shown (only its placeholder was in
+    /// the tab list) is closed properly once it is back: its request stops.
+    #[test]
+    fn a_tab_closed_while_shown_is_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        scratch_tab(&mut app, "a");
+        let id = scratch_tab(&mut app, "b");
+        let cancel = CancellationToken::new();
+        let i = app.tab_index(id).unwrap();
+        let placeholder = Tab { id: 0, kind: TabKind::Environment(crate::env_tab::EnvTab::default()) };
+        let mut shown = std::mem::replace(&mut app.tabs[i], placeholder);
+        let TabKind::Request(t) = &mut shown.kind else { panic!("request tab") };
+        t.start_running(cancel.clone());
+        app.close_tab(i);
+        app.put_back(shown);
+        assert!(cancel.is_cancelled());
+        assert_eq!(tab_names(&app), ["a"]);
+        assert_eq!(app.active, 0);
     }
 }
