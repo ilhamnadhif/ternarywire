@@ -176,43 +176,114 @@ pub fn httpie(v: &View) -> String {
     if let Some(ms) = v.timeout_ms() {
         write!(first, " --timeout={}", format_secs(ms)).ok();
     }
-    let mut lines = Vec::new();
+    let mut note = String::new();
+    let mut items = Vec::new();
+    for (k, val) in &v.headers {
+        let item = if val.is_empty() {
+            httpie_key(k).map(|k| format!("{k};"))
+        } else {
+            httpie_key(k).zip(httpie_value(val)).map(|(k, val)| format!("{k}:{val}"))
+        };
+        items.push(item.unwrap_or_else(|| {
+            note =
+                "# HTTPie cannot pass a backslash before `:`, `;`, `=` or `@` in a header; check the headers.\n".into();
+            format!("{k}:{val}")
+        }));
+    }
+    let form = match &v.body {
+        BodyView::Multipart(parts) => parts.iter().map(httpie_part).collect::<Option<Vec<_>>>(),
+        _ => None,
+    };
     let mut tail = String::new();
     match &v.body {
+        // `--raw=`: a body starting with `-` would be read as an option.
         BodyView::Text(t) => {
-            first.push_str(" --raw ");
-            first.push_str(&sh(t));
+            write!(first, " --raw={}", sh(t)).ok();
         }
-        BodyView::Multipart(_) => first.push_str(" --multipart"),
+        BodyView::Multipart(_) if form.is_some() => first.push_str(" --multipart"),
+        BodyView::Multipart(parts) => {
+            // A backslash before a separator character cannot be escaped in a
+            // request item: send the multipart body as text.
+            write!(first, " --raw={}", sh(&multipart_text(parts))).ok();
+            items.push(format!("Content-Type:multipart/form-data; boundary={BOUNDARY}"));
+            if parts.iter().any(|p| matches!(p.value, MultipartValue::File(_))) {
+                note.push_str(
+                    "# A field cannot be written as an HTTPie request item; replace the <contents of ...> \
+                     placeholders.\n",
+                );
+            }
+        }
         BodyView::File(p) => tail = format!(" < {}", sh(&path_str(p))),
         BodyView::None => {}
     }
+    items.extend(form.into_iter().flatten());
     write!(first, " {} {}", sh_word(&v.method), sh(v.url)).ok();
-    lines.push(first);
-    for (k, val) in &v.headers {
-        if val.is_empty() {
-            lines.push(sh(&format!("{k};")));
-        } else {
-            lines.push(sh(&format!("{k}:{val}")));
-        }
+    // Items starting with `-` would be read as options.
+    if items.iter().any(|i| i.starts_with('-')) {
+        first.push_str(" --");
     }
-    if let BodyView::Multipart(parts) = &v.body {
-        for part in parts.iter() {
-            match &part.value {
-                MultipartValue::Text(t) => lines.push(sh(&format!("{}={}", part.name, t))),
-                MultipartValue::File(p) => {
-                    let mut spec = format!("{}@{}", part.name, path_str(p));
-                    if let Some(ct) = &part.content_type {
-                        write!(spec, ";type={ct}").ok();
-                    }
-                    lines.push(sh(&spec));
-                }
-            }
-        }
-    }
+    let mut lines = vec![first];
+    lines.extend(items.iter().map(|i| sh(i)));
     let mut out = lines.join(" \\\n  ");
     out.push_str(&tail);
-    out
+    format!("{note}{out}")
+}
+
+/// Every HTTPie separator (`:`, `;`, `==`, `=`, `:=`, `@`, `=@`, `:=@`,
+/// `==@`, `:@`) is made of these; a backslash before one makes it literal.
+const HTTPIE_SEPARATOR_CHARS: [char; 4] = [':', ';', '=', '@'];
+
+/// The key of an HTTPie request item with separator characters escaped, or
+/// `None` when HTTPie cannot read it back: its tokenizer keeps `\\` as two
+/// backslashes, so a literal backslash before a separator character (or the
+/// separator after the key) always escapes it.
+fn httpie_key(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len() + 2);
+    let mut backslash = false;
+    for c in s.chars() {
+        if HTTPIE_SEPARATOR_CHARS.contains(&c) {
+            if backslash {
+                return None;
+            }
+            out.push('\\');
+        }
+        backslash = c == '\\';
+        out.push(c);
+    }
+    (!backslash).then_some(out)
+}
+
+/// Whether HTTPie reads `s` back verbatim when it follows the separator.
+fn httpie_literal(s: &str) -> bool {
+    !s.as_bytes().windows(2).any(|w| w[0] == b'\\' && HTTPIE_SEPARATOR_CHARS.contains(&char::from(w[1])))
+}
+
+/// The value after `:` or `=`: only a leading `=` or `@` would change the
+/// separator (`:=` raw JSON, `=@` / `:@` read a local file, `==` a query
+/// parameter).
+fn httpie_value(s: &str) -> Option<String> {
+    httpie_literal(s).then(|| if s.starts_with(['=', '@']) { format!("\\{s}") } else { s.to_string() })
+}
+
+/// A multipart part as an HTTPie request item (`name=value`, `name@path;type=...`).
+fn httpie_part(part: &ternarywire_core::prepared::MultipartPart) -> Option<String> {
+    let name = httpie_key(&part.name)?;
+    match &part.value {
+        MultipartValue::Text(t) => Some(format!("{name}={}", httpie_value(t)?)),
+        MultipartValue::File(p) => {
+            // HTTPie splits the path at `;type=` after unescaping.
+            let path = path_str(p);
+            let ct = part.content_type.as_deref();
+            let ok = |s: &str| httpie_literal(s) && !s.contains(";type=");
+            if !ok(&path) || !ct.is_none_or(ok) {
+                return None;
+            }
+            Some(match ct {
+                Some(ct) => format!("{name}@{path};type={ct}"),
+                None => format!("{name}@{path}"),
+            })
+        }
+    }
 }
 
 pub fn wget(v: &View) -> String {

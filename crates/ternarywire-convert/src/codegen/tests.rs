@@ -396,3 +396,103 @@ fn curl_form_names_and_types_survive_curl_parsing() {
     assert!(parsed.body.raw.contains("name=\"a=b\"\r\n\r\n1\r\n"), "{code}");
     assert!(parsed.body.raw.contains("name=\"q%22\"\r\n"), "{code}");
 }
+
+/// HTTPie's request item parser (`KeyValueArgType` in httpie/cli/argtypes.py):
+/// a backslash makes the next separator character literal (any other
+/// backslash stays), and the first, longest separator outside escapes wins.
+fn httpie_item(arg: &str) -> (String, &'static str, String) {
+    const SEPARATORS: [&str; 10] = [":", ";", "==", "=", ":=", "@", "=@", ":=@", "==@", ":@"];
+    let special = |c: char| matches!(c, ':' | ';' | '=' | '@');
+    let mut tokens: Vec<(bool, String)> = vec![(false, String::new())];
+    let mut chars = arg.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n) if special(n) => tokens.extend([(true, n.to_string()), (false, String::new())]),
+                n => tokens.last_mut().unwrap().1.extend(std::iter::once('\\').chain(n)),
+            }
+        } else {
+            tokens.last_mut().unwrap().1.push(c);
+        }
+    }
+    let join = |t: &[(bool, String)]| t.iter().map(|(_, s)| s.as_str()).collect::<String>();
+    for (i, (escaped, token)) in tokens.iter().enumerate() {
+        if *escaped {
+            continue;
+        }
+        let mut sorted = SEPARATORS;
+        sorted.sort_by_key(|s| s.len());
+        let mut best: Option<(usize, &'static str)> = None;
+        for sep in sorted {
+            if let Some(pos) = token.find(sep)
+                && best.is_none_or(|(p, _)| pos <= p)
+            {
+                best = Some((pos, sep));
+            }
+        }
+        if let Some((pos, sep)) = best {
+            let key = join(&tokens[..i]) + &token[..pos];
+            let value = token[pos + sep.len()..].to_string() + &join(&tokens[i + 1..]);
+            return (key, sep, value);
+        }
+    }
+    panic!("{arg:?} is not a valid request item");
+}
+
+/// The request items of an HTTPie snippet (one single-quoted word per line).
+fn httpie_items(code: &str) -> Vec<String> {
+    code.trim_end().split(" \\\n  ").skip(1).map(|w| w[1..w.len() - 1].replace("'\\''", "'")).collect()
+}
+
+#[test]
+fn httpie_items_escape_separator_characters() {
+    let mut r = HttpRequest::new("POST", "https://h.test/upload");
+    r.headers.push(KeyValue::new("X-Mention", "@ada"));
+    r.headers.push(KeyValue::new("X-Subject", "=?utf-8?q?hi?="));
+    r.body.mode = BodyMode::FormData;
+    let mut file = FormField::file("up:load", "/tmp/a=b@c.txt");
+    file.content_type = Some("text/plain; charset=utf-8".into());
+    r.body.form_data = vec![
+        // `=@` would read a local file into the field, `==` make a query parameter.
+        FormField::text("file", "@/etc/passwd"),
+        FormField::text("q", "=x"),
+        FormField::text("j", "=@x"),
+        FormField::text("a:=b==c@d;e", "1:2"),
+        FormField::text("-dash", "v"),
+        file,
+    ];
+    let code = generate(Language::Httpie, &compact(&r));
+    assert!(code.contains(" --multipart POST 'https://h.test/upload' -- \\\n"), "{code}");
+    let items: Vec<_> = httpie_items(&code).iter().map(|i| httpie_item(i)).collect();
+    let s = |k: &str, sep: &'static str, v: &str| (k.to_string(), sep, v.to_string());
+    assert_eq!(
+        items,
+        [
+            s("X-Mention", ":", "@ada"),
+            s("X-Subject", ":", "=?utf-8?q?hi?="),
+            s("file", "=", "@/etc/passwd"),
+            s("q", "=", "=x"),
+            s("j", "=", "=@x"),
+            s("a:=b==c@d;e", "=", "1:2"),
+            s("-dash", "=", "v"),
+            s("up:load", "@", "/tmp/a=b@c.txt;type=text/plain; charset=utf-8"),
+        ],
+        "{code}"
+    );
+
+    // A literal backslash before a separator character cannot be escaped: the
+    // multipart body is sent as text.
+    r.headers.clear();
+    r.body.form_data = vec![FormField::text("path", "C:\\=x"), FormField::text("b", "2")];
+    let code = generate(Language::Httpie, &compact(&r));
+    assert!(!code.contains("--multipart") && code.contains("--raw='------TernaryWireFormBoundary"), "{code}");
+    assert!(code.contains("\r\nC:\\=x\r\n"), "{code}");
+    let items: Vec<_> = httpie_items(&code).iter().map(|i| httpie_item(i)).collect();
+    assert_eq!(items, [s("Content-Type", ":", &format!("multipart/form-data; boundary={BOUNDARY}"))], "{code}");
+
+    // A body starting with `-` is no option.
+    let mut r = HttpRequest::new("POST", "https://h.test/");
+    r.body = Body::raw_text("-----BEGIN KEY-----", RawLanguage::Text);
+    let code = generate(Language::Httpie, &compact(&r));
+    assert!(code.starts_with("http --follow --raw='-----BEGIN KEY-----' POST 'https://h.test/'"), "{code}");
+}
