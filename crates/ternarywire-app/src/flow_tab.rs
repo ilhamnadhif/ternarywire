@@ -628,18 +628,31 @@ fn autosave(app: &mut TernaryWireApp, ui: &Ui, tab: &mut FlowTab) {
         ui.ctx().request_repaint_after(wait);
         return;
     }
-    tab.last_edit = None;
-    if !tab.dirty() && tab.path.is_some() {
-        return;
+    if tab.flush(app.ws.root()) {
+        app.sidebar.flows_dirty = true;
     }
-    match ternarywire_flows::storage::save(app.ws.root(), &tab.flow) {
-        Ok(path) => {
-            tab.path = Some(path);
-            tab.saved = tab.flow.clone();
-            tab.error = None;
-            app.sidebar.flows_dirty = true;
+}
+
+impl FlowTab {
+    /// Writes edits the autosave has not written yet (it waits for a pause
+    /// in editing; the tab may close or the app quit before). Returns
+    /// whether the flow file was written.
+    pub fn flush(&mut self, root: &std::path::Path) -> bool {
+        if self.last_edit.take().is_none() || (!self.dirty() && self.path.is_some()) {
+            return false;
         }
-        Err(e) => tab.error = Some(e.to_string()),
+        match ternarywire_flows::storage::save(root, &self.flow) {
+            Ok(path) => {
+                self.path = Some(path);
+                self.saved = self.flow.clone();
+                self.error = None;
+                true
+            }
+            Err(e) => {
+                self.error = Some(e.to_string());
+                false
+            }
+        }
     }
 }
 

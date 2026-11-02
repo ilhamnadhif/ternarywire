@@ -747,6 +747,8 @@ impl TernaryWireApp {
     }
 
     pub fn open_workspace(&mut self, path: PathBuf, create_name: Option<String>) {
+        // New flows get their file (and a place in the session) first.
+        self.flush_flows();
         crate::dialogs::save_session(self);
         self.ws.flush_blocking();
         let result = match create_name {
@@ -846,7 +848,12 @@ impl TernaryWireApp {
             TabKind::Mock(t) => t.stop(&self.rt),
             TabKind::Webhook(mut t) => t.stop(&self.rt),
             TabKind::Ai(mut t) => t.cancel(),
-            TabKind::Flow(mut t) => t.stop(),
+            TabKind::Flow(mut t) => {
+                if t.flush(self.ws.root()) {
+                    self.sidebar.flows_dirty = true;
+                }
+                t.stop();
+            }
             TabKind::Capture(mut t) => t.stop(&self.rt),
             TabKind::WebSocket(t) => drop(t),
             _ => {}
@@ -2510,7 +2517,19 @@ pub struct DrawnFrame {
 }
 
 impl TernaryWireApp {
+    /// Writes the flow edits the autosave has not written yet.
+    fn flush_flows(&mut self) {
+        for tab in &mut self.tabs {
+            if let TabKind::Flow(f) = &mut tab.kind
+                && f.flush(self.ws.root())
+            {
+                self.sidebar.flows_dirty = true;
+            }
+        }
+    }
+
     fn shutdown(&mut self) {
+        self.flush_flows();
         crate::dialogs::save_session(self);
         self.ws.flush_blocking();
         self.persist_settings();
@@ -3058,5 +3077,25 @@ mod tests {
         assert!(t.running.is_some());
         press(&mut app, Key::Enter, Modifiers::COMMAND);
         assert!(cancel.is_cancelled(), "⌘↩ still cancels the send");
+    }
+
+    /// Flow edits are written when the tab closes or the app quits, also
+    /// within the autosave's pause after an edit (they used to be lost).
+    #[test]
+    fn flow_edits_are_saved_on_close_and_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let names = |app: &TernaryWireApp| {
+            let mut names: Vec<String> =
+                ternarywire_flows::storage::list(app.ws.root()).0.into_iter().map(|f| f.flow.name).collect();
+            names.sort();
+            names
+        };
+        let id = app.add_tab(TabKind::Flow(Box::new(crate::flow_tab::FlowTab::blank("Draft"))));
+        app.close_tab(app.tab_index(id).unwrap());
+        assert_eq!(names(&app), ["Draft"]);
+        app.add_tab(TabKind::Flow(Box::new(crate::flow_tab::FlowTab::blank("Second"))));
+        app.shutdown();
+        assert_eq!(names(&app), ["Draft", "Second"]);
     }
 }
