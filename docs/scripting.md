@@ -538,9 +538,20 @@ size and time limits are `EngineConfig::package_module_limit`,
   `crypto-js`).
 - Package fetching uses the system proxy and the system's trusted
   certificates; the custom proxy and CA settings for requests do not apply.
+- `{{vault:name}}` references are resolved in every request a script sends
+  or changes (`pm.sendRequest`, `pm.request` in pre-request scripts) exactly
+  as in saved requests, whatever host the request goes to: there is no
+  per-domain allow list for vault secrets yet. Only run scripts and
+  collections you trust with the vault secrets they can name.
 - Fetched packages run with the same sandbox limits as scripts, but their
   top-level code is not interrupted by the script timeout (the loop-iteration
-  limit still applies).
+  limit still applies). The same holds for code that runs after the first
+  `await` or inside callbacks the engine calls itself (`Array.prototype.map`,
+  `sort`, `JSON.parse` revivers, ...): it is stopped by the loop-iteration
+  and recursion limits, and by the timeout only at its next `pm.*`, console
+  or timer call; in the app and the CLI its worker process is killed once it
+  runs past the timeout.
+  Package Library CommonJS files are interrupted like scripts.
 - A package whose top-level `await` does not settle while the job runs fails
   to load.
 
