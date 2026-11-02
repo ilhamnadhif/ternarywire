@@ -2311,3 +2311,43 @@ async fn ai_block_mcp_servers_inherit_the_collection_auth() {
     let seen = mock.mcp_auth.lock().unwrap().clone();
     assert!(!seen.is_empty() && seen.iter().all(|a| a == "Bearer collection-secret"), "{seen:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_reached_again_from_its_done_path_is_a_cycle() {
+    let (base, _) = server().await;
+    // `a` is in the body and also runs after the loop: its edge back into
+    // the loop ends an iteration, but after `done` it starts the loop again.
+    let f = flow(
+        vec![count_loop("loop", "2"), log("a", "x")],
+        &[("start", "next", "loop"), ("loop", "item", "a"), ("loop", "done", "a"), ("a", "next", "loop")],
+    );
+    let diags = validate(&f, None);
+    assert_eq!(codes(&diags, "loop"), ["cycle"], "{diags:#?}");
+    assert_eq!(codes(&diags, "a"), ["cycle"], "{diags:#?}");
+    let env = FlowEnv { services: services(), collections: Vec::new(), base_dir: None };
+    let opts = FlowRunOptions { max_steps: Some(40), ..Default::default() };
+    let r = run_with(&f, &env, &base, opts, &CancellationToken::new()).await.result;
+    assert!(r.errors[0].contains("stopped after 40 steps"), "{:?}", r.errors);
+
+    // Back edges of nested loops and a path after the inner loop that
+    // returns to the outer one are no cycles.
+    let f = flow(
+        vec![count_loop("outer", "2"), count_loop("inner", "2"), log("a", "a"), log("b", "b"), log("end", "end")],
+        &[
+            ("start", "next", "outer"),
+            ("outer", "item", "inner"),
+            ("inner", "item", "a"),
+            ("a", "next", "inner"),
+            ("inner", "done", "b"),
+            ("b", "next", "outer"),
+            ("outer", "done", "end"),
+        ],
+    );
+    let diags = validate(&f, None);
+    assert!(!has_errors(&diags), "{diags:#?}");
+    let r = run(&f, &base, &[]).await.result;
+    assert!(r.success, "{r:#?}");
+    assert_eq!(step(&r, "a").len(), 4);
+    assert_eq!(step(&r, "end").len(), 1);
+}
+

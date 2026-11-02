@@ -130,13 +130,22 @@ pub(crate) fn loop_bodies(flow: &Flow) -> HashMap<String, HashSet<String>> {
 /// Blocks on cycles that do not close through a Loop (an edge from a loop's
 /// body back into the loop, or into any `break` port, is fine).
 fn cycle_blocks(flow: &Flow, bodies: &HashMap<String, HashSet<String>>) -> Vec<String> {
-    let edges: Vec<(usize, &Edge)> = valid_edges(flow)
+    let valid = valid_edges(flow);
+    let back_edge = |e: &Edge| bodies.get(&e.to_block).is_some_and(|body| body.contains(&e.from_block));
+    // What runs after each loop is done (a back edge ends the path while its
+    // loop runs). A body block reached from there is no longer in the loop:
+    // its edge back into the loop starts it again, every time.
+    let forward: Vec<(usize, &Edge)> =
+        valid.iter().copied().filter(|(_, e)| e.to_port != PORT_BREAK && !back_edge(e)).collect();
+    let after: HashMap<&str, HashSet<String>> = bodies
+        .keys()
+        .map(|id| (id.as_str(), reachable(&forward, &[(id.as_str(), Some(PORT_DONE))], Some(id))))
+        .collect();
+    let edges: Vec<(usize, &Edge)> = valid
         .into_iter()
         .filter(|(_, e)| {
-            if e.to_port == PORT_BREAK {
-                return false;
-            }
-            !bodies.get(&e.to_block).map(|body| body.contains(&e.from_block)).unwrap_or(false)
+            e.to_port != PORT_BREAK
+                && (!back_edge(e) || after.get(e.to_block.as_str()).is_some_and(|a| a.contains(&e.from_block)))
         })
         .collect();
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
