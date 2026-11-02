@@ -146,9 +146,13 @@ pub struct Tab {
 /// Console lines kept (the latest).
 pub const MAX_CONSOLE: usize = 5000;
 
+/// Messages from background work. Those that change the workspace (variables,
+/// history, tokens) carry `ws`, the [`TernaryWireApp::ws_gen`] they started
+/// in: after a workspace switch they belong to a workspace that is closed.
 pub enum Msg {
     Request {
         tab: u64,
+        ws: u64,
         exec: Box<Execution>,
         before: VariableScopes,
         after: VariableScopes,
@@ -163,6 +167,7 @@ pub enum Msg {
     },
     RunFinished {
         tab: u64,
+        ws: u64,
         before: VariableScopes,
         after: VariableScopes,
         collection: Id,
@@ -171,6 +176,7 @@ pub enum Msg {
         persist: bool,
     },
     Token {
+        ws: u64,
         owner: String,
         result: Result<OAuth2Token, String>,
     },
@@ -234,6 +240,7 @@ pub enum Msg {
     /// A protocol tab's script finished (FR-S7).
     ProtoScript {
         tab: u64,
+        ws: u64,
         run: Box<crate::proto_common::ScriptRun>,
     },
     Toast(String, bool),
@@ -274,6 +281,8 @@ pub struct TernaryWireApp {
     pub settings: AppSettings,
     pub settings_path: PathBuf,
     pub ws: WsState,
+    /// Counts workspace switches (see [`Msg`]).
+    pub ws_gen: u64,
     pub http: Arc<HttpEngine>,
     pub scripts: Arc<dyn ScriptEngine>,
     pub tabs: Vec<Tab>,
@@ -538,6 +547,7 @@ impl TernaryWireApp {
             settings,
             settings_path,
             ws,
+            ws_gen: 0,
             http,
             scripts,
             tabs: Vec::new(),
@@ -757,6 +767,9 @@ impl TernaryWireApp {
             self.close_tab(self.tabs.len() - 1);
         }
         self.ws = ws;
+        // Work the old tabs started may still send results; they are dropped.
+        self.ws_gen += 1;
+        self.pending_tokens.clear();
         self.http = Arc::new(Self::engine(&self.settings, &self.ws));
         self.attach_external_secrets(false);
         self.active = 0;
@@ -1008,6 +1021,7 @@ impl TernaryWireApp {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let base = self.ws.root().to_path_buf();
+        let ws = self.ws_gen;
         self.rt.spawn(async move {
             let mut vars = before.clone();
             let input = ExecuteInput {
@@ -1021,6 +1035,7 @@ impl TernaryWireApp {
             let exec = ternarywire_runner::execute(&services, input, &mut vars, &cancel).await;
             let _ = tx.send(Msg::Request {
                 tab: id,
+                ws,
                 exec: Box::new(exec),
                 before,
                 after: vars,
@@ -1062,6 +1077,7 @@ impl TernaryWireApp {
         let services = self.services();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
+        let ws = self.ws_gen;
         self.rt.spawn(async move {
             let mut vars = before.clone();
             let cancel = CancellationToken::new();
@@ -1079,6 +1095,7 @@ impl TernaryWireApp {
             exec.response = Some(response);
             let _ = tx.send(Msg::Request {
                 tab: id,
+                ws,
                 exec: Box::new(exec),
                 before,
                 after: vars,
@@ -1107,6 +1124,7 @@ impl TernaryWireApp {
         let ctx = self.ctx.clone();
         let http = self.http.clone();
         let vault = self.ws.vault();
+        let ws = self.ws_gen;
         self.rt.spawn(async move {
             let resolved = tokio::task::spawn_blocking(move || {
                 let resolver = ternarywire_core::variables::Resolver::new(&scopes).with_vault(vault.as_ref());
@@ -1125,7 +1143,7 @@ impl TernaryWireApp {
                         .map_err(|e| e.to_string())
                 }
             };
-            let _ = tx.send(Msg::Token { owner, result });
+            let _ = tx.send(Msg::Token { ws, owner, result });
             ctx.request_repaint();
         });
     }
@@ -1145,7 +1163,13 @@ impl TernaryWireApp {
     fn handle_msgs(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Request { tab, exec, before, after, collection, env, rerun } => {
+                // The workspace they were for is closed (its tabs too).
+                Msg::Request { ws, .. }
+                | Msg::RunFinished { ws, .. }
+                | Msg::Token { ws, .. }
+                | Msg::ProtoScript { ws, .. }
+                    if ws != self.ws_gen => {}
+                Msg::Request { tab, exec, before, after, collection, env, rerun, .. } => {
                     self.ws.apply_var_changes(collection.as_deref(), env.as_deref(), &before, &after);
                     self.console.extend(exec.console.iter().cloned());
                     self.trim_console();
@@ -1194,7 +1218,7 @@ impl TernaryWireApp {
                         t.on_event(*event);
                     }
                 }
-                Msg::RunFinished { tab, before, after, collection, env, persist } => {
+                Msg::RunFinished { tab, before, after, collection, env, persist, .. } => {
                     if persist {
                         self.ws.apply_var_changes(Some(&collection), env.as_deref(), &before, &after);
                     }
@@ -1205,7 +1229,7 @@ impl TernaryWireApp {
                         t.finished();
                     }
                 }
-                Msg::Token { owner, result } => {
+                Msg::Token { owner, result, .. } => {
                     self.pending_tokens.remove(&owner);
                     match result {
                         Ok(token) => {
@@ -1331,7 +1355,7 @@ impl TernaryWireApp {
                         t.on_msg(event);
                     }
                 }
-                Msg::ProtoScript { tab, run } => {
+                Msg::ProtoScript { tab, run, .. } => {
                     self.ws.apply_var_changes(
                         run.collection.as_deref(),
                         run.env.as_deref(),
@@ -2412,6 +2436,7 @@ impl TernaryWireApp {
             settings,
             settings_path: root.join("settings.json"),
             ws,
+            ws_gen: 0,
             http,
             scripts: Arc::new(ternarywire_script::BoaEngine::new()),
             tabs: Vec::new(),
@@ -2682,6 +2707,7 @@ mod tests {
         };
         let msg = Msg::Request {
             tab: 0,
+            ws: 0,
             exec: Box::new(exec),
             after: before.clone(),
             before,
@@ -2791,6 +2817,68 @@ mod tests {
         assert!(cancel.is_cancelled());
     }
 
+    /// A request cancelled by a workspace switch still reports what its
+    /// scripts set and its history entry, and a token may still arrive: none
+    /// of it may land in the new workspace (whose secrets would not even mask
+    /// the old workspace's in the history).
+    #[test]
+    fn results_from_a_closed_workspace_are_dropped() {
+        use ternarywire_core::script::{ScriptEvent, ScriptOutcome};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(&dir.path().join("one"));
+        let old = app.ws_gen;
+        let other = WsState::for_test(&dir.path().join("two"));
+        let other_root = other.root().to_path_buf();
+        app.switch_workspace(other, &other_root);
+        let before = VariableScopes::default();
+        let mut after = before.clone();
+        after.globals.insert("token".into(), "s3cr3t-token".into());
+        let request = |ws: u64| Msg::Request {
+            tab: 1,
+            ws,
+            exec: Box::new(Execution {
+                request: Some(HttpRequest::new("GET", "https://api.test/x?key=s3cr3t-token")),
+                ..Default::default()
+            }),
+            before: before.clone(),
+            after: after.clone(),
+            collection: None,
+            env: None,
+            rerun: false,
+        };
+        let script = crate::proto_common::ScriptRun {
+            event: ScriptEvent::PreRequest,
+            outcome: ScriptOutcome { variables: after.clone(), ..Default::default() },
+            before: before.clone(),
+            collection: None,
+            env: None,
+            name: "ws".into(),
+        };
+        let token = OAuth2Token { access_token: "tok".into(), ..Default::default() };
+        app.tx.send(request(old)).unwrap();
+        app.tx.send(Msg::ProtoScript { tab: 1, ws: old, run: Box::new(script) }).unwrap();
+        app.tx.send(Msg::Token { ws: old, owner: "req".into(), result: Ok(token) }).unwrap();
+        let finished = Msg::RunFinished {
+            tab: 1,
+            ws: old,
+            before: before.clone(),
+            after: after.clone(),
+            collection: "c".into(),
+            env: None,
+            persist: true,
+        };
+        app.tx.send(finished).unwrap();
+        app.pump_messages();
+        assert!(app.ws.history.is_empty());
+        assert!(app.ws.data.globals.is_empty(), "{:?}", app.ws.data.globals);
+        assert!(TokenStore::get(app.ws.secrets.as_ref(), "req").is_none());
+        // What the new workspace's own tabs send still applies.
+        app.tx.send(request(app.ws_gen)).unwrap();
+        app.pump_messages();
+        assert_eq!(app.ws.history.len(), 1);
+        assert_eq!(app.ws.data.globals.len(), 1);
+    }
+
     /// On-message scripts of a busy stream add console lines, test results
     /// and errors for every message; the console and the tab keep the latest.
     #[test]
@@ -2816,7 +2904,7 @@ mod tests {
                 env: None,
                 name: "mqtt".into(),
             };
-            app.tx.send(Msg::ProtoScript { tab: id, run: Box::new(run) }).unwrap();
+            app.tx.send(Msg::ProtoScript { tab: id, ws: 0, run: Box::new(run) }).unwrap();
         }
         app.handle_msgs();
         assert_eq!(app.console.len(), MAX_CONSOLE);
@@ -2948,6 +3036,7 @@ mod tests {
         t.start_running(cancel.clone());
         let rerun = Msg::Request {
             tab: id,
+            ws: 0,
             exec: Box::default(),
             before: VariableScopes::default(),
             after: VariableScopes::default(),

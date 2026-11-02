@@ -1678,10 +1678,11 @@ pub fn run_scripts(
     let tx = app.tx.clone();
     let ctx = app.ctx.clone();
     let name = item.name.clone();
+    let ws = app.ws_gen;
     app.rt.spawn_blocking(move || {
         let outcome = engine.run(job);
         let run = ScriptRun { event, outcome, before, collection, env, name };
-        let _ = tx.send(crate::app::Msg::ProtoScript { tab: tab_id, run: Box::new(run) });
+        let _ = tx.send(crate::app::Msg::ProtoScript { tab: tab_id, ws, run: Box::new(run) });
         ctx.request_repaint();
     });
     true

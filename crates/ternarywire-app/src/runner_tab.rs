@@ -221,6 +221,7 @@ fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
     let ctx = app.ctx.clone();
     let collection_id = tab.collection.clone();
     let persist = tab.persist_vars;
+    let ws = app.ws_gen;
     match tab.mode {
         Mode::Functional => {
             let iterations = tab.iterations.max(1);
@@ -257,6 +258,7 @@ fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
                 }
                 let _ = tx.send(Msg::RunFinished {
                     tab: tab_id,
+                    ws,
                     before,
                     after: vars,
                     collection: collection_id,
