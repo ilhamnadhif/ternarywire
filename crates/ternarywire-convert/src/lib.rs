@@ -8,8 +8,10 @@
 //! * GraphQL helpers: introspection parsing, autocomplete, query skeletons.
 //!
 //! Nothing here performs I/O, except the explicit `docs::write_html_site`
-//! and `smithy::resolve_maven_dependencies` (reads jars of the local Maven
-//! repository, never the network).
+//! and the Smithy Maven reader (`smithy::resolve_maven_dependencies` and
+//! `smithy::default_maven_repository`), which reads `~/.m2/settings.xml` and
+//! the jars and `.pom` files of the local Maven repository, never the
+//! network.
 
 pub mod codegen;
 pub mod curl;
