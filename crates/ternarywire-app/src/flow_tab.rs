@@ -141,6 +141,9 @@ pub struct FlowTab {
     run: RunState,
     diagnostics: Vec<Diagnostic>,
     inputs: HashMap<String, String>,
+    /// Defaults of the flow inputs as typed, by input, with the value each
+    /// was read as (see [`default_text`]).
+    typed_defaults: HashMap<usize, (String, Value)>,
     error: Option<String>,
     /// Automation: run on the next frame.
     pub auto_run: bool,
@@ -172,6 +175,7 @@ impl FlowTab {
             run: RunState::default(),
             diagnostics: Vec::new(),
             inputs: HashMap::new(),
+            typed_defaults: HashMap::new(),
             error: None,
             auto_run: false,
             fit: true,
@@ -2061,6 +2065,17 @@ fn endpoint_row(ui: &mut Ui, block: Option<&Block>, port: &str) -> Response {
     resp
 }
 
+/// The text of a flow input's default: as typed while it still stands for
+/// the default, so text that is not JSON (stored as a string) is not shown
+/// quoted after the first key press.
+fn default_text(typed: Option<(String, Value)>, default: &Value) -> String {
+    match typed {
+        Some((text, read_as)) if read_as == *default => text,
+        _ if default.is_null() => String::new(),
+        _ => serde_json::to_string(default).unwrap_or_default(),
+    }
+}
+
 fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
     let p = theme::pal(ui);
     let edges = tab.flow.edges.len();
@@ -2117,11 +2132,7 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
                         ui.allocate_ui_with_layout(vec2(label_w, 24.0), Layout::left_to_right(Align::Center), |ui| {
                             ui.label(RichText::new(tr("Default")).color(p.text_muted).small());
                         });
-                        let mut default = if input.default.is_null() {
-                            String::new()
-                        } else {
-                            serde_json::to_string(&input.default).unwrap_or_default()
-                        };
+                        let mut default = default_text(tab.typed_defaults.remove(&i), &input.default);
                         if ui
                             .add(
                                 egui::TextEdit::singleline(&mut default)
@@ -2137,6 +2148,7 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
                                 serde_json::from_str(&default).unwrap_or(Value::String(default.clone()))
                             };
                         }
+                        tab.typed_defaults.insert(i, (default, input.default.clone()));
                     });
                     let value = tab.inputs.entry(input.name.clone()).or_default();
                     ui.horizontal(|ui| {
@@ -3044,6 +3056,25 @@ mod tests {
         let answers = tab.run.log.iter().filter(|l| l.block.as_deref() == Some("B") && l.text == "Hello").count();
         assert_eq!(answers, 1, "the answer stays in the log");
         assert_eq!(tail("first line\nand the end", 7), "…the end");
+    }
+
+    /// Typing a default that is not JSON (`abc`) keeps the text as typed;
+    /// it used to turn into `"abc"` after the first key press.
+    #[test]
+    fn input_defaults_keep_the_typed_text() {
+        let mut typed = None;
+        let mut default = Value::Null;
+        for c in "ab c".chars() {
+            let mut text = default_text(typed.take(), &default);
+            text.push(c);
+            default = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
+            typed = Some((text, default.clone()));
+        }
+        assert_eq!(default, Value::String("ab c".into()));
+        assert_eq!(default_text(typed, &default), "ab c");
+        // A default set elsewhere is shown as JSON.
+        assert_eq!(default_text(None, &serde_json::json!({"a": 1})), "{\"a\":1}");
+        assert_eq!(default_text(Some(("x".into(), Value::Null)), &Value::from(2)), "2");
     }
 
     #[test]
