@@ -795,6 +795,12 @@ impl TernaryWireApp {
         id
     }
 
+    /// The unsaved request of tab `id` counts as edited (a restored tab that
+    /// was edited before the restart): closing it asks.
+    pub fn mark_scratch_edited(&mut self, id: u64) {
+        self.scratch_baseline.remove(&id);
+    }
+
     pub fn tab_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }

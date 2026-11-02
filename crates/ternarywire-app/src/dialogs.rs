@@ -790,10 +790,16 @@ enum SavedTab {
     Request {
         location: Option<(Id, Id)>,
         scratch: Option<RequestItem>,
+        /// The unsaved request was edited since its tab opened (see
+        /// [`TernaryWireApp::tab_has_unsaved_work`]); older files did not say.
+        #[serde(default = "edited_unknown")]
+        edited: bool,
     },
     Websocket {
         location: Option<(Id, Id)>,
         scratch: Option<RequestItem>,
+        #[serde(default = "edited_unknown")]
+        edited: bool,
     },
     Container {
         collection: Id,
@@ -815,7 +821,15 @@ enum SavedTab {
     Proto {
         location: Option<(Id, Id)>,
         scratch: Option<RequestItem>,
+        #[serde(default = "edited_unknown")]
+        edited: bool,
     },
+}
+
+/// Closing a restored tab asks when the session does not say whether it
+/// was edited.
+fn edited_unknown() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -847,14 +861,16 @@ fn scrub(item: Option<&RequestItem>) -> Option<RequestItem> {
 
 /// Writes the open tabs (unless unchanged since the last write).
 pub fn save_session(app: &mut TernaryWireApp) {
-    let saved = app.tabs.iter().map(|t| match &t.kind {
+    let saved = app.tabs.iter().enumerate().map(|(i, t)| match &t.kind {
         TabKind::Request(r) => Some(SavedTab::Request {
             location: r.location.as_ref().map(|l| (l.collection.clone(), l.item.clone())),
             scratch: scrub(r.scratch.as_ref()),
+            edited: app.tab_has_unsaved_work(i),
         }),
         TabKind::WebSocket(r) => Some(SavedTab::Websocket {
             location: r.location.as_ref().map(|l| (l.collection.clone(), l.item.clone())),
             scratch: scrub(r.scratch.as_ref()),
+            edited: app.tab_has_unsaved_work(i),
         }),
         TabKind::Container(c) => {
             Some(SavedTab::Container { collection: c.collection.clone(), folder: c.folder.clone() })
@@ -869,7 +885,11 @@ pub fn save_session(app: &mut TernaryWireApp) {
             .map(|l| (l.collection.clone(), l.item.clone()))
             .map(Some)
             .or_else(|| other.scratch().map(|_| None))
-            .map(|location| SavedTab::Proto { location, scratch: scrub(other.scratch()) }),
+            .map(|location| SavedTab::Proto {
+                location,
+                scratch: scrub(other.scratch()),
+                edited: app.tab_has_unsaved_work(i),
+            }),
     });
     // `active` indexes the saved tabs: the active tab, or the closest saved
     // one before it when it is not saved itself.
@@ -895,6 +915,12 @@ pub fn save_session(app: &mut TernaryWireApp) {
 pub fn restore_session(app: &mut TernaryWireApp) {
     let Ok(bytes) = std::fs::read(session_path(app)) else { return };
     let Ok(s) = serde_json::from_slice::<Session>(&bytes) else { return };
+    // A restored unsaved tab that was edited before keeps counting as edited.
+    let restore_edited = |app: &mut TernaryWireApp, id: u64, edited: bool| {
+        if edited {
+            app.mark_scratch_edited(id);
+        }
+    };
     // Saved tabs that cannot be restored are skipped, so the active one is
     // found by tab id rather than by position.
     let mut active_id = None;
@@ -909,8 +935,9 @@ pub fn restore_session(app: &mut TernaryWireApp) {
                     }))));
                 }
             }
-            SavedTab::Request { location: None, scratch: Some(item) } => {
-                app.add_tab(TabKind::Request(Box::new(crate::request_tab::RequestTab::scratch(item))));
+            SavedTab::Request { location: None, scratch: Some(item), edited } => {
+                let id = app.add_tab(TabKind::Request(Box::new(crate::request_tab::RequestTab::scratch(item))));
+                restore_edited(app, id, edited);
             }
             SavedTab::Websocket { location: Some((c, i)), .. } => {
                 if app.ws.data.collection(&c).and_then(|col| col.find(&i)).is_some() {
@@ -920,8 +947,9 @@ pub fn restore_session(app: &mut TernaryWireApp) {
                     }))));
                 }
             }
-            SavedTab::Websocket { location: None, scratch: Some(item) } => {
-                app.add_tab(TabKind::WebSocket(Box::new(crate::ws_tab::WsTab::scratch(item))));
+            SavedTab::Websocket { location: None, scratch: Some(item), edited } => {
+                let id = app.add_tab(TabKind::WebSocket(Box::new(crate::ws_tab::WsTab::scratch(item))));
+                restore_edited(app, id, edited);
             }
             SavedTab::Container { collection, folder } => {
                 if app.ws.data.collection(&collection).is_some() {
@@ -943,8 +971,9 @@ pub fn restore_session(app: &mut TernaryWireApp) {
                 }
             }
             SavedTab::Flow { path } if path.is_file() => crate::flow_tab::open_flow(app, path),
-            SavedTab::Proto { location, scratch } => {
+            SavedTab::Proto { location, scratch, edited } => {
                 let location = location.map(|(collection, item)| ItemRef { collection, item });
+                let edited = edited && location.is_none();
                 let kind = match (&location, &scratch) {
                     (Some(l), _) => app
                         .ws
@@ -956,7 +985,8 @@ pub fn restore_session(app: &mut TernaryWireApp) {
                     (None, None) => None,
                 };
                 if let Some(tab) = kind.and_then(|k| TabKind::for_item(location, scratch, &k)) {
-                    app.add_tab(tab);
+                    let id = app.add_tab(tab);
+                    restore_edited(app, id, edited);
                 }
             }
             _ => {}
@@ -3957,6 +3987,30 @@ mod tests {
         restore_session(&mut app);
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(active_title(&app), "c");
+    }
+
+    /// An unsaved request edited before a restart still counts as edited
+    /// after it (closing it asks); an untouched one still just closes.
+    #[test]
+    fn restored_tabs_remember_unsaved_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        scratch(&mut app, "edited");
+        scratch(&mut app, "untouched");
+        if let TabKind::Request(t) = &mut app.tabs[0].kind
+            && let Some(item) = t.scratch.as_mut()
+            && let ternarywire_core::model::RequestKind::Http(h) = &mut item.request
+        {
+            h.set_url("http://edited.test/typed".into());
+        }
+        for _ in 0..2 {
+            save_session(&mut app);
+            app.tabs.clear();
+            restore_session(&mut app);
+            assert_eq!(app.tabs.len(), 2);
+            assert!(app.tab_has_unsaved_work(0));
+            assert!(!app.tab_has_unsaved_work(1));
+        }
     }
 
     fn key(key: egui::Key) -> egui::Event {
