@@ -277,6 +277,9 @@ async fn client_for_uses_custom_proxy_and_checks_ca() {
     ext.set_credential("p1", "token", "root-token");
     assert_eq!(ext.resolve_reference("p1", "app/db#password").await.unwrap(), "s3cr3t");
     assert!(st.requests.load(Ordering::SeqCst) >= 1);
+    // Plain http:// to another machine works, with a warning on the connection test.
+    let summary = ext.test_provider(&ext.provider("p1").unwrap()).await.unwrap();
+    assert!(summary.contains("\nWarning: The Vault address uses http://"), "{summary}");
 
     let certs = CertificateSettings { ca_enabled: true, ca_path: "/nonexistent/ca.pem".into(), ..Default::default() };
     let e = crate::client_for(&ProxySettings::default(), &certs).unwrap_err();

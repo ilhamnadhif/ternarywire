@@ -233,6 +233,40 @@ impl ProviderSettings {
     }
 }
 
+impl ProviderSettings {
+    /// A warning when the provider URL is plain `http://` to another
+    /// machine: the token (and the secrets) would cross the network
+    /// unencrypted. Loopback is fine, like the default address of a Vault
+    /// dev server (`http://127.0.0.1:8200`). Not an error, as a proxy or a
+    /// trusted network (a Connect server in the same cluster) may be meant.
+    pub fn cleartext_warning(&self) -> Option<String> {
+        let (what, value) = match self {
+            ProviderSettings::HashicorpVault(s) => ("Vault address", &s.address),
+            ProviderSettings::AwsSecretsManager(s) => ("AWS endpoint", &s.endpoint),
+            ProviderSettings::AzureKeyVault(s) => ("Key Vault URL", &s.vault_url),
+            ProviderSettings::OnePassword(s) if s.mode == OnePasswordMode::Connect => {
+                ("1Password Connect URL", &s.connect_url)
+            }
+            ProviderSettings::OnePassword(_) => return None,
+        };
+        let url = url::Url::parse(value.trim()).ok().filter(|u| u.scheme() == "http")?;
+        let loopback = match url.host()? {
+            url::Host::Ipv4(ip) => ip.is_loopback(),
+            url::Host::Ipv6(ip) => ip.is_loopback(),
+            url::Host::Domain(d) => {
+                let d = d.to_ascii_lowercase();
+                d == "localhost" || d.ends_with(".localhost")
+            }
+        };
+        (!loopback).then(|| {
+            format!(
+                "The {what} uses http://, so credentials and secrets travel unencrypted to {}; use https:// unless the network is trusted.",
+                url.host_str().unwrap_or_default()
+            )
+        })
+    }
+}
+
 pub(crate) fn check_url(what: &str, value: &str) -> Result<url::Url, SecretError> {
     let v = value.trim();
     if v.is_empty() {
@@ -481,5 +515,31 @@ mod tests {
         for k in ProviderKind::ALL {
             assert_eq!(k.default_settings().kind(), k);
         }
+    }
+
+    #[test]
+    fn plain_http_to_other_machines_is_flagged() {
+        let vault = |address: &str| {
+            ProviderSettings::HashicorpVault(VaultSettings { address: address.into(), ..Default::default() })
+        };
+        // The Vault dev server default, and loopback in general, is fine.
+        assert_eq!(ProviderSettings::HashicorpVault(VaultSettings::default()).cleartext_warning(), None);
+        for ok in ["http://localhost:8200", "http://vault.localhost", "http://[::1]:8200", "https://vault.example.com"]
+        {
+            assert_eq!(vault(ok).cleartext_warning(), None, "{ok}");
+        }
+        let w = vault("http://vault.example.com:8200").cleartext_warning().unwrap();
+        assert!(w.contains("Vault address") && w.contains("vault.example.com"), "{w}");
+        let connect = OnePasswordSettings {
+            mode: OnePasswordMode::Connect,
+            connect_url: "http://op-connect:8080".into(),
+            ..Default::default()
+        };
+        assert!(ProviderSettings::OnePassword(connect.clone()).cleartext_warning().is_some());
+        let cli = OnePasswordSettings { mode: OnePasswordMode::Cli, ..connect };
+        assert_eq!(ProviderSettings::OnePassword(cli).cleartext_warning(), None);
+        let aws = AwsSettings { endpoint: "http://10.0.0.5:4566".into(), ..Default::default() };
+        assert!(ProviderSettings::AwsSecretsManager(aws).cleartext_warning().is_some());
+        assert_eq!(ProviderSettings::AwsSecretsManager(AwsSettings::default()).cleartext_warning(), None);
     }
 }

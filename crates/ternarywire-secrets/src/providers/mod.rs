@@ -65,8 +65,20 @@ impl ProviderSettings {
     }
 }
 
+/// Logs [`ProviderSettings::cleartext_warning`] once per provider and URL.
+fn warn_cleartext(p: &ProviderConfig) {
+    static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    if let Some(w) = p.settings.cleartext_warning()
+        && WARNED.lock().unwrap_or_else(|e| e.into_inner()).insert(format!("{}\n{w}", p.id))
+    {
+        tracing::warn!(provider = %p.name, "{w}");
+    }
+}
+
 pub(crate) async fn fetch(env: &Env, p: &ProviderConfig, reference: &str) -> Result<String, SecretError> {
     p.settings.validate()?;
+    warn_cleartext(p);
     match &p.settings {
         ProviderSettings::HashicorpVault(s) => hashicorp::fetch(env, &p.id, s, reference).await,
         ProviderSettings::AwsSecretsManager(s) => aws::fetch(env, &p.id, s, reference).await,
@@ -77,12 +89,17 @@ pub(crate) async fn fetch(env: &Env, p: &ProviderConfig, reference: &str) -> Res
 
 pub(crate) async fn test(env: &Env, p: &ProviderConfig) -> Result<String, SecretError> {
     p.settings.validate()?;
-    match &p.settings {
+    let summary = match &p.settings {
         ProviderSettings::HashicorpVault(s) => hashicorp::test(env, &p.id, s).await,
         ProviderSettings::AwsSecretsManager(s) => aws::test(env, &p.id, s).await,
         ProviderSettings::AzureKeyVault(s) => azure::test(env, &p.id, s).await,
         ProviderSettings::OnePassword(s) => onepassword::test(env, &p.id, s).await,
-    }
+    }?;
+    // The connection test is where the settings are looked at.
+    Ok(match p.settings.cleartext_warning() {
+        Some(w) => format!("{summary}\nWarning: {w}"),
+        None => summary,
+    })
 }
 
 pub(crate) async fn browse(env: &Env, p: &ProviderConfig, path: &str) -> Result<Vec<BrowseEntry>, SecretError> {
