@@ -552,7 +552,8 @@ impl WorkspaceStore {
                 if !d.join(COLLECTION_FILE).is_file() {
                     continue;
                 }
-                match load_container(root, &d, COLLECTION_FILE, &mut index.written, &mut load_errors) {
+                let mut loaded = HashSet::from_iter(std::fs::canonicalize(&d));
+                match load_container(root, &d, COLLECTION_FILE, &mut index.written, &mut load_errors, &mut loaded) {
                     Ok((meta, items)) => {
                         let mut c = Collection {
                             id: meta.id,
@@ -902,22 +903,30 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// Managed files (and every directory) under `abs`, recursively.
 fn walk_managed(abs: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(abs) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        // The entry type needs no `stat` (10,000 files per save); symlinks
-        // are followed as before.
-        let is_dir = match e.file_type() {
-            Ok(t) if !t.is_symlink() => t.is_dir(),
-            _ => p.is_dir(),
-        };
-        if is_dir {
-            walk_managed(&p, files, dirs);
-            dirs.push(p);
-        } else if p.file_name().and_then(|n| n.to_str()).map(is_managed_file).unwrap_or(false) {
-            files.push(p);
+    // Canonical paths of the directories walked: a symlink back to one of
+    // them (an ancestor, say) would otherwise recurse without end.
+    fn walk(abs: &Path, canon: &Path, seen: &mut HashSet<PathBuf>, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(abs) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            // The entry type needs no `stat` (10,000 files per save); symlinks
+            // are followed as before.
+            let (is_dir, link) = match e.file_type() {
+                Ok(t) if !t.is_symlink() => (t.is_dir(), false),
+                _ => (p.is_dir(), true),
+            };
+            if is_dir {
+                let sub = if link { std::fs::canonicalize(&p).ok() } else { Some(canon.join(e.file_name())) };
+                let Some(sub) = sub.filter(|c| seen.insert(c.clone())) else { continue };
+                walk(&p, &sub, seen, files, dirs);
+                dirs.push(p);
+            } else if p.file_name().and_then(|n| n.to_str()).map(is_managed_file).unwrap_or(false) {
+                files.push(p);
+            }
         }
     }
+    let Ok(canon) = std::fs::canonicalize(abs) else { return };
+    walk(abs, &canon, &mut HashSet::from([canon.clone()]), files, dirs);
 }
 
 fn render_collection(
@@ -1001,12 +1010,15 @@ fn render_children(
     order
 }
 
+/// `loaded` holds the canonical paths of the folders loaded so far, so that
+/// a symlink back to one of them (an ancestor, say) cannot recurse forever.
 fn load_container(
     root: &Path,
     dir: &Path,
     meta_file: &str,
     written: &mut HashMap<PathBuf, u64>,
     errors: &mut Vec<String>,
+    loaded: &mut HashSet<PathBuf>,
 ) -> Result<(ContainerFile, Vec<Item>)> {
     let meta_path = dir.join(meta_file);
     let (meta, h): (ContainerFile, u64) = read_json(&meta_path)?;
@@ -1052,7 +1064,11 @@ fn load_container(
                 Err(e) => errors.push(e.to_string()),
             }
         } else if p.join(FOLDER_FILE).is_file() {
-            match load_container(root, &p, FOLDER_FILE, written, errors) {
+            if !std::fs::canonicalize(&p).is_ok_and(|c| loaded.insert(c)) {
+                errors.push(format!("{}: a link to a folder already loaded, skipped", p.display()));
+                continue;
+            }
+            match load_container(root, &p, FOLDER_FILE, written, errors, loaded) {
                 Ok((m, children)) => items.push(Item::Folder(Folder {
                     id: m.id,
                     name: m.name,
@@ -1705,6 +1721,37 @@ mod tests {
         }
         let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
         assert_eq!(ws.collections[0], c);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_back_to_a_parent_folder_do_not_recurse() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = SecretStore::memory();
+        let (store, _) = WorkspaceStore::create(dir.path(), "Test").unwrap();
+        let mut c = Collection::new("Api");
+        let mut users = Folder::new("Users");
+        let mut admin = Folder::new("Admin");
+        admin.items.push(RequestItem::new("Ban", HttpRequest::new("POST", "http://a/ban")).into());
+        users.items.push(admin.into());
+        c.items.push(users.into());
+        store.save_collection(&c, &secrets).unwrap();
+        let base = dir.path().join("collections/api");
+        // Links to an ancestor folder, to the folder itself and to the
+        // collection: each would be walked again and again.
+        std::os::unix::fs::symlink("..", base.join("users/admin/up")).unwrap();
+        std::os::unix::fs::symlink(".", base.join("users/admin/again")).unwrap();
+        std::os::unix::fs::symlink(".", base.join("self")).unwrap();
+        std::os::unix::fs::symlink("../api", base.join("users/root")).unwrap();
+        let (store, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ws.collections, vec![c.clone()]);
+        assert_eq!(ws.load_errors.len(), 2, "{:?}", ws.load_errors);
+        let mut c = ws.collections[0].clone();
+        c.description = "edited".into();
+        store.save_collection(&c, &secrets).unwrap();
+        let (_, ws) = WorkspaceStore::open(dir.path(), &secrets).unwrap();
+        assert_eq!(ws.collections, vec![c]);
+        assert!(base.join("users/admin/ban.request.json").is_file());
     }
 
     #[cfg(unix)]
