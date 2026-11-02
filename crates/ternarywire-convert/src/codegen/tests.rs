@@ -556,3 +556,13 @@ fn js_json_literal_only_when_it_sends_the_same_body() {
     }
     assert!(js_body("{\n  \"a\": [1, -2.5, 0.001, \"x\\\"y\\n\", null, true],\n  \"b\": {}\n}"));
 }
+
+#[test]
+fn rust_custom_methods_are_valid_byte_strings() {
+    // `b"..."` holds neither non-ASCII characters nor `\u{..}` escapes.
+    let p = compact(&HttpRequest::new("pürge\u{1}\"\\", "https://h.test/"));
+    let code = generate(Language::Rust, &p);
+    assert!(code.contains(r#"reqwest::Method::from_bytes(b"P\xc3\x9cRGE\x01\"\\")?"#), "{code}");
+    let code = generate(Language::Rust, &compact(&HttpRequest::new("PURGE", "https://h.test/")));
+    assert!(code.contains(r#"reqwest::Method::from_bytes(b"PURGE")?"#), "{code}");
+}

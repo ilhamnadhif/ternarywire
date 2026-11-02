@@ -748,8 +748,29 @@ fn rust_method(m: &str) -> String {
         "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "CONNECT" | "PATCH" | "TRACE" => {
             format!("reqwest::Method::{m}")
         }
-        other => format!("reqwest::Method::from_bytes({})?", dq(other, Unicode::Braces, false).replacen('"', "b\"", 1)),
+        other => format!("reqwest::Method::from_bytes({})?", rust_bytes(other)),
     }
+}
+
+/// A byte string literal. It cannot hold `\u{..}` escapes or non-ASCII
+/// characters, so those bytes are written as `\x..`.
+fn rust_bytes(s: &str) -> String {
+    let mut out = String::from("b\"");
+    for b in s.bytes() {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            b' '..=b'~' => out.push(char::from(b)),
+            _ => {
+                write!(out, "\\x{b:02x}").ok();
+            }
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn rust(v: &View) -> String {
