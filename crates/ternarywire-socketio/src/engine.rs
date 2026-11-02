@@ -41,7 +41,8 @@ use crate::packet::truncate;
 type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 type WsStream = ternarywire_http::ws::WsStream;
 
-/// How long the WebSocket probe may take before the session stays on polling.
+/// How long the WebSocket probe may take before the session stays on polling,
+/// and then how long the in-flight polling requests may take to end.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a clean close may take.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
@@ -953,7 +954,12 @@ impl Engine {
                     }
                 }
                 msg = ws_next(&mut self.probe_ws) => match msg {
-                    Some(Ok(Message::Text(t))) if t.as_str() == "3probe" => self.pausing = true,
+                    Some(Ok(Message::Text(t))) if t.as_str() == "3probe" => {
+                        // Pausing gets its own time: a slow probe must not leave
+                        // too little for the last polling request.
+                        self.pausing = true;
+                        self.probe_deadline = Some(Instant::now() + PROBE_TIMEOUT);
+                    }
                     Some(Ok(Message::Close(_))) | None => self.upgrade_failed("the server closed the probe connection".into()),
                     Some(Err(e)) => self.upgrade_failed(describe_ws(&e)),
                     Some(Ok(_)) => {}

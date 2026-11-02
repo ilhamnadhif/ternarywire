@@ -30,6 +30,10 @@ pub struct Options {
     pub polling: bool,
     pub websocket: bool,
     pub tls: bool,
+    /// Delay before answering `2probe`.
+    pub probe_delay_ms: u64,
+    /// Delay before the pending GET is flushed with a noop once probed.
+    pub noop_delay_ms: u64,
 }
 
 impl Default for Options {
@@ -41,6 +45,8 @@ impl Default for Options {
             polling: true,
             websocket: true,
             tls: false,
+            probe_delay_ms: 0,
+            noop_delay_ms: 0,
         }
     }
 }
@@ -445,13 +451,20 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         state.frames.lock().unwrap().push(t.to_string());
         match t.as_str() {
             "2probe" => {
+                if state.opts.probe_delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(state.opts.probe_delay_ms)).await;
+                }
                 if ws.send(Message::text("3probe")).await.is_err() {
                     return;
                 }
                 // Like engine.io: until the upgrade completes, flush any
                 // pending GET with a noop so the client can pause polling.
                 let sess = sess.clone();
+                let noop_delay = Duration::from_millis(state.opts.noop_delay_ms);
                 tokio::spawn(async move {
+                    if !noop_delay.is_zero() {
+                        tokio::time::sleep(noop_delay).await;
+                    }
                     while !sess.upgraded.load(Ordering::SeqCst) && !sess.closed.load(Ordering::SeqCst) {
                         if sess.polling.load(Ordering::SeqCst) && sess.out.lock().unwrap().is_empty() {
                             sess.push(Out::Text("6".into()));

@@ -278,6 +278,8 @@ async fn auto_upgrades_to_websocket_without_losing_messages() {
             assert_eq!(ev.incoming("echo").await, vec![json!(i)]);
         }
         wait_until("upgrade", || s.transport() == Some(ActiveTransport::WebSocket)).await;
+        // The client switches as it sends `5`; the server may read it a bit later.
+        wait_until("the server to see the upgrade", || server.frames().iter().any(|f| f == "5")).await;
         let frames = server.frames();
         let probe = frames.iter().position(|f| f == "2probe").expect("probe");
         let upgrade = frames.iter().position(|f| f == "5").expect("upgrade");
@@ -291,6 +293,24 @@ async fn auto_upgrades_to_websocket_without_losing_messages() {
         );
         assert!(ev.errors().is_empty(), "{:?}", ev.errors());
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_probe_leaves_time_for_the_last_polling_request() {
+    // The probe answer takes 7 s and the pending GET ends 4 s later: 11 s in
+    // all, more than the 10 s the probe and the pause may each take.
+    let server = common::start(Options { probe_delay_ms: 7_000, noop_delay_ms: 4_000, ..Default::default() }).await;
+    let (s, mut ev, _) = connect(config(server.url(), "/", SocketIoTransport::Auto, SocketIoVersion::V4)).await;
+    for _ in 0..60 {
+        if s.transport() == Some(ActiveTransport::WebSocket) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(s.transport(), Some(ActiveTransport::WebSocket), "{:?}", server.frames());
+    s.emit("echo", vec![json!("upgraded")], false);
+    assert_eq!(ev.incoming("echo").await, vec![json!("upgraded")]);
+    assert!(ev.errors().is_empty(), "{:?}", ev.errors());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
