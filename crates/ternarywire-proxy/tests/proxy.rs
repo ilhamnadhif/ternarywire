@@ -943,3 +943,34 @@ async fn intercepted_requests_name_the_server_they_reached() {
     proxy.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn aborted_tls_handshake_does_not_make_the_host_passthrough() {
+    let cert = ca_signed_cert();
+    let upstream = spawn_https(&cert, &[b"http/1.1"]).await;
+    let (proxy, ca) = start_proxy(|c| {
+        c.passthrough_on_tls_error = true;
+        c.extra_upstream_roots_pem = Some(cert.ca_pem.clone());
+    })
+    .await;
+    // A client that sends its ClientHello and hangs up mid-handshake.
+    let mut tunnel = connect_tunnel(&proxy, &format!("localhost:{}", upstream.port())).await;
+    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let mut hello = Vec::new();
+    rustls::ClientConnection::new(client_tls_config(ca.cert_pem()), name).unwrap().write_tls(&mut hello).unwrap();
+    tunnel.write_all(&hello).await.unwrap();
+    let mut reply = [0u8; 512];
+    assert!(tunnel.read(&mut reply).await.unwrap() > 0, "the proxy answers the ClientHello");
+    drop(tunnel);
+    let failed = wait_until(&proxy, "the failed handshake", |e| e.iter().any(|e| e.state == EntryState::Failed)).await;
+    let error = failed[0].error.as_deref().unwrap();
+    assert!(error.contains("handshake with the client failed") && !error.contains("trust"), "{error}");
+    assert!(proxy.tls_failed_hosts().is_empty());
+
+    // The host is still decrypted.
+    let http = client(&proxy, Some(ca.cert_pem()));
+    let r = http.get(format!("https://localhost:{}/hello", upstream.port())).send().await.unwrap();
+    assert_eq!(r.text().await.unwrap(), "hello world");
+    let entries = finished(&proxy, 2).await;
+    assert!(entries[1].tls_intercepted);
+    proxy.stop().await;
+}

@@ -825,13 +825,19 @@ async fn tls_intercept(
     let tls = match tokio_rustls::StartHandshake::from_parts(accepted, io).into_stream(config).await {
         Ok(tls) => tls,
         Err(e) => {
+            let rejected = rejects_certificate(&e);
             if let Some(ex) = shared.begin_tunnel(peer, &host, port, Version::HTTP_11, None, "TLS interception", true) {
-                ex.fail(format!(
-                    "TLS handshake with the client failed: {e}. The client probably does not trust the TernaryWire CA \
-                     (or it pins certificates for this host)."
-                ));
+                ex.fail(if rejected {
+                    format!(
+                        "TLS handshake with the client failed: {e}. The client probably does not trust the TernaryWire \
+                         CA (or it pins certificates for this host)."
+                    )
+                } else {
+                    format!("TLS handshake with the client failed: {e}")
+                });
             }
-            if shared.cfg.passthrough_on_tls_error {
+            // A client that just went away (or broke off) says nothing about trust.
+            if rejected && shared.cfg.passthrough_on_tls_error {
                 shared.tls_failed.lock().insert(host);
             }
             return;
@@ -841,6 +847,23 @@ async fn tls_intercept(
     let upstream_sni = sni.filter(|s| s != &host);
     let origin = Arc::new(Origin { https: true, host, port, sni: upstream_sni });
     serve_conn(shared, Ctx { peer, origin: Some(origin), targets: None }, TokioIo::new(tls), negotiated_h2).await;
+}
+
+/// The client ended the handshake with an alert saying it rejects our
+/// certificate (untrusted CA, pinning).
+fn rejects_certificate(e: &std::io::Error) -> bool {
+    use rustls::AlertDescription as A;
+    matches!(
+        e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        Some(rustls::Error::AlertReceived(
+            A::BadCertificate
+                | A::UnsupportedCertificate
+                | A::CertificateRevoked
+                | A::CertificateExpired
+                | A::CertificateUnknown
+                | A::UnknownCA
+        ))
+    )
 }
 
 async fn tunnel_after_peek(
