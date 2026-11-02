@@ -179,6 +179,20 @@ fn warm_up_job() -> ScriptJob {
     job
 }
 
+/// `start + timeout`, or a time that never comes when that overflows (a
+/// huge timeout means no timeout; adding would panic).
+pub(crate) fn deadline_after(start: Instant, timeout: Duration) -> Instant {
+    start.checked_add(timeout).unwrap_or_else(|| {
+        let mut far = Duration::from_secs(u64::from(u32::MAX));
+        loop {
+            if let Some(t) = start.checked_add(far) {
+                return t;
+            }
+            far /= 2;
+        }
+    })
+}
+
 fn failure_outcome(
     request: ternarywire_core::script::ScriptRequest,
     variables: ternarywire_core::VariableScopes,
@@ -213,7 +227,7 @@ impl BoaEngine {
             return ScriptOutcome { request: job.request, variables: job.variables, ..Default::default() };
         }
         let start = Instant::now();
-        let deadline = start + job.timeout;
+        let deadline = deadline_after(start, job.timeout);
         let cancel = job.cancel.clone();
         let timeout = job.timeout;
         let fallback_request = job.request.clone();
@@ -230,7 +244,7 @@ impl BoaEngine {
             return failure_outcome(fallback_request, fallback_vars, "script worker stopped unexpectedly".into());
         }
         let grace = self.pool.config.watchdog_grace;
-        let hard_deadline = deadline + grace;
+        let hard_deadline = deadline_after(deadline, grace);
         let mut cancel_seen: Option<Instant> = None;
         loop {
             match rx.recv_timeout(Duration::from_millis(20)) {
@@ -249,7 +263,7 @@ impl BoaEngine {
                     if cancel.load(Ordering::Relaxed) && cancel_seen.is_none() {
                         cancel_seen = Some(now);
                     }
-                    let cancelled_stuck = cancel_seen.is_some_and(|t| now >= t + grace);
+                    let cancelled_stuck = cancel_seen.is_some_and(|t| now >= deadline_after(t, grace));
                     if now >= hard_deadline || cancelled_stuck {
                         // Dropping the handle closes the worker's queue; the
                         // thread exits once the runaway script hits a limit.

@@ -315,7 +315,7 @@ fn parse_posix(s: &str) -> Option<PosixTz> {
         return Some(PosixTz { std_abbr, std_off, dst: None });
     }
     let dst_abbr = posix_abbr(b, &mut i)?;
-    let dst_off = if i < b.len() && b[i] != b',' { -posix_offset(b, &mut i)? } else { std_off + 3600 };
+    let dst_off = if i < b.len() && b[i] != b',' { -posix_offset(b, &mut i)? } else { std_off.checked_add(3600)? };
     if i == b.len() {
         // No rule: the POSIX default (US rules) is rare enough to ignore.
         return Some(PosixTz { std_abbr, std_off, dst: None });
@@ -367,11 +367,12 @@ fn posix_offset(b: &[u8], i: &mut usize) -> Option<i32> {
         }
         _ => 1,
     };
-    let mut secs = posix_number(b, i)? * 3600;
+    // Checked: a damaged TZ string must not overflow (and panic in debug).
+    let mut secs = posix_number(b, i)?.checked_mul(3600)?;
     for mul in [60, 1] {
         if b.get(*i) == Some(&b':') {
             *i += 1;
-            secs += posix_number(b, i)? * mul;
+            secs = secs.checked_add(posix_number(b, i)?.checked_mul(mul)?)?;
         } else {
             break;
         }
@@ -508,6 +509,9 @@ mod tests {
         assert_eq!(fixed.local_type(0).utoff, 5 * 3600 + 1800);
         assert_eq!(fixed.local_type(0).abbr, "+0530");
         assert!(parse_posix("E5").is_none());
+        assert!(parse_posix("ABC999999").is_none());
+        assert!(parse_posix("ABC1:99999999").is_none());
+        assert!(parse_posix("ABC-596523DEF").is_none());
     }
 
     #[test]

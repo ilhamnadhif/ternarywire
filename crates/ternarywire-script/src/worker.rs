@@ -259,7 +259,7 @@ impl Worker {
             if next < 0.0 {
                 return Ok(());
             }
-            let wake_at = Instant::now() + Duration::from_millis(next.ceil().max(0.0) as u64);
+            let wake_at = crate::deadline_after(Instant::now(), Duration::from_millis(next.ceil().max(0.0) as u64));
             while Instant::now() < wake_at {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(DriveStop::Interrupt(Interrupt::Cancelled));
@@ -284,7 +284,7 @@ impl Worker {
 
     pub(crate) fn run(&mut self, job: ScriptJob) -> ScriptOutcome {
         let started = Instant::now();
-        let deadline = started + job.timeout;
+        let deadline = crate::deadline_after(started, job.timeout);
         let cancel = job.cancel.clone();
         let fallback_request = job.request.clone();
         let fallback_vars = job.variables.clone();

@@ -788,3 +788,13 @@ fn send_request_keeps_binary_bodies() {
     assert_eq!(out.variables.environment["bytes"], "255,0,128,65");
     assert_eq!(out.variables.environment["uri"], "data:image/png;base64,/wCAQQ==");
 }
+
+#[test]
+fn huge_timeouts_do_not_overflow() {
+    let e = BoaEngine::new();
+    let mut j = job(ScriptEvent::PreRequest, "setTimeout(() => pm.environment.set('x', '1'), 1);");
+    j.timeout = Duration::MAX;
+    let out = e.run(j);
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(out.variables.environment["x"], "1");
+}
