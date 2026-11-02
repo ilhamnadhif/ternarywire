@@ -117,19 +117,20 @@ impl<'a> Wsdl<'a> {
         {
             out.push_str(&format!("{pad}<!--Zero or more repetitions:-->\n"));
         }
-        // Inline complex type, named type reference, or simple content.
-        let complex = decl.child("complexType").or_else(|| {
-            let ty = decl.attr("type")?;
-            let (ns, local) = decl.resolve_qname(ty);
-            if ns == XSD_NS {
-                return None;
-            }
-            self.find_top("complexType", &ns, &local).map(|(e, _, _)| e)
-        });
+        // Inline complex type, named type reference, or simple content. The
+        // local elements of a named type belong to the namespace (and
+        // `elementFormDefault`) of the schema defining it.
+        let complex = match decl.child("complexType") {
+            Some(ct) => Some((ct, schema_ns.to_string(), form_qualified)),
+            None => decl.attr("type").and_then(|ty| {
+                let (ns, local) = decl.resolve_qname(ty);
+                if ns == XSD_NS { None } else { self.find_top("complexType", &ns, &local) }
+            }),
+        };
         match complex {
-            Some(ct) => {
+            Some((ct, ct_ns, ct_form)) => {
                 let mut inner = String::new();
-                self.render_particles(ct, schema_ns, form_qualified, depth + 1, &mut inner, prefix_ns);
+                self.render_particles(ct, &ct_ns, ct_form, depth + 1, &mut inner, prefix_ns);
                 if inner.is_empty() {
                     out.push_str(&format!("{pad}<{tag}/>\n"));
                 } else {
@@ -157,16 +158,24 @@ impl<'a> Wsdl<'a> {
                     out.push_str(&format!("{}<!--You have a CHOICE of the next items:-->\n", "  ".repeat(depth)));
                     self.render_particles(c, schema_ns, qualified, depth, out, prefix_ns);
                 }
-                "element" => self.render_element(c, schema_ns, qualified, qualified, depth, out, prefix_ns),
+                "element" => {
+                    // `form` overrides the schema's `elementFormDefault` for this element.
+                    let tag_qualified = match c.attr("form") {
+                        Some("qualified") => true,
+                        Some("unqualified") => false,
+                        _ => qualified,
+                    };
+                    self.render_element(c, schema_ns, tag_qualified, qualified, depth, out, prefix_ns)
+                }
                 "complexContent" | "simpleContent" => {
                     for ext in c.children.iter().filter(|e| e.name == "extension" || e.name == "restriction") {
                         if let Some(base) = ext.attr("base") {
                             let (ns, local) = ext.resolve_qname(base);
                             if ns != XSD_NS
-                                && let Some((base_ct, _, _)) = self.find_top("complexType", &ns, &local)
+                                && let Some((base_ct, base_ns, base_form)) = self.find_top("complexType", &ns, &local)
                                 && self.enter(base_ct, depth)
                             {
-                                self.render_particles(base_ct, schema_ns, qualified, depth, out, prefix_ns);
+                                self.render_particles(base_ct, &base_ns, base_form, depth, out, prefix_ns);
                                 self.expanding.pop();
                             }
                         }
@@ -232,7 +241,8 @@ fn envelope(version: SoapVersion, prefixes: &[(String, String)], body: &str) -> 
     };
     let mut decl = format!("xmlns:soap=\"{env_ns}\"");
     for (p, u) in prefixes {
-        decl.push_str(&format!(" xmlns:{p}=\"{u}\""));
+        // The URI comes unescaped from the WSDL.
+        decl.push_str(&format!(" xmlns:{p}=\"{}\"", quick_xml::escape::escape(u)));
     }
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soap:Envelope {decl}>\n  <soap:Header/>\n  <soap:Body>\n{body}  </soap:Body>\n</soap:Envelope>"
@@ -353,6 +363,8 @@ pub fn import_wsdl(text: &str) -> Result<(Collection, Vec<String>), ConvertError
                 None => w.warn(format!("operation `{op_name}` has no portType definition")),
             }
             let mut req = HttpRequest::new("POST", url.clone());
+            // A quoted-string in the header: `"` and `\` take a backslash.
+            let action = action.replace('\\', "\\\\").replace('"', "\\\"");
             match version {
                 SoapVersion::V11 => {
                     req.headers.push(KeyValue::new("Content-Type", "text/xml; charset=utf-8"));
@@ -495,5 +507,43 @@ mod tests {
     fn rejects_other_xml() {
         assert!(import_wsdl("<root/>").is_err());
         assert!(import_wsdl("<description xmlns=\"http://www.w3.org/ns/wsdl\"/>").is_err());
+    }
+
+    #[test]
+    fn named_types_keep_their_schema_namespace() {
+        let text = r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+                 xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:a" xmlns:b="urn:b&amp;&quot;x"
+                 targetNamespace="urn:a">
+              <types>
+                <xs:schema targetNamespace="urn:a" elementFormDefault="qualified">
+                  <xs:element name="Req" type="b:T"/>
+                </xs:schema>
+                <xs:schema targetNamespace="urn:b&amp;&quot;x">
+                  <xs:complexType name="Base"><xs:sequence><xs:element name="base" type="xs:string"/></xs:sequence></xs:complexType>
+                  <xs:complexType name="T"><xs:complexContent><xs:extension base="b:Base"><xs:sequence>
+                    <xs:element name="plain" type="xs:string"/>
+                    <xs:element name="q" form="qualified" type="xs:string"/>
+                  </xs:sequence></xs:extension></xs:complexContent></xs:complexType>
+                </xs:schema>
+              </types>
+              <message name="In"><part name="p" element="tns:Req"/></message>
+              <portType name="PT"><operation name="Op"><input message="tns:In"/></operation></portType>
+              <binding name="B" type="tns:PT"><soap:binding style="document"/>
+                <operation name="Op"><soap:operation soapAction="urn:a&quot;op\x"/></operation></binding>
+              <service name="S"><port name="P" binding="tns:B"><soap:address location="http://h/s"/></port></service>
+            </definitions>"#;
+        let (c, _) = import_wsdl(text).unwrap();
+        let h = c.requests()[0].http().unwrap();
+        let body = &h.body.raw;
+        // T is defined in urn:b, whose local elements are unqualified unless `form` says otherwise.
+        assert!(
+            body.contains("<tns:Req>\n      <base>?</base>\n      <plain>?</plain>\n      <ns2:q>?</ns2:q>"),
+            "{body}"
+        );
+        assert!(body.contains(r#" xmlns:ns2="urn:b&amp;&quot;x""#), "{body}");
+        let env = xml::parse(body).unwrap();
+        let req = env.child("Body").unwrap().child("Req").unwrap();
+        assert_eq!(req.child("q").unwrap().ns, "urn:b&\"x");
+        assert_eq!(h.header("SOAPAction"), Some(r#""urn:a\"op\\x""#));
     }
 }
