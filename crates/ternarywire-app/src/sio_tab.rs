@@ -83,7 +83,7 @@ impl SioTab {
     fn state(&self) -> Conn {
         if self.connected {
             Conn::Live
-        } else if self.session.is_some() {
+        } else if self.session.is_some() || self.scripts.is_waiting() {
             Conn::Busy
         } else if self.error.is_some() {
             Conn::Failed
@@ -546,7 +546,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
         Some(ConnAction::Connect) => {
             tab.scripts.clear_results();
             tab.error = None;
-            if crate::proto_common::run_scripts(
+            if let Some(run) = crate::proto_common::run_scripts(
                 app,
                 tab_id,
                 &tab.slot,
@@ -554,7 +554,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
                 ScriptEvent::PreRequest,
                 proto::socketio(&req_clone),
             ) {
-                tab.scripts.waiting = true;
+                tab.scripts.wait_for(run);
             } else {
                 start(app, tab_id, tab, &req_clone, collection.as_deref());
             }
@@ -563,6 +563,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
             if let Some(s) = &tab.session {
                 s.disconnect();
             }
+            tab.scripts.stop_waiting();
         }
         None => {}
     }
@@ -577,14 +578,16 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
         }
     }
     for m in std::mem::take(&mut tab.inbox) {
-        if !crate::proto_common::run_scripts(
+        if crate::proto_common::run_scripts(
             app,
             tab_id,
             &tab.slot,
             &item_now,
             ScriptEvent::OnMessage,
             proto::socketio(&req_clone).with_message(m),
-        ) {
+        )
+        .is_none()
+        {
             break;
         }
     }

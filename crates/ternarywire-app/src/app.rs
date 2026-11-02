@@ -2859,6 +2859,7 @@ mod tests {
             collection: None,
             env: None,
             name: "ws".into(),
+            run: 0,
         };
         let token = OAuth2Token { access_token: "tok".into(), ..Default::default() };
         app.tx.send(request(old)).unwrap();
@@ -2909,6 +2910,7 @@ mod tests {
                 collection: None,
                 env: None,
                 name: "mqtt".into(),
+                run: 0,
             };
             app.tx.send(Msg::ProtoScript { tab: id, ws: 0, run: Box::new(run) }).unwrap();
         }

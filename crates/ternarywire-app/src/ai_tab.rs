@@ -86,11 +86,13 @@ impl AiTab {
         }
     }
 
+    /// Generating, or waiting for the pre-request script.
     pub fn is_running(&self) -> bool {
-        self.cancel.is_some()
+        self.cancel.is_some() || self.scripts.is_waiting()
     }
 
     pub fn cancel(&mut self) {
+        self.scripts.stop_waiting();
         if let Some(c) = self.cancel.take() {
             c.cancel();
         }
@@ -536,7 +538,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
     if send && !tab.is_running() {
         tab.scripts.clear_results();
         tab.section = Section::Messages;
-        if crate::proto_common::run_scripts(
+        if let Some(run) = crate::proto_common::run_scripts(
             app,
             tab_id,
             &tab.slot,
@@ -544,7 +546,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
             ScriptEvent::PreRequest,
             proto::ai(&req_clone),
         ) {
-            tab.scripts.waiting = true;
+            tab.scripts.wait_for(run);
         } else {
             start(app, tab_id, tab, req_clone.clone(), collection.as_deref());
         }

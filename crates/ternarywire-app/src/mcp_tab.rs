@@ -922,8 +922,10 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut McpTab
         tab.scripts.clear_results();
         let ctx = proto::mcp(&req_clone, Some(&saved(kind, &target, &args)));
         tab.pending_call = Some((kind, target.clone(), args.clone()));
-        if crate::proto_common::run_scripts(app, tab_id, &tab.slot, &item_now, ScriptEvent::PreRequest, ctx) {
-            tab.scripts.waiting = true;
+        if let Some(run) =
+            crate::proto_common::run_scripts(app, tab_id, &tab.slot, &item_now, ScriptEvent::PreRequest, ctx)
+        {
+            tab.scripts.wait_for(run);
         } else {
             run_call(app, tab_id, client, kind, target, args);
         }

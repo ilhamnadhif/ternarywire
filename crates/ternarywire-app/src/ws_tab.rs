@@ -153,7 +153,9 @@ impl WsTab {
     fn state(&self) -> Conn {
         match self.conn {
             State::Connected { .. } => Conn::Live,
+            // Waiting for the pre-request script counts as connecting.
             State::Connecting => Conn::Busy,
+            State::Disconnected if self.scripts.is_waiting() => Conn::Busy,
             State::Disconnected if self.error.is_some() => Conn::Failed,
             State::Disconnected => Conn::Idle,
         }
@@ -609,10 +611,10 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut WsTab)
                     ScriptEvent::PreRequest,
                     proto::websocket(w),
                 ),
-                _ => false,
+                _ => None,
             };
-            if pre {
-                tab.scripts.waiting = true;
+            if let Some(run) = pre {
+                tab.scripts.wait_for(run);
             } else {
                 connect(app, tab_id, tab, &item);
             }
@@ -623,6 +625,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut WsTab)
             }
             tab.session = None;
             tab.conn = State::Disconnected;
+            tab.scripts.stop_waiting();
         }
         Some(ConnAction::Disconnect) => {
             if let Some(s) = &tab.session {
@@ -641,14 +644,16 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut WsTab)
     }
     if let RequestKind::WebSocket(w) = &item.request {
         for m in std::mem::take(&mut tab.inbox) {
-            if !crate::proto_common::run_scripts(
+            if crate::proto_common::run_scripts(
                 app,
                 tab_id,
                 &slot,
                 &item,
                 ScriptEvent::OnMessage,
                 proto::websocket(w).with_message(m),
-            ) {
+            )
+            .is_none()
+            {
                 break;
             }
         }
@@ -674,6 +679,18 @@ mod tests {
         app.ws.secrets.vault_set("ws-key", "s3cret");
         let scopes = app.ws.scopes_for(None);
         assert_eq!(resolve_composer(&app, &scopes, "{\"key\": \"{{vault:ws-key}}\"}"), "{\"key\": \"s3cret\"}");
+    }
+
+    /// While the pre-request script runs the tab counts as connecting, so
+    /// Connect turns into Cancel (a second click used to start a second
+    /// script and a second connection).
+    #[test]
+    fn waiting_for_the_pre_request_script_is_busy() {
+        let mut tab = WsTab::scratch(RequestItem::new("ws", ternarywire_core::model::HttpRequest::default()));
+        tab.scripts.wait_for(crate::app::next_epoch());
+        assert_eq!(tab.state(), Conn::Busy);
+        tab.scripts.stop_waiting();
+        assert_eq!(tab.state(), Conn::Idle);
     }
 
     fn incoming(tab: &mut WsTab, text: String) {

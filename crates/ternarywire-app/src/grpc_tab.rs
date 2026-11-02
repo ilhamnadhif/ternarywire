@@ -418,7 +418,8 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
     {
         let RequestKind::Grpc(req) = &mut item.request else { return };
         let method_kind = tab.schema.as_ref().and_then(|s| s.method(&req.service, &req.method)).map(|m| m.kind);
-        let running = tab.call.is_some();
+        // Waiting for the pre-invoke script counts as running (one call at a time).
+        let running = tab.call.is_some() || tab.scripts.is_waiting();
         let ready = tab.schema.is_some() && !req.method.is_empty();
         let has_schema = tab.schema.is_some();
         let mut cancel = false;
@@ -475,8 +476,11 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
             Some(Pick::LoadSchema) => do_load = true,
             None => {}
         }
-        if cancel && let Some(call) = &tab.call {
-            call.cancel();
+        if cancel {
+            tab.scripts.stop_waiting();
+            if let Some(call) = &tab.call {
+                call.cancel();
+            }
         }
         if pc::send_shortcut(ui) {
             match &tab.call {
@@ -722,16 +726,16 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
     if do_load {
         load_schema(app, tab_id, tab, &item);
     }
-    if do_invoke && tab.schema.is_some() && tab.call.is_none() {
+    if do_invoke && tab.schema.is_some() && tab.call.is_none() && !tab.scripts.is_waiting() {
         tab.scripts.clear_results();
         let pre = match &item.request {
             RequestKind::Grpc(r) => {
                 crate::proto_common::run_scripts(app, tab_id, &tab.slot, &item, ScriptEvent::PreRequest, proto::grpc(r))
             }
-            _ => false,
+            _ => None,
         };
-        if pre {
-            tab.scripts.waiting = true;
+        if let Some(run) = pre {
+            tab.scripts.wait_for(run);
             tab.log.system(tr("Running the pre-invoke script…"));
         } else {
             invoke(app, tab_id, tab, &item);

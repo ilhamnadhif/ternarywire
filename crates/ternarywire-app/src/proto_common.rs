@@ -1579,6 +1579,8 @@ pub struct ScriptRun {
     /// Environment active when the script started.
     pub env: Option<String>,
     pub name: String,
+    /// Number of the run (see [`run_scripts`]).
+    pub run: u64,
 }
 
 /// Test results and script errors a protocol tab keeps (the latest; on-message
@@ -1594,7 +1596,9 @@ pub struct ScriptState {
     /// Pre-request finished: the request JSON to use, or `None` when the
     /// script called `pm.execution.skipRequest()`.
     pre: Option<Option<serde_json::Value>>,
-    pub waiting: bool,
+    /// The pre-request run the tab waits for (its number): the tab counts
+    /// as busy, and the result of an earlier, cancelled run is not used.
+    waiting: Option<u64>,
 }
 
 impl Default for ScriptState {
@@ -1604,12 +1608,26 @@ impl Default for ScriptState {
             tests: VecDeque::new(),
             errors: VecDeque::new(),
             pre: None,
-            waiting: false,
+            waiting: None,
         }
     }
 }
 
 impl ScriptState {
+    /// Waits for pre-request run `run` (from [`run_scripts`]).
+    pub fn wait_for(&mut self, run: u64) {
+        self.waiting = Some(run);
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    /// Cancel: the pending pre-request result is not used.
+    pub fn stop_waiting(&mut self) {
+        self.waiting = None;
+    }
+
     pub fn clear_results(&mut self) {
         self.tests.clear();
         self.errors.clear();
@@ -1622,8 +1640,8 @@ impl ScriptState {
         self.tests.drain(..extra);
         let extra = self.errors.len().saturating_sub(MAX_SCRIPT_RESULTS);
         self.errors.drain(..extra);
-        if run.event == ScriptEvent::PreRequest {
-            self.waiting = false;
+        if run.event == ScriptEvent::PreRequest && self.waiting == Some(run.run) {
+            self.waiting = None;
             self.pre = Some(if run.outcome.skip_request { None } else { run.outcome.protocol_request.clone() });
         }
     }
@@ -1647,7 +1665,8 @@ fn script_sources(
 
 /// Runs the item's scripts for `event` (collection and folder scripts first)
 /// on a worker thread; the result arrives as [`crate::app::Msg::ProtoScript`].
-/// Returns false when there is nothing to run.
+/// Returns the number of the run ([`ScriptState::wait_for`]), or `None`
+/// when there is nothing to run.
 pub fn run_scripts(
     app: &TernaryWireApp,
     tab_id: u64,
@@ -1655,10 +1674,10 @@ pub fn run_scripts(
     item: &RequestItem,
     event: ScriptEvent,
     ctx: ProtocolContext,
-) -> bool {
+) -> Option<u64> {
     let scripts = script_sources(app, slot, item, event);
     if scripts.is_empty() {
-        return false;
+        return None;
     }
     let collection = slot.collection_id();
     let before = app.ws.scopes_for(collection.as_deref());
@@ -1679,13 +1698,14 @@ pub fn run_scripts(
     let ctx = app.ctx.clone();
     let name = item.name.clone();
     let ws = app.ws_gen;
+    let run = crate::app::next_epoch();
     app.rt.spawn_blocking(move || {
         let outcome = engine.run(job);
-        let run = ScriptRun { event, outcome, before, collection, env, name };
+        let run = ScriptRun { event, outcome, before, collection, env, name, run };
         let _ = tx.send(crate::app::Msg::ProtoScript { tab: tab_id, ws, run: Box::new(run) });
         ctx.request_repaint();
     });
-    true
+    Some(run)
 }
 
 /// The tab label of the Scripts section: `Scripts (n)` with the number of
@@ -1767,7 +1787,7 @@ pub fn scripts_ui(
         });
         ui.add_space(4.0);
     }
-    if state.waiting {
+    if state.is_waiting() {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(14.0).color(p.accent));
             ui.label(RichText::new(tr("Running the pre-request script…")).color(p.text_muted));
@@ -1779,6 +1799,32 @@ pub fn scripts_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the pre-request run a tab waits for is used: a run cancelled
+    /// before it finished (Connect, Cancel, Connect) does not connect too.
+    #[test]
+    fn only_the_awaited_pre_request_result_counts() {
+        let run = |run| ScriptRun {
+            event: ScriptEvent::PreRequest,
+            outcome: ScriptOutcome::default(),
+            before: VariableScopes::default(),
+            collection: None,
+            env: None,
+            name: String::new(),
+            run,
+        };
+        let mut s = ScriptState::default();
+        s.wait_for(1);
+        s.stop_waiting();
+        s.wait_for(2);
+        s.on_run(&run(1));
+        assert!(s.is_waiting() && s.take_pre().is_none());
+        s.on_run(&run(2));
+        assert!(!s.is_waiting() && s.take_pre().is_some());
+        // Nothing waits for it after Cancel.
+        s.on_run(&run(2));
+        assert!(s.take_pre().is_none());
+    }
 
     fn draw(ctx: &egui::Context, log: &mut Log) -> (std::time::Duration, Vec<String>) {
         ctx.enable_accesskit();
