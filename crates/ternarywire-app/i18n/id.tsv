@@ -554,7 +554,7 @@ Test connection	Uji koneksi
 Tests passed	Tes lulus
 Text	Teks
 The cookie jar is empty. Cookies set by responses appear here.	Cookie jar kosong. Cookie yang diatur oleh respons muncul di sini.
-The flow starts here. Declare inputs in the flow settings (click the canvas).	Flow dimulai di sini. Deklarasikan masukan di pengaturan flow (klik kanvas).
+The flow starts here. Declare its inputs in the flow settings (click an empty spot of the canvas).	Flow dimulai di sini. Deklarasikan masukannya di pengaturan flow (klik area kosong di kanvas).
 The request was skipped by pm.execution.skipRequest().	Request dilewati oleh pm.execution.skipRequest().
 The server is waiting for acknowledgements	Server menunggu acknowledgement
 This collection was deleted.	Koleksi ini sudah dihapus.
@@ -1836,3 +1836,10 @@ Invalid regular expression	Ekspresi reguler tidak valid
 {} requests sent, no tests ran.	{} permintaan terkirim, tidak ada tes yang dijalankan.
 The server answered {} {} without a body.	Server menjawab {} {} tanpa body.
 Code editor	Editor kode
+Add a first step after Start, or drag from an output port to an input port to connect blocks.	Tambahkan langkah pertama setelah Mulai, atau tarik dari port keluaran ke port masukan untuk menyambungkan blok.
+Documentation previews are made from OpenAPI and Smithy specs; this file is {}.	Pratinjau dokumentasi dibuat dari spesifikasi OpenAPI dan Smithy; berkas ini {}.
+The body is {}; showing the raw view. Pretty printing is limited to {} (Settings).	Body-nya {}, jadi ditampilkan mentah. Perapian dibatasi sampai {} (Pengaturan).
+The broker keeps the last retained message of a topic for new subscribers	Broker menyimpan pesan retained terakhir sebuah topik untuk pelanggan baru
+WebSocket	WebSocket
+headers {} · body {}	header {} · body {}
+{} req/s · {} users · avg {}	{} req/dtk · {} pengguna · rata-rata {}

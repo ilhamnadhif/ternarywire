@@ -58,6 +58,50 @@ pub fn trf(template: &str, args: &[&dyn std::fmt::Display]) -> String {
 mod tests {
     use super::*;
 
+    /// The code of a source file without its `#[cfg(test)]` items (test
+    /// modules, test helpers; they may come before other code) and comment
+    /// lines. Relies on rustfmt's layout: an item's body ends with a `}` line
+    /// at the item's indentation.
+    fn non_test_code(src: &str) -> String {
+        let lines: Vec<&str> = src.lines().collect();
+        let indent_of = |l: &str| l.len() - l.trim_start().len();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            if line.trim() != "#[cfg(test)]" {
+                if !line.trim_start().starts_with("//") {
+                    out.push_str(line);
+                }
+                out.push('\n');
+                i += 1;
+                continue;
+            }
+            let indent = indent_of(line);
+            i += 1;
+            // The item's lines up to a body (`… {`) or its end (`…;`, `…,`);
+            // deeper lines continue its signature.
+            while let Some(l) = lines.get(i) {
+                i += 1;
+                let l = l.trim_end();
+                if indent_of(l) != indent || l.trim_start().starts_with("#[") {
+                    continue;
+                }
+                if l.ends_with('{') {
+                    while lines.get(i).is_some_and(|l| indent_of(l) != indent || !l.trim_start().starts_with('}')) {
+                        i += 1;
+                    }
+                    i += 1;
+                    break;
+                }
+                if l.ends_with(';') || l.ends_with(',') || l.ends_with('}') {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// Every `tr("…")`/`trf("…")` key in the app has an Indonesian entry, and
     /// no entry is listed twice.
     #[test]
@@ -77,19 +121,33 @@ mod tests {
             if path.file_name().is_some_and(|n| n == "i18n.rs") {
                 continue;
             }
-            let src = std::fs::read_to_string(&path).unwrap();
-            // Strings in test modules are not shown to users.
-            let src = src.split("#[cfg(test)]").next().unwrap_or("");
-            for marker in ["tr(\"", "trf(\""] {
+            // Strings in test code are not shown to users.
+            let src = non_test_code(&std::fs::read_to_string(&path).unwrap());
+            for marker in ["tr(", "trf("] {
                 for (i, _) in src.match_indices(marker) {
                     // Skip identifiers that merely end in `tr`/`trf`.
                     let before = src[..i].chars().last().unwrap_or(' ');
                     if before.is_alphanumeric() || before == '_' {
                         continue;
                     }
-                    let rest = &src[i + marker.len()..];
-                    let key = rest.split('"').next().unwrap_or("");
-                    if !key.contains('\\') && !seen.contains(key) {
+                    // The call may continue on the next line.
+                    let Some(rest) = src[i + marker.len()..].trim_start().strip_prefix('"') else { continue };
+                    let mut end = 0;
+                    let mut escaped = false;
+                    for (j, c) in rest.char_indices() {
+                        match c {
+                            _ if escaped => escaped = false,
+                            '\\' => escaped = true,
+                            '"' => {
+                                end = j;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    // The table holds `"` and `\` as they are; other escapes (`\n`) as written.
+                    let key = rest[..end].replace("\\\"", "\"").replace("\\\\", "\\");
+                    if !seen.contains(key.as_str()) {
                         missing.push(format!("{}: {key}", path.file_name().unwrap().to_string_lossy()));
                     }
                 }
@@ -98,6 +156,16 @@ mod tests {
         missing.sort();
         missing.dedup();
         assert!(missing.is_empty(), "{} untranslated keys:\n{}", missing.len(), missing.join("\n"));
+    }
+
+    #[test]
+    fn test_code_is_left_out() {
+        let src = "fn a() {\n    tr(\"A\");\n}\n#[cfg(test)]\npub fn helper(\n    x: u8,\n) -> u8 {\n    tr(\"B\");\n}\n\
+                   #[cfg(test)]\nuse x::y;\nfn c() {\n    tr(\n        \"C\",\n    );\n}\n#[cfg(test)]\nmod tests {\n    \
+                   fn d() {\n        tr(\"D\");\n    }\n}\n";
+        let code = non_test_code(src);
+        assert!(code.contains("\"A\"") && code.contains("\"C\""), "{code}");
+        assert!(!code.contains("\"B\"") && !code.contains("x::y") && !code.contains("\"D\""), "{code}");
     }
 
     #[test]

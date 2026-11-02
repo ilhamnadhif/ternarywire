@@ -53,18 +53,36 @@ def unescape(s):
 
 
 def code_of(text):
-    """The non-test code of a file with comment lines blanked (line numbers kept)."""
-    out = []
-    in_tests = False
+    """The non-test code of a file with comment lines and `#[cfg(test)]`
+    items (test modules, test helpers anywhere in the file) blanked, line
+    numbers kept. Relies on rustfmt's layout, like the `all_keys_translated`
+    test: an item's body ends with a `}` line at the item's indentation."""
     lines = text.splitlines()
-    for i, line in enumerate(lines):
-        # The test module (a `#[cfg(test)] impl` may come before other code).
-        if line.startswith("#[cfg(test)]") and i + 1 < len(lines) and lines[i + 1].startswith("mod "):
-            in_tests = True
-        if in_tests or line.strip().startswith("//"):
-            out.append("")
-        else:
-            out.append(line)
+    indent = lambda l: len(l) - len(l.lstrip())
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() != "#[cfg(test)]":
+            out.append("" if line.strip().startswith("//") else line)
+            i += 1
+            continue
+        start, depth = i, indent(line)
+        i += 1
+        # The item's lines up to a body (`… {`) or its end (`…;`, `…,`).
+        while i < len(lines):
+            l = lines[i].rstrip()
+            i += 1
+            if indent(l) != depth or l.lstrip().startswith("#["):
+                continue
+            if l.endswith("{"):
+                while i < len(lines) and (indent(lines[i]) != depth or not lines[i].lstrip().startswith("}")):
+                    i += 1
+                i += 1
+                break
+            if l.endswith((";", ",", "}")):
+                break
+        out.extend([""] * (min(i, len(lines)) - start))
     return "\n".join(out)
 
 
