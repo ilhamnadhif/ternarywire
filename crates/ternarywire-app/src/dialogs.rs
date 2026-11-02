@@ -842,60 +842,154 @@ fn session_path(app: &TernaryWireApp) -> PathBuf {
     app.ws.local_dir().join("session.json")
 }
 
-/// Unsaved tabs are written without literal credentials (only `{{…}}`
-/// references survive), like collection files.
-fn scrub(item: Option<&RequestItem>) -> Option<RequestItem> {
-    let mut item = item?.clone();
-    let auth = item.request.auth_mut();
+/// Entry of the workspace's secret store with the credentials taken out of
+/// unsaved tabs in session.json: request id → field ([`credential_fields`]) →
+/// value.
+const SESSION_SECRETS: &str = "session:unsaved-credentials";
+
+type Stash = std::collections::BTreeMap<Id, std::collections::BTreeMap<String, String>>;
+
+/// Header names whose values are usually credentials (Authorization, Cookie,
+/// X-API-Key, X-Auth-Token, …). Erring on the side of caution costs nothing:
+/// the value comes back from the secret store.
+fn credential_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["auth", "cookie", "token", "key", "secret", "password", "session", "credential", "signature"]
+        .iter()
+        .any(|w| n.contains(w))
+}
+
+/// The text fields of an unsaved request that may hold a credential, named
+/// the same when saving and restoring, and whether the field's own name
+/// says it is one (a header such as Authorization, a password parameter).
+fn credential_fields(item: &mut RequestItem) -> Vec<(String, bool, &mut String)> {
+    use ternarywire_core::model::{KeyValue, RequestKind};
+    fn list<'a>(out: &mut Vec<(String, bool, &'a mut String)>, name: &str, kvs: &'a mut [KeyValue]) {
+        for (i, kv) in kvs.iter_mut().enumerate() {
+            let named = name == "header" && credential_header(&kv.key);
+            out.push((format!("{name}.{i}"), named, &mut kv.value));
+        }
+    }
+    let mut out = Vec::new();
+    let auth = match &mut item.request {
+        RequestKind::Http(h) => {
+            out.push(("url".to_string(), false, &mut h.url));
+            list(&mut out, "param", &mut h.params);
+            list(&mut out, "path", &mut h.path_vars);
+            list(&mut out, "header", &mut h.headers);
+            list(&mut out, "urlencoded", &mut h.body.urlencoded);
+            for (i, f) in h.body.form_data.iter_mut().enumerate() {
+                out.push((format!("form.{i}"), false, &mut f.value));
+            }
+            out.push(("raw".to_string(), false, &mut h.body.raw));
+            out.push(("graphql".to_string(), false, &mut h.body.graphql.query));
+            out.push(("graphql-variables".to_string(), false, &mut h.body.graphql.variables));
+            &mut h.auth
+        }
+        RequestKind::WebSocket(w) => {
+            out.push(("url".to_string(), false, &mut w.url));
+            list(&mut out, "param", &mut w.params);
+            list(&mut out, "header", &mut w.headers);
+            &mut w.auth
+        }
+        other => other.auth_mut(),
+    };
     let sensitive = auth.kind.sensitive_params();
     for (k, v) in auth.params.iter_mut() {
-        if sensitive.contains(&k.as_str())
-            && let serde_json::Value::String(s) = v
-            && !ternarywire_core::variables::is_pure_reference(s)
-        {
-            s.clear();
+        if let serde_json::Value::String(s) = v {
+            out.push((format!("auth.{k}"), sensitive.contains(&k.as_str()), s));
         }
+    }
+    out
+}
+
+/// Unsaved tabs are written without literal credentials (only `{{…}}`
+/// references survive), like collection files: header values that look
+/// like credentials, sensitive auth parameters and fields holding the
+/// value of a secret variable or vault entry go to `stash` (kept in the
+/// secret store), so the tab is whole again after a restart.
+fn scrub(item: Option<&RequestItem>, secrets: &[String], stash: &mut Stash) -> Option<RequestItem> {
+    let mut item = item?.clone();
+    let mut taken = std::collections::BTreeMap::new();
+    for (name, named, value) in credential_fields(&mut item) {
+        if value.is_empty() || ternarywire_core::variables::is_pure_reference(value) {
+            continue;
+        }
+        if named || crate::app::redact(value, secrets) != *value {
+            taken.insert(name, std::mem::take(value));
+        }
+    }
+    if !taken.is_empty() {
+        stash.insert(item.id.clone(), taken);
     }
     Some(item)
 }
 
+/// Puts the credentials [`scrub`] took out of `item` back.
+fn unstash(mut item: RequestItem, stash: &Stash) -> RequestItem {
+    if let Some(taken) = stash.get(&item.id) {
+        for (name, _, value) in credential_fields(&mut item) {
+            if let Some(v) = taken.get(&name)
+                && value.is_empty()
+            {
+                *value = v.clone();
+            }
+        }
+    }
+    item
+}
+
 /// Writes the open tabs (unless unchanged since the last write).
 pub fn save_session(app: &mut TernaryWireApp) {
-    let saved = app.tabs.iter().enumerate().map(|(i, t)| match &t.kind {
-        TabKind::Request(r) => Some(SavedTab::Request {
-            location: r.location.as_ref().map(|l| (l.collection.clone(), l.item.clone())),
-            scratch: scrub(r.scratch.as_ref()),
-            edited: app.tab_has_unsaved_work(i),
-        }),
-        TabKind::WebSocket(r) => Some(SavedTab::Websocket {
-            location: r.location.as_ref().map(|l| (l.collection.clone(), l.item.clone())),
-            scratch: scrub(r.scratch.as_ref()),
-            edited: app.tab_has_unsaved_work(i),
-        }),
-        TabKind::Container(c) => {
-            Some(SavedTab::Container { collection: c.collection.clone(), folder: c.folder.clone() })
-        }
-        TabKind::Environment(e) => Some(SavedTab::Environment { env: e.env.clone() }),
-        TabKind::Spec(t) => {
-            Some(SavedTab::Spec { path: t.path.clone(), unsaved: t.unsaved_text().map(str::to_string) })
-        }
-        TabKind::Flow(f) => f.path.clone().map(|path| SavedTab::Flow { path }),
-        other => other
-            .location()
-            .map(|l| (l.collection.clone(), l.item.clone()))
-            .map(Some)
-            .or_else(|| other.scratch().map(|_| None))
-            .map(|location| SavedTab::Proto {
-                location,
-                scratch: scrub(other.scratch()),
+    let env = app.ws.data.active_environment.clone();
+    let secrets = app.secret_values(None, env.as_deref(), &app.ws.scopes_for(None), None);
+    let mut stash = Stash::new();
+    let stash = &mut stash;
+    let saved: Vec<Option<SavedTab>> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| match &t.kind {
+            TabKind::Request(r) => Some(SavedTab::Request {
+                location: r.location.as_ref().map(|l| (l.collection.clone(), l.item.clone())),
+                scratch: scrub(r.scratch.as_ref(), &secrets, stash),
                 edited: app.tab_has_unsaved_work(i),
             }),
-    });
+            TabKind::WebSocket(r) => Some(SavedTab::Websocket {
+                location: r.location.as_ref().map(|l| (l.collection.clone(), l.item.clone())),
+                scratch: scrub(r.scratch.as_ref(), &secrets, stash),
+                edited: app.tab_has_unsaved_work(i),
+            }),
+            TabKind::Container(c) => {
+                Some(SavedTab::Container { collection: c.collection.clone(), folder: c.folder.clone() })
+            }
+            TabKind::Environment(e) => Some(SavedTab::Environment { env: e.env.clone() }),
+            TabKind::Spec(t) => {
+                Some(SavedTab::Spec { path: t.path.clone(), unsaved: t.unsaved_text().map(str::to_string) })
+            }
+            TabKind::Flow(f) => f.path.clone().map(|path| SavedTab::Flow { path }),
+            other => other
+                .location()
+                .map(|l| (l.collection.clone(), l.item.clone()))
+                .map(Some)
+                .or_else(|| other.scratch().map(|_| None))
+                .map(|location| SavedTab::Proto {
+                    location,
+                    scratch: scrub(other.scratch(), &secrets, stash),
+                    edited: app.tab_has_unsaved_work(i),
+                }),
+        })
+        .collect();
+    // Written before the session file, which needs them to be whole.
+    match serde_json::to_string(stash) {
+        Ok(json) if !stash.is_empty() => app.ws.secrets.set(SESSION_SECRETS, &json),
+        _ => app.ws.secrets.remove(SESSION_SECRETS),
+    }
     // `active` indexes the saved tabs: the active tab, or the closest saved
     // one before it when it is not saved itself.
     let mut tabs = Vec::new();
     let mut active = 0;
-    for (i, t) in saved.enumerate() {
+    for (i, t) in saved.into_iter().enumerate() {
         if let Some(t) = t {
             if i <= app.active {
                 active = tabs.len();
@@ -915,6 +1009,8 @@ pub fn save_session(app: &mut TernaryWireApp) {
 pub fn restore_session(app: &mut TernaryWireApp) {
     let Ok(bytes) = std::fs::read(session_path(app)) else { return };
     let Ok(s) = serde_json::from_slice::<Session>(&bytes) else { return };
+    let stash: Stash =
+        app.ws.secrets.get(SESSION_SECRETS).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
     // A restored unsaved tab that was edited before keeps counting as edited.
     let restore_edited = |app: &mut TernaryWireApp, id: u64, edited: bool| {
         if edited {
@@ -936,6 +1032,7 @@ pub fn restore_session(app: &mut TernaryWireApp) {
                 }
             }
             SavedTab::Request { location: None, scratch: Some(item), edited } => {
+                let item = unstash(item, &stash);
                 let id = app.add_tab(TabKind::Request(Box::new(crate::request_tab::RequestTab::scratch(item))));
                 restore_edited(app, id, edited);
             }
@@ -948,6 +1045,7 @@ pub fn restore_session(app: &mut TernaryWireApp) {
                 }
             }
             SavedTab::Websocket { location: None, scratch: Some(item), edited } => {
+                let item = unstash(item, &stash);
                 let id = app.add_tab(TabKind::WebSocket(Box::new(crate::ws_tab::WsTab::scratch(item))));
                 restore_edited(app, id, edited);
             }
@@ -973,6 +1071,7 @@ pub fn restore_session(app: &mut TernaryWireApp) {
             SavedTab::Flow { path } if path.is_file() => crate::flow_tab::open_flow(app, path),
             SavedTab::Proto { location, scratch, edited } => {
                 let location = location.map(|(collection, item)| ItemRef { collection, item });
+                let scratch = scratch.map(|item| unstash(item, &stash));
                 let edited = edited && location.is_none();
                 let kind = match (&location, &scratch) {
                     (Some(l), _) => app
@@ -4011,6 +4110,37 @@ mod tests {
             assert!(app.tab_has_unsaved_work(0));
             assert!(!app.tab_has_unsaved_work(1));
         }
+    }
+
+    /// Credentials typed into an unsaved request (an Authorization header, an
+    /// auth parameter, a secret variable's value) stay out of session.json and
+    /// come back from the secret store after a restart.
+    #[test]
+    fn session_keeps_credentials_out_of_the_file() {
+        use ternarywire_core::model::KeyValue;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let mut env = ternarywire_core::environment::Environment::new("Dev");
+        env.variables.push(ternarywire_core::variables::Variable::secret("token", "s3cr3t-token"));
+        let env = app.ws.add_environment(env);
+        app.ws.set_active_environment(Some(env));
+        let mut req = HttpRequest::new("GET", "https://api.test/x?key=s3cr3t-token");
+        req.headers.push(KeyValue::new("Authorization", "Bearer typed-in-1234"));
+        req.headers.push(KeyValue::new("X-Api-Key", "{{apiKey}}"));
+        req.headers.push(KeyValue::new("Accept", "application/json"));
+        req.auth = ternarywire_core::auth::Auth::bearer("auth-param-5678");
+        let item = RequestItem::new("creds", req.clone());
+        app.add_tab(TabKind::Request(Box::new(crate::request_tab::RequestTab::scratch(item))));
+        save_session(&mut app);
+        let file = std::fs::read_to_string(session_path(&app)).unwrap();
+        for secret in ["s3cr3t-token", "typed-in-1234", "auth-param-5678"] {
+            assert!(!file.contains(secret), "{secret} in {file}");
+        }
+        assert!(file.contains("{{apiKey}}") && file.contains("application/json"), "{file}");
+        app.tabs.clear();
+        restore_session(&mut app);
+        assert_eq!(app.tabs[0].kind.scratch().and_then(|i| i.http()), Some(&req));
+        assert!(!app.tab_has_unsaved_work(0));
     }
 
     fn key(key: egui::Key) -> egui::Event {

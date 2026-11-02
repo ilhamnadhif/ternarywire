@@ -1401,7 +1401,7 @@ impl TernaryWireApp {
 
     /// Values that must not be written to local files such as the history:
     /// secret variables, vault entries and sensitive auth parameters.
-    fn secret_values(
+    pub fn secret_values(
         &self,
         collection: Option<&str>,
         env: Option<&str>,
