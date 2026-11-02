@@ -27,7 +27,7 @@ use ternarywire_core::auth::AuthType;
 use ternarywire_core::protocols::MqttRequest;
 pub use ternarywire_core::protocols::MqttVersion;
 use ternarywire_core::settings::ProxySettings;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 mod bridge;
@@ -250,7 +250,8 @@ pub struct MqttSession {
 impl MqttSession {
     /// Connects in the background on `rt`; every state change and message is
     /// reported through `on_event` (called from a runtime thread). Commands
-    /// issued before the connection is up are queued and sent once it is.
+    /// issued before the connection is up are queued and sent once it is
+    /// (checked against the broker's maximum packet size on MQTT 5).
     pub fn connect(
         rt: &tokio::runtime::Handle,
         cfg: MqttConfig,
@@ -386,6 +387,7 @@ async fn run(cfg: MqttConfig, mut rx: mpsc::UnboundedReceiver<Command>, report: 
     };
     let book = Arc::new(Mutex::new(Book::default()));
     let connected = Arc::new(AtomicBool::new(false));
+    let connack = Arc::new(Notify::new());
     let via = bridge.as_ref().map(|b| Via { proxy: b.proxy().to_string(), last_error: b.last_error() });
     // The event loop is polled in its own task: `poll()` is not cancel-safe,
     // so it must never race with the command channel in a `select!`.
@@ -395,82 +397,109 @@ async fn run(cfg: MqttConfig, mut rx: mpsc::UnboundedReceiver<Command>, report: 
         via,
         book.clone(),
         connected.clone(),
+        connack.clone(),
         on_event.clone(),
         report,
     ));
+    // Commands are held back until the CONNACK: on MQTT 5 it carries the
+    // broker's maximum packet size, which queued publishes must respect too.
+    let mut early: Option<Vec<Command>> = Some(Vec::new());
     loop {
         tokio::select! {
             r = &mut poller => {
                 report_panic(r, &on_event);
                 return;
             }
+            _ = connack.notified(), if early.is_some() => {
+                for cmd in early.take().unwrap_or_default() {
+                    send_command(cmd, &cfg, &client, &book, &on_event).await;
+                }
+            }
             cmd = rx.recv() => match cmd {
-                Some(Command::Subscribe(topic, qos)) => {
-                    if !rumqttc::valid_filter(&topic) {
-                        on_event(MqttEvent::Error(format!("Invalid topic filter \"{topic}\"")));
-                        continue;
-                    }
-                    book.lock().subscribes.push_back(topic.clone());
-                    if client.subscribe(topic, qos.min(2)).await.is_err() {
-                        book.lock().subscribes.pop_back();
-                    }
-                }
-                Some(Command::Unsubscribe(topic)) => {
-                    // Brokers disconnect clients that send an empty or malformed filter.
-                    if !rumqttc::valid_filter(&topic) {
-                        on_event(MqttEvent::Error(format!("Invalid topic filter \"{topic}\"")));
-                        continue;
-                    }
-                    book.lock().unsubscribes.push_back(topic.clone());
-                    if client.unsubscribe(topic).await.is_err() {
-                        book.lock().unsubscribes.pop_back();
-                    }
-                }
-                Some(Command::Publish(p, props)) => {
-                    if p.topic.is_empty() || !rumqttc::valid_topic(&p.topic) {
-                        on_event(MqttEvent::Error(format!(
-                            "Invalid topic \"{}\": topic names must be non-empty and cannot contain + or #",
-                            p.topic
-                        )));
-                        continue;
-                    }
-                    if !props.is_empty() && cfg.version != MqttVersion::V5 {
-                        on_event(MqttEvent::Error(
-                            "Message not sent: user properties need MQTT 5 (this session uses MQTT 3.1.1)".into(),
-                        ));
-                        continue;
-                    }
-                    if let Err(e) = props.validate() {
-                        on_event(MqttEvent::Error(format!("Message not sent: {e}")));
-                        continue;
-                    }
-                    let size = publish_packet_size(&p, &props, cfg.version);
-                    if size > MAX_PACKET_SIZE {
-                        on_event(MqttEvent::Error(format!("Payload too large ({} bytes)", p.payload.len())));
-                        continue;
-                    }
-                    // Sending more than the broker accepts would end the connection.
-                    let limit = book.lock().broker_max_packet;
-                    if let Some(max) = limit
-                        && size > max as usize
-                    {
-                        on_event(MqttEvent::Error(format!(
-                            "Message not sent: the packet would be {size} bytes, but the broker accepts at most {max}"
-                        )));
-                        continue;
-                    }
-                    let sent = (cfg.version == MqttVersion::V5).then(|| props.clone());
-                    book.lock().publishes.push_back((p.clone(), sent));
-                    if client.publish(p, props).await.is_err() {
-                        book.lock().publishes.pop_back();
-                    }
-                }
                 Some(Command::Disconnect) | None => {
-                    shutdown(&client, poller, connected.load(Ordering::SeqCst), &on_event).await;
+                    let connected = connected.load(Ordering::SeqCst);
+                    if connected && let Some(queue) = early.take() {
+                        for cmd in queue {
+                            send_command(cmd, &cfg, &client, &book, &on_event).await;
+                        }
+                    }
+                    shutdown(&client, poller, connected, &on_event).await;
                     return;
+                }
+                Some(cmd) => {
+                    if let Err(e) = check_command(&cmd, &cfg) {
+                        on_event(MqttEvent::Error(e));
+                        continue;
+                    }
+                    match &mut early {
+                        Some(queue) => queue.push(cmd),
+                        None => send_command(cmd, &cfg, &client, &book, &on_event).await,
+                    }
                 }
             }
         }
+    }
+}
+
+/// What can be refused before the broker's limits are known.
+fn check_command(cmd: &Command, cfg: &MqttConfig) -> Result<(), String> {
+    match cmd {
+        // Brokers disconnect clients that send an empty or malformed filter.
+        Command::Subscribe(topic, _) | Command::Unsubscribe(topic) if !rumqttc::valid_filter(topic) => {
+            Err(format!("Invalid topic filter \"{topic}\""))
+        }
+        Command::Publish(p, _) if p.topic.is_empty() || !rumqttc::valid_topic(&p.topic) => {
+            Err(format!("Invalid topic \"{}\": topic names must be non-empty and cannot contain + or #", p.topic))
+        }
+        Command::Publish(_, props) if !props.is_empty() && cfg.version != MqttVersion::V5 => {
+            Err("Message not sent: user properties need MQTT 5 (this session uses MQTT 3.1.1)".into())
+        }
+        Command::Publish(p, props) => {
+            props.validate().map_err(|e| format!("Message not sent: {e}"))?;
+            if publish_packet_size(p, props, cfg.version) > MAX_PACKET_SIZE {
+                return Err(format!("Payload too large ({} bytes)", p.payload.len()));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Hands a checked command to rumqttc, recording what its `Outgoing`
+/// event will need.
+async fn send_command(cmd: Command, cfg: &MqttConfig, client: &Client, book: &Mutex<Book>, on_event: &OnEvent) {
+    match cmd {
+        Command::Subscribe(topic, qos) => {
+            book.lock().subscribes.push_back(topic.clone());
+            if client.subscribe(topic, qos.min(2)).await.is_err() {
+                book.lock().subscribes.pop_back();
+            }
+        }
+        Command::Unsubscribe(topic) => {
+            book.lock().unsubscribes.push_back(topic.clone());
+            if client.unsubscribe(topic).await.is_err() {
+                book.lock().unsubscribes.pop_back();
+            }
+        }
+        Command::Publish(p, props) => {
+            // Sending more than the broker accepts would end the connection.
+            let size = publish_packet_size(&p, &props, cfg.version);
+            let limit = book.lock().broker_max_packet;
+            if let Some(max) = limit
+                && size > max as usize
+            {
+                on_event(MqttEvent::Error(format!(
+                    "Message not sent: the packet would be {size} bytes, but the broker accepts at most {max}"
+                )));
+                return;
+            }
+            let sent = (cfg.version == MqttVersion::V5).then(|| props.clone());
+            book.lock().publishes.push_back((p.clone(), sent));
+            if client.publish(p, props).await.is_err() {
+                book.lock().publishes.pop_back();
+            }
+        }
+        Command::Disconnect => {}
     }
 }
 
@@ -535,12 +564,14 @@ async fn start_bridge(cfg: &MqttConfig) -> Result<Option<bridge::Bridge>, String
         .map_err(|e| format!("Could not start the local proxy bridge: {e}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_loop(
     mut event_loop: EventLoop,
     connect_timeout: Duration,
     via: Option<Via>,
     book: Arc<Mutex<Book>>,
     connected: Arc<AtomicBool>,
+    connack: Arc<Notify>,
     on_event: OnEvent,
     report: Report,
 ) {
@@ -568,11 +599,13 @@ async fn poll_loop(
             book.lock().broker_max_packet = max_packet_size;
             connected.store(true, Ordering::SeqCst);
             on_event(MqttEvent::Connected { session_present });
+            connack.notify_one();
         }
         Ok(Ok(other)) => {
             // Not expected before CONNACK; treat as connected.
             connected.store(true, Ordering::SeqCst);
             on_event(MqttEvent::Connected { session_present: false });
+            connack.notify_one();
             if handle_note(other, &book, &on_event, &report) {
                 return;
             }

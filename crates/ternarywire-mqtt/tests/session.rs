@@ -53,6 +53,8 @@ mod broker {
         retained: HashMap<String, (Vec<u8>, u8, Vec<u8>)>,
         next_conn: u64,
         ws_paths: Vec<String>,
+        /// MQTT 5: Maximum Packet Size announced in CONNACK.
+        max_packet: Option<u32>,
     }
 
     pub struct Broker {
@@ -82,6 +84,11 @@ mod broker {
 
         pub fn ws_paths(&self) -> Vec<String> {
             self.state.lock().unwrap().ws_paths.clone()
+        }
+
+        /// Announces a Maximum Packet Size to MQTT 5 clients.
+        pub fn set_max_packet(&self, max: u32) {
+            self.state.lock().unwrap().max_packet = Some(max);
         }
     }
 
@@ -353,8 +360,18 @@ mod broker {
                                     (false, 5) => 0x86,
                                     (false, _) => 4,
                                 };
-                                let body: &[u8] = if version == 5 { &[0, code, 0] } else { &[0, code] };
-                                io.write(packet(0x20, body)).await;
+                                let mut body = vec![0, code];
+                                let max_packet = state.lock().unwrap().max_packet;
+                                if version == 5 {
+                                    match max_packet {
+                                        Some(max) => {
+                                            body.extend([5, 0x27]);
+                                            body.extend(max.to_be_bytes());
+                                        }
+                                        None => body.push(0),
+                                    }
+                                }
+                                io.write(packet(0x20, &body)).await;
                                 if !ok {
                                     clean_exit = true;
                                     break 'conn;
@@ -748,6 +765,30 @@ async fn commands_before_connack_are_queued() {
     s.publish(Publish::new("early/topic", "queued").with_qos(1));
     let MqttEvent::Message { payload, .. } = ev.incoming("early/topic").await else { unreachable!() };
     assert_eq!(payload, b"queued");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broker_packet_limit_applies_to_publishes_queued_before_connack() {
+    let broker = broker::start(None).await;
+    broker.set_max_packet(1000);
+    let (s, mut ev) = start(config(broker.url(), MqttVersion::V5));
+    s.subscribe("limit/#", 0);
+    s.publish(Publish::new("limit/big", vec![7u8; 2000]));
+    s.publish(Publish::new("limit/small", "fits"));
+    let MqttEvent::Message { payload, .. } = ev.incoming("limit/small").await else { unreachable!() };
+    assert_eq!(payload, b"fits");
+    let errors = ev.errors();
+    assert!(errors.iter().any(|m| m.contains("broker accepts at most 1000")), "{errors:?}");
+    assert!(
+        !ev.seen.iter().any(|e| matches!(e, MqttEvent::Message { topic, .. } if topic == "limit/big")),
+        "{:#?}",
+        ev.seen
+    );
+    // The session is still up.
+    s.publish(Publish::new("limit/after", "still connected"));
+    ev.incoming("limit/after").await;
+    s.disconnect();
+    assert_eq!(ev.disconnected().await, "client disconnected");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
