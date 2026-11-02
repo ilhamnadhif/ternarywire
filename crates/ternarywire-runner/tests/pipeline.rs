@@ -842,3 +842,51 @@ async fn endless_set_next_request_loops_end_with_a_warning() {
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("stopped after 10000 requests"), "{warnings:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn digest_answer_on_another_origin_drops_host_and_proxy_credentials() {
+    use ternarywire_core::auth::AuthType;
+    // (authorization, host, proxy-authorization) of every request to /new.
+    let seen: Arc<std::sync::Mutex<Vec<(String, String, String)>>> = Arc::default();
+    let s = seen.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = Router::new()
+        .route(
+            "/away",
+            any(move || async move {
+                (StatusCode::TEMPORARY_REDIRECT, [("location", format!("http://localhost:{port}/new"))])
+            }),
+        )
+        .route(
+            "/new",
+            any(move |h: HeaderMap| async move {
+                let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                let auth = get("authorization");
+                s.lock().unwrap().push((auth.clone(), get("host"), get("proxy-authorization")));
+                if auth.starts_with("Digest ") {
+                    (StatusCode::OK, [("www-authenticate", String::new())], "ok")
+                } else {
+                    let challenge = "Digest realm=\"r\", nonce=\"n1\", qop=\"auth\"".to_string();
+                    (StatusCode::UNAUTHORIZED, [("www-authenticate", challenge)], "no")
+                }
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut r = req("Elsewhere", "GET", &format!("http://127.0.0.1:{port}/away"));
+    let http = r.request.as_http_mut().unwrap();
+    http.auth = Auth::new(AuthType::Digest).with("username", "u").with("password", "p");
+    http.settings.follow_auth_header = Some(true);
+    http.headers.push(KeyValue::new("Host", format!("127.0.0.1:{port}")));
+    http.headers.push(KeyValue::new("Proxy-Authorization", "Basic cHJveHk6cHc="));
+    let mut c = Collection::new("Digest");
+    let id = r.id.clone();
+    c.items.push(r.into());
+
+    let exec = execute(&services(), input(&c, &id), &mut VariableScopes::default(), &CancellationToken::new()).await;
+    assert_eq!(exec.response.as_ref().map(|r| r.status), Some(200), "{:?}", seen.lock().unwrap());
+    let seen = seen.lock().unwrap();
+    let (_, host, proxy) = seen.iter().find(|(a, _, _)| a.starts_with("Digest ")).expect("challenge answered");
+    assert_eq!(host, &format!("localhost:{port}"), "{seen:?}");
+    assert!(proxy.is_empty(), "{seen:?}");
+}

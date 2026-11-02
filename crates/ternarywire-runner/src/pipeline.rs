@@ -614,6 +614,12 @@ fn challenge_target(prepared: &PreparedRequest, out: &ternarywire_http::SendOutc
     if !same_origin && !prepared.settings.follow_auth_header {
         return None;
     }
+    if !same_origin {
+        // Like the engine's own redirects: these were meant for the first
+        // origin (and its proxy route), not for the server that challenged.
+        retry.remove_header("host");
+        retry.remove_header("proxy-authorization");
+    }
     retry.url = out.sent.url.clone();
     if !out.sent.method.eq_ignore_ascii_case(&prepared.method) {
         // The redirect turned the request into a GET without a body.
