@@ -2,7 +2,7 @@
 //! id, attribute, descendant/child/sibling combinators and structural
 //! pseudo-classes) and value helpers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use egui::Color32;
 
@@ -764,45 +764,53 @@ impl Selector {
     }
 
     pub fn matches(&self, dom: &Dom, el: NodeId) -> bool {
-        match_from(&self.parts, 0, dom, el)
+        match_from(&self.parts, 0, dom, el, &mut HashSet::new())
     }
 }
 
-fn match_from(parts: &[(Compound, Option<Combinator>)], idx: usize, dom: &Dom, el: NodeId) -> bool {
+/// `failed` holds the (part, element) pairs found not to match: descendant
+/// and sibling combinators reach the same element in many ways, and trying
+/// it again each time is exponential in the number of combinators.
+fn match_from(
+    parts: &[(Compound, Option<Combinator>)],
+    idx: usize,
+    dom: &Dom,
+    el: NodeId,
+    failed: &mut HashSet<(usize, NodeId)>,
+) -> bool {
     let (comp, comb) = &parts[idx];
     if !matches_compound(comp, dom, el) {
         return false;
     }
     let Some(comb) = comb else { return true };
     let next = idx + 1;
+    let rest = |p: NodeId| {
+        if failed.contains(&(next, p)) {
+            return false;
+        }
+        let ok = match_from(parts, next, dom, p, failed);
+        if !ok {
+            failed.insert((next, p));
+        }
+        ok
+    };
     match comb {
-        Combinator::Child => parent_element(dom, el).is_some_and(|p| match_from(parts, next, dom, p)),
-        Combinator::Descendant => {
-            let mut cur = parent_element(dom, el);
-            while let Some(p) = cur {
-                if match_from(parts, next, dom, p) {
-                    return true;
-                }
-                cur = parent_element(dom, p);
-            }
-            false
-        }
-        Combinator::Next => prev_element(dom, el).is_some_and(|p| match_from(parts, next, dom, p)),
-        Combinator::Subsequent => {
-            let mut cur = prev_element(dom, el);
-            while let Some(p) = cur {
-                if match_from(parts, next, dom, p) {
-                    return true;
-                }
-                cur = prev_element(dom, p);
-            }
-            false
-        }
+        Combinator::Child => parent_element(dom, el).is_some_and(rest),
+        Combinator::Descendant => std::iter::successors(parent_element(dom, el), |p| parent_element(dom, *p)).any(rest),
+        Combinator::Next => prev_element(dom, el).is_some_and(rest),
+        Combinator::Subsequent => previous_siblings(dom, el).any(rest),
     }
 }
 
 fn parent_element(dom: &Dom, el: NodeId) -> Option<NodeId> {
     dom.nodes[el].parent.filter(|p| dom.is_element(*p))
+}
+
+/// Element siblings before `el`, nearest first.
+fn previous_siblings(dom: &Dom, el: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    let kids = dom.nodes[el].parent.map(|p| dom.nodes[p].children.as_slice()).unwrap_or_default();
+    let pos = kids.iter().position(|k| *k == el).unwrap_or(0);
+    kids[..pos].iter().rev().copied().filter(|k| dom.is_element(*k))
 }
 
 fn siblings(dom: &Dom, el: NodeId) -> Vec<NodeId> {
@@ -813,9 +821,7 @@ fn siblings(dom: &Dom, el: NodeId) -> Vec<NodeId> {
 }
 
 fn prev_element(dom: &Dom, el: NodeId) -> Option<NodeId> {
-    let sibs = siblings(dom, el);
-    let pos = sibs.iter().position(|s| *s == el)?;
-    pos.checked_sub(1).map(|i| sibs[i])
+    previous_siblings(dom, el).next()
 }
 
 fn nth_matches(a: i32, b: i32, index: i32) -> bool {
@@ -1498,6 +1504,25 @@ const NAMED_COLORS: &[(&str, u32)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combinators_do_not_backtrack_exponentially() {
+        // Deep nesting and long sibling lists, with selectors that almost match.
+        let html =
+            format!("{}<span></span>{}{}<i></i>", "<div>".repeat(200), "</div>".repeat(200), "<p></p>".repeat(300));
+        let dom = Dom::parse(&html);
+        let span = dom.find_all("span")[0];
+        let i = dom.find_all("i")[0];
+        let start = std::time::Instant::now();
+        let deep = Selector::parse(&format!("b {} span", "div ".repeat(12))).unwrap();
+        assert!(!deep.matches(&dom, span));
+        assert!(Selector::parse(&format!("{} > span", "div ".repeat(12))).unwrap().matches(&dom, span));
+        let wide = Selector::parse(&format!("b ~ {} i", "p ~ ".repeat(12))).unwrap();
+        assert!(!wide.matches(&dom, i));
+        assert!(Selector::parse(&format!("{} i", "p ~ ".repeat(12))).unwrap().matches(&dom, i));
+        assert!(Selector::parse("p + i").unwrap().matches(&dom, i));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+    }
 
     #[test]
     fn named_colors_are_sorted() {
