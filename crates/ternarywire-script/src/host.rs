@@ -150,7 +150,17 @@ fn host_send(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
     check_deadline(ctx)?;
     let out = match result {
         Ok(resp) => {
-            let body = resp.body.read_all().map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            use base64::Engine;
+            let bytes = resp.body.read_all().unwrap_or_default();
+            // Text as text; other bytes (images, archives) also as base64,
+            // for `res.stream` and `res.dataURI()`.
+            let (body, base64) = match std::str::from_utf8(&bytes) {
+                Ok(text) => (text.to_string(), None),
+                Err(_) => (
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                    Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+                ),
+            };
             serde_json::json!({
                 "ok": true,
                 "response": {
@@ -158,6 +168,7 @@ fn host_send(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
                     "status": resp.status,
                     "headers": resp.headers,
                     "body": body,
+                    "bodyBase64": base64,
                     "responseTime": resp.response_time_ms,
                     "responseSize": resp.response_size,
                 }

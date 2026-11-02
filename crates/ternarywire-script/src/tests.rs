@@ -752,3 +752,39 @@ fn values_that_do_not_serialize_keep_the_job_results() {
     assert_eq!(out.variables.data["ok"], serde_json::json!({"a": [1]}));
     assert_eq!(out.variables.environment["bare"], "[object Object]");
 }
+
+struct BinaryHttp;
+
+impl ternarywire_core::script::ScriptHttp for BinaryHttp {
+    fn send(
+        &self,
+        _: ScriptRequest,
+        _: &ternarywire_core::VariableScopes,
+    ) -> Result<ternarywire_core::script::ScriptResponse, String> {
+        Ok(ScriptResponse {
+            code: 200,
+            status: "OK".into(),
+            headers: vec![("Content-Type".into(), "image/png".into())],
+            body: ResponseBody::Memory(vec![0xff, 0x00, 0x80, b'A'].into()),
+            response_time_ms: 1.0,
+            response_size: 4,
+        })
+    }
+}
+
+#[test]
+fn send_request_keeps_binary_bodies() {
+    let e = BoaEngine::new();
+    let mut j = job(
+        ScriptEvent::PreRequest,
+        "pm.sendRequest('http://x', (err, res) => {\n\
+           pm.environment.set('bytes', Array.from(res.stream).join(','));\n\
+           pm.environment.set('uri', res.dataURI());\n\
+         });",
+    );
+    j.http = Some(Arc::new(BinaryHttp));
+    let out = e.run(j);
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    assert_eq!(out.variables.environment["bytes"], "255,0,128,65");
+    assert_eq!(out.variables.environment["uri"], "data:image/png;base64,/wCAQQ==");
+}

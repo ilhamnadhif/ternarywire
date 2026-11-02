@@ -1041,6 +1041,7 @@
       define(this, '_loader', bodyLoader || (() => (o.body === undefined ? '' : String(o.body))));
       define(this, '_text', undefined);
       define(this, '_cookies', undefined);
+      define(this, '_base64', undefined);
     }
     text() {
       if (this._text === undefined) this._text = this._loader();
@@ -1081,10 +1082,15 @@
     }
     dataURI() {
       const ct = String(this.headers.get('content-type') || 'text/plain').split(';')[0];
-      return 'data:' + ct + ';base64,' + (this === (S && S.response) ? host.bodyBase64() : btoa(unescape(encodeURIComponent(this.text()))));
+      let b64;
+      if (this === (S && S.response)) b64 = host.bodyBase64();
+      else if (this._base64 !== undefined) b64 = this._base64;
+      else b64 = btoa(unescape(encodeURIComponent(this.text())));
+      return 'data:' + ct + ';base64,' + b64;
     }
     get stream() {
       if (this === (S && S.response)) return Buffer.from(host.bodyBase64(), 'base64');
+      if (this._base64 !== undefined) return Buffer.from(this._base64, 'base64');
       return Buffer.from(this.text(), 'utf8');
     }
     toJSON() {
@@ -2297,8 +2303,11 @@
     const raw = host.send(JSON.stringify(coreReq), JSON.stringify(scopesSnapshot()));
     const result = JSON.parse(raw);
     let err = null, res;
-    if (result.ok) res = new Response(result.response);
-    else err = new Error(result.error);
+    if (result.ok) {
+      res = new Response(result.response);
+      // Bodies that are not UTF-8 text (images, archives) also come as base64.
+      if (typeof result.response.bodyBase64 === 'string') define(res, '_base64', result.response.bodyBase64);
+    } else err = new Error(result.error);
     const location = S.location;
     if (typeof callback === 'function') {
       Promise.resolve().then(() => guard(() => callback(err, res), location));
