@@ -1832,24 +1832,30 @@ fn md_description(md: &str) -> String {
     let mut text: Vec<&str> = Vec::new();
     let flush = |text: &mut Vec<&str>, out: &mut String| {
         if !text.is_empty() {
+            let mut spans = true;
             for line in defuse_links(&text.join("\n")).split('\n') {
-                neutralize_line(line, out);
+                neutralize_line(line, &mut spans, out);
                 out.push('\n');
             }
             text.clear();
         }
     };
-    for line in md.lines() {
-        let t = line.trim_start();
+    // A lone `\r` ends a line in CommonMark too.
+    let md = md.replace("\r\n", "\n");
+    for line in md.strip_suffix(['\n', '\r']).unwrap_or(&md).split(['\n', '\r']) {
+        // As in CommonMark (and `render_blocks`): 4+ spaces of indent make no
+        // fence, and only spaces and tabs indent.
+        let indented = indent_width(line) >= 4;
+        let t = line.trim_start_matches([' ', '\t']);
         match fence {
             Some((ch, n)) => {
-                if fence_close(t, ch, n) {
+                if !indented && fence_close(t, ch, n) {
                     fence = None;
                 }
                 out.push_str(line);
                 out.push('\n');
             }
-            None => match fence_open(t) {
+            None => match fence_open(t).filter(|_| !indented) {
                 Some((ch, n, _)) => {
                     flush(&mut text, &mut out);
                     fence = Some((ch, n));
@@ -1861,8 +1867,9 @@ fn md_description(md: &str) -> String {
         }
     }
     flush(&mut text, &mut out);
-    if fence.is_some() {
-        out.push_str("```\n");
+    // Only a fence of the same kind and at least the same length closes it.
+    if let Some((ch, n)) = fence {
+        out.push_str(&char::from(ch).to_string().repeat(n));
     }
     out.trim_end().to_string()
 }
@@ -1930,7 +1937,15 @@ fn md_dest_is_safe(dest: &str) -> bool {
     d.trim().is_empty() || (!head.contains('&') && safe_url(&d).is_some())
 }
 
-fn neutralize_line(line: &str, out: &mut String) {
+/// Escapes `<` outside code spans and autolinks. A code span is kept only
+/// while `spans` holds: once a backtick string is left open, a later line of
+/// the paragraph may close it and shift the pairing, and a `|` splits a GFM
+/// table cell even inside a code span; from then on every `<` is escaped (it
+/// shows as `&lt;` inside code, which is merely visible).
+fn neutralize_line(line: &str, spans: &mut bool, out: &mut String) {
+    if line.trim().is_empty() {
+        *spans = true;
+    }
     let b = line.as_bytes();
     let (mut i, mut start) = (0, 0);
     while i < b.len() {
@@ -1938,7 +1953,13 @@ fn neutralize_line(line: &str, out: &mut String) {
             b'\\' => i += 2,
             b'`' => {
                 let n = run_len(b, i, b'`');
-                i = find_tick_run(b, i + n, n).map(|close| close + n).unwrap_or(i + n);
+                match find_tick_run(b, i + n, n) {
+                    Some(close) if *spans && !line[i + n..close].contains('|') => i = close + n,
+                    _ => {
+                        *spans = false;
+                        i += n;
+                    }
+                }
             }
             b'<' => match autolink(line, i) {
                 Some((_, end)) => i = end,
@@ -2408,6 +2429,44 @@ mod tests {
         for bad in ["href=\"javascript:", "href=\"data:", "href=\"vbscript:", "href=\"JaVaScRiPt:"] {
             assert!(!html.contains(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn markdown_description_keeps_html_out_of_fake_fences_and_code_spans() {
+        let img = "<img src=x onerror=alert(1)>";
+        for desc in [
+            // 4 spaces of indent make no fence (an indented code block or paragraph text).
+            format!("    ```\n{img}\n    ```"),
+            format!("text\n    ```\n{img}"),
+            // Only spaces and tabs indent; a lone `\r` ends a line.
+            format!("\u{a0}```\n{img}\n```"),
+            format!("```\nx\r```\r{img}\n```"),
+            // A backtick left open on one line closes on the next.
+            format!("`a\nb` {img} `c`"),
+            format!("`a` `b\nc` {img} `d`"),
+            // GFM splits table cells at `|`, even inside a code span.
+            format!("| h |\n| --- |\n| `x | {img} | y` |"),
+        ] {
+            let md = md_description(&desc);
+            assert!(!md.contains("<img"), "{desc:?} -> {md:?}");
+        }
+        // An unclosed fence is closed by one of the same kind and length, so it
+        // cannot swallow the rest of the document.
+        assert_eq!(md_description("~~~\ncode"), "~~~\ncode\n~~~");
+        assert_eq!(md_description("````js\n```\n"), "````js\n```\n````");
+        assert_eq!(md_description("```\ncode\n"), "```\ncode\n```");
+        let mut c = Collection::new("C");
+        let mut f = Folder::new("F");
+        f.description = "~~~\nopen".into();
+        let mut g = Folder::new("G");
+        g.description = format!("~~~\n{img}\n~~~");
+        c.items.push(f.into());
+        c.items.push(g.into());
+        let md = to_markdown(&c, &DocsOptions::default());
+        assert!(md.contains("~~~\nopen\n~~~\n") && md.contains(&format!("~~~\n{img}\n~~~")), "{md}");
+        // Real fences and one-line code spans stay verbatim.
+        assert_eq!(md_description(&format!("   ```\n{img}\n   ```")), format!("   ```\n{img}\n   ```"));
+        assert_eq!(md_description("`a < b` and <x"), "`a < b` and &lt;x");
     }
 
     #[test]
