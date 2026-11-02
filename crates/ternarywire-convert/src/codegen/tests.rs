@@ -496,3 +496,35 @@ fn httpie_items_escape_separator_characters() {
     let code = generate(Language::Httpie, &compact(&r));
     assert!(code.starts_with("http --follow --raw='-----BEGIN KEY-----' POST 'https://h.test/'"), "{code}");
 }
+
+#[test]
+fn paths_with_line_breaks_stay_out_of_code() {
+    // A line break in a path must not end a comment (or a string) and turn the rest into code.
+    let path = "/tmp/a\nPWNED();\r\u{2028}x";
+    let mut file = HttpRequest::new("PUT", "https://h.test/blob");
+    file.body.mode = BodyMode::Binary;
+    file.body.binary_path = path.into();
+    let mut form = HttpRequest::new("POST", "https://h.test/upload");
+    form.body.mode = BodyMode::FormData;
+    form.body.form_data = vec![FormField::file("f", path)];
+    for req in [file, form] {
+        let p = compact(&req);
+        for lang in Language::ALL {
+            // Single quotes span lines in these; HTTP is no code.
+            if matches!(
+                lang,
+                Language::Curl
+                    | Language::Httpie
+                    | Language::Wget
+                    | Language::PowerShell
+                    | Language::Php
+                    | Language::Ruby
+                    | Language::Http
+            ) {
+                continue;
+            }
+            let code = generate(*lang, &p);
+            assert!(!code.lines().any(|l| l.trim_start().starts_with("PWNED")), "{lang:?}\n{code}");
+        }
+    }
+}

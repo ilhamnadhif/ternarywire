@@ -402,7 +402,8 @@ pub fn js_fetch(v: &View) -> String {
             }
         }
         BodyView::File(p) => {
-            writeln!(out, "// Replace with the contents of {}", path_str(p)).ok();
+            // Quoted: a line break in the path would end the comment.
+            writeln!(out, "// Replace with the contents of {}", js(&path_str(p))).ok();
             out.push_str("const file = \"<file contents here>\";\n\n");
             Some("file")
         }
