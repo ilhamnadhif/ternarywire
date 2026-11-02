@@ -224,6 +224,7 @@ pub enum Msg {
     },
     Flow {
         tab: u64,
+        epoch: u64,
         event: crate::flow_tab::FlowMsg,
     },
     Capture {
@@ -1310,9 +1311,10 @@ impl TernaryWireApp {
                     }
                 }
                 Msg::Update(m) => crate::update::on_msg(self, m),
-                Msg::Flow { tab, event } => {
+                Msg::Flow { tab, epoch, event } => {
                     if let Some(i) = self.tab_index(tab)
                         && let TabKind::Flow(t) = &mut self.tabs[i].kind
+                        && current(t.run_epoch(), epoch)
                     {
                         t.on_msg(event);
                     }
@@ -2888,5 +2890,43 @@ mod tests {
         assert!(app.save_scratch_to(tab, &cid, None, "Saved"));
         assert!(app.tabs[0].kind.scratch().is_none());
         assert_eq!(tab_names(&app), ["Saved"]);
+    }
+
+    /// The running flow tab's state: (running, run number).
+    fn flow_state(app: &TernaryWireApp) -> (bool, u64) {
+        match &app.tabs[app.active].kind {
+            TabKind::Flow(t) => (t.is_running(), t.run_epoch()),
+            _ => panic!("flow tab"),
+        }
+    }
+
+    /// ⌘↩ stops a running flow and ⌘↩ runs it again: the stopped run's last
+    /// message must not end the new run (which then could not be stopped).
+    #[test]
+    fn a_stopped_flow_run_does_not_end_the_next_one() {
+        use ternarywire_flows::{Block, BlockConfig, DelayConfig, Edge, Flow, FlowResult};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let mut flow = Flow::new("slow");
+        let start = flow.start().expect("a new flow starts with Start").id.clone();
+        let wait = Block::new(BlockConfig::Delay(DelayConfig { ms: "60000".into() }), "Wait", (300.0, 0.0));
+        let wait = flow.add_block(wait);
+        flow.edges.push(Edge::new(&start, "next", &wait, "in"));
+        let id = app.add_tab(TabKind::Flow(Box::new(crate::flow_tab::FlowTab::new(flow, None))));
+        press(&mut app, Key::Enter, Modifiers::COMMAND);
+        frame(&mut app, Vec::new());
+        let (running, first) = flow_state(&app);
+        assert!(running, "{:?}", app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+        press(&mut app, Key::Enter, Modifiers::COMMAND);
+        assert!(!flow_state(&app).0);
+        press(&mut app, Key::Enter, Modifiers::COMMAND);
+        frame(&mut app, Vec::new());
+        assert!(flow_state(&app).0);
+        let done = crate::flow_tab::FlowMsg::Done(Box::new(FlowResult { cancelled: true, ..Default::default() }));
+        app.tx.send(Msg::Flow { tab: id, epoch: first, event: done }).unwrap();
+        app.pump_messages();
+        assert!(flow_state(&app).0, "the new run still runs");
+        press(&mut app, Key::Enter, Modifiers::COMMAND);
+        assert!(!flow_state(&app).0, "and can be stopped");
     }
 }

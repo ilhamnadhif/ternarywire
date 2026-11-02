@@ -102,6 +102,9 @@ struct LogLine {
 
 #[derive(Default)]
 struct RunState {
+    /// Number of the run (see [`crate::app::next_epoch`]); a stopped run
+    /// still sends events, which must not touch the next one.
+    epoch: u64,
     cancel: Option<CancellationToken>,
     started: Option<Instant>,
     status: HashMap<String, BlockStatus>,
@@ -197,6 +200,11 @@ impl FlowTab {
 
     pub fn is_running(&self) -> bool {
         self.run.cancel.is_some()
+    }
+
+    /// The number of the latest run; events carry the number of their run.
+    pub fn run_epoch(&self) -> u64 {
+        self.run.epoch
     }
 
     pub fn stop(&mut self) {
@@ -881,18 +889,19 @@ fn start_run(app: &mut TernaryWireApp, tab_id: u64, tab: &mut FlowTab) {
     let mut vars = app.ws.scopes_for(None);
     let flow = tab.flow.clone();
     let cancel = CancellationToken::new();
-    tab.run = RunState { cancel: Some(cancel.clone()), started: Some(Instant::now()), ..Default::default() };
+    let epoch = crate::app::next_epoch();
+    tab.run = RunState { epoch, cancel: Some(cancel.clone()), started: Some(Instant::now()), ..Default::default() };
     let tx = app.tx.clone();
     let ctx = app.ctx.clone();
     app.rt.spawn(async move {
         let events = tx.clone();
         let repaint = ctx.clone();
         let mut sink = move |e: FlowEvent| {
-            let _ = events.send(Msg::Flow { tab: tab_id, event: FlowMsg::Event(e) });
+            let _ = events.send(Msg::Flow { tab: tab_id, epoch, event: FlowMsg::Event(e) });
             repaint.request_repaint();
         };
         let result = ternarywire_flows::run_flow(&env, &flow, &mut vars, opts, &mut sink, &cancel).await;
-        let _ = tx.send(Msg::Flow { tab: tab_id, event: FlowMsg::Done(Box::new(result)) });
+        let _ = tx.send(Msg::Flow { tab: tab_id, epoch, event: FlowMsg::Done(Box::new(result)) });
         ctx.request_repaint();
     });
 }
