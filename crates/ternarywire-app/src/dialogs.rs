@@ -1150,8 +1150,13 @@ fn docs_options(
 /// Generates static HTML documentation for a collection and opens it.
 pub fn preview_docs(app: &mut TernaryWireApp, c: &ternarywire_core::model::Collection) {
     let opts = docs_options(app, c);
-    let dir = std::env::temp_dir().join(format!("ternarywire-docs-{}", ternarywire_core::util::slugify(&c.name)));
-    match ternarywire_convert::docs::write_html_site(c, &opts, &dir) {
+    // A new folder only this user can write to (not a predictable name).
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("ternarywire-docs-{}-", ternarywire_core::util::slugify(&c.name)))
+        .tempdir()
+        .map(|d| d.keep())
+        .map_err(|e| e.to_string());
+    match dir.and_then(|dir| ternarywire_convert::docs::write_html_site(c, &opts, &dir).map_err(|e| e.to_string())) {
         Ok(index) => {
             let _ = open::that(index);
         }

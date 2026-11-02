@@ -3430,8 +3430,10 @@ fn details_view(ui: &mut Ui, exec: &Execution) {
 fn open_visualization(exec: &Execution) {
     let Some(v) = &exec.visualization else { return };
     let Ok(html) = ternarywire_html::browser_html(&v.template, &v.data) else { return };
-    let path = std::env::temp_dir().join(format!("ternarywire-visualize-{}.html", std::process::id()));
-    if std::fs::write(&path, html).is_ok() {
+    // The template's scripts run from this file: nobody else may change it.
+    if let Ok(path) = crate::widgets::private_temp_file("ternarywire-visualize-", ".html")
+        && std::fs::write(&path, html).is_ok()
+    {
         let _ = open::that(&path);
     }
 }

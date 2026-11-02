@@ -928,6 +928,15 @@ pub fn open_web_link(url: &str) -> bool {
     allowed
 }
 
+/// A new, empty file for the browser to open (an HTML preview, a
+/// visualization): a random name in the temp folder that only this user
+/// can read (0600), kept when the app ends. A predictable name lets another
+/// user of the computer read the file or put their own there first.
+pub fn private_temp_file(prefix: &str, suffix: &str) -> std::io::Result<std::path::PathBuf> {
+    let file = tempfile::Builder::new().prefix(prefix).suffix(suffix).tempfile()?;
+    file.into_temp_path().keep().map_err(|e| e.error)
+}
+
 #[cfg(test)]
 mod link_tests {
     #[test]
@@ -943,5 +952,21 @@ mod link_tests {
         ] {
             assert!(!super::open_web_link(url), "{url}");
         }
+    }
+
+    /// Files for the browser get a fresh, private name each time.
+    #[test]
+    fn temp_files_for_the_browser_are_private() {
+        let a = super::private_temp_file("ternarywire-test-", ".html").unwrap();
+        let b = super::private_temp_file("ternarywire-test-", ".html").unwrap();
+        assert_ne!(a, b);
+        assert!(a.file_name().unwrap().to_string_lossy().ends_with(".html"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&a, "<p>x</p>").unwrap();
+            assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = (std::fs::remove_file(a), std::fs::remove_file(b));
     }
 }

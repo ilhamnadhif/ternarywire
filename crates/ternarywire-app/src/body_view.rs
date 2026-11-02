@@ -1305,11 +1305,11 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
                 tr("HTML preview opens in your browser."),
                 |ui| open = kit::ghost(ui, Some(icons::ARROW_SQUARE_OUT), tr("Open in browser")).clicked(),
             );
-            if open {
-                let path = std::env::temp_dir().join(format!("ternarywire-preview-{}.html", std::process::id()));
-                if resp.body.save_to(&path).is_ok() {
-                    let _ = open::that(&path);
-                }
+            if open
+                && let Ok(path) = crate::widgets::private_temp_file("ternarywire-preview-", ".html")
+                && resp.body.save_to(&path).is_ok()
+            {
+                let _ = open::that(&path);
             }
             ui.add_space(8.0);
         }
