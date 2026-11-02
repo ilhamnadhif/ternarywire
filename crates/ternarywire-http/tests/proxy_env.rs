@@ -90,4 +90,15 @@ async fn system_proxy_from_environment() {
     let body = client.get(format!("http://127.0.0.1:{server}/y")).send().await.unwrap().text().await.unwrap();
     assert_eq!(body, "ok");
     assert_eq!(http.log().len(), before);
+
+    // The system settings are read again every minute: a client built
+    // before follows the new ones.
+    let moved = proxies::http_proxy(None).await;
+    // SAFETY: as above.
+    unsafe { std::env::set_var("HTTP_PROXY", moved.url()) };
+    ternarywire_http::proxy::reload_system_proxy();
+    let body = client.get(format!("http://web.test:{server}/z")).send().await.unwrap().text().await.unwrap();
+    assert_eq!(body, "ok");
+    assert_eq!(moved.log(), vec![format!("GET web.test:{server}")]);
+    assert_eq!(http.log().len(), before);
 }

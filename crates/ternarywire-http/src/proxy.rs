@@ -201,9 +201,13 @@ pub fn apply_to_reqwest(
     builder: reqwest::ClientBuilder,
     settings: &ProxySettings,
 ) -> Result<reqwest::ClientBuilder, ProxyError> {
-    if custom_pac(settings).is_some() || (!custom_enabled(settings) && settings.use_system) {
+    if custom_pac(settings).is_some() {
         let resolver = ProxyResolver::new(settings)?;
         Ok(builder.proxy(reqwest::Proxy::custom(move |url| resolver.proxy_url(url))))
+    } else if !custom_enabled(settings) && settings.use_system {
+        // Looked up per request: the system settings are read again every
+        // minute, and clients live longer.
+        Ok(builder.proxy(reqwest::Proxy::custom(|url| ProxyResolver::system().proxy_url(url))))
     } else if custom_enabled(settings) {
         let url = custom_proxy_url(settings)?;
         // Already validated; reqwest's error is not quoted as it may show the URL.
@@ -372,6 +376,7 @@ const PAC_TTL: Duration = Duration::from_secs(300);
 const PAC_FAILURE_TTL: Duration = Duration::from_secs(60);
 
 /// The PAC script from `source`, loaded at most once per [`PAC_TTL`].
+/// Loading blocks (see [`crate::blocking`]).
 fn load_pac(source: &PacSource) -> Result<Arc<Pac>, ProxyError> {
     load_pac_via(source, None)
 }
@@ -399,21 +404,23 @@ fn load_pac_via(source: &PacSource, resolve_to: Option<SocketAddr>) -> Result<Ar
     if let Some(result) = cached(&key) {
         return result;
     }
-    let _loading = LOADING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(result) = cached(&key) {
-        return result;
-    }
-    let result = match source {
-        PacSource::Url(u) => Pac::load(u, pac::LOAD_TIMEOUT, resolve_to),
-        PacSource::Script(s) => Pac::from_source(s.clone()),
-        PacSource::Wpad(u) => Pac::load(u, wpad::WPAD_TIMEOUT, resolve_to),
-    }
-    .map(Arc::new);
-    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let cache = guard.get_or_insert_with(Default::default);
-    cache.retain(|_, (at, _)| at.elapsed() < PAC_TTL);
-    cache.insert(key, (Instant::now(), result.clone()));
-    result
+    crate::blocking(|| {
+        let _loading = LOADING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(result) = cached(&key) {
+            return result;
+        }
+        let result = match source {
+            PacSource::Url(u) => Pac::load(u, pac::LOAD_TIMEOUT, resolve_to),
+            PacSource::Script(s) => Pac::from_source(s.clone()),
+            PacSource::Wpad(u) => Pac::load(u, wpad::WPAD_TIMEOUT, resolve_to),
+        }
+        .map(Arc::new);
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = guard.get_or_insert_with(Default::default);
+        cache.retain(|_, (at, _)| at.elapsed() < PAC_TTL);
+        cache.insert(key, (Instant::now(), result.clone()));
+        result
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,20 +1236,20 @@ fn bypass_matcher(no: String) -> Arc<Matcher> {
 /// How long the system proxy configuration is reused before it is read again.
 const SYSTEM_PROXY_TTL: Duration = Duration::from_secs(60);
 
+/// The system proxy configuration and when it was read.
+static SYSTEM_PROXY: std::sync::Mutex<Option<(Instant, Arc<SystemProxy>)>> = std::sync::Mutex::new(None);
+
 /// The system proxy configuration, read at most once a minute per process:
 /// the first read of the macOS network settings can take seconds, and so
 /// can loading a PAC script or looking for one (WPAD). Once read, an
 /// outdated configuration stays in use while a background thread reads it
 /// again, so connections never wait for that.
 fn system_proxy() -> Arc<SystemProxy> {
-    static CACHE: std::sync::Mutex<Option<(Instant, Arc<SystemProxy>)>> = std::sync::Mutex::new(None);
     static REFRESHING: AtomicBool = AtomicBool::new(false);
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, s)) = cache.as_ref() {
+    if let Some((at, s)) = SYSTEM_PROXY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if at.elapsed() >= SYSTEM_PROXY_TTL && !REFRESHING.swap(true, Ordering::SeqCst) {
             let refresh = || {
-                let s = load_system_proxy();
-                *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), s));
+                reload_system_proxy();
                 REFRESHING.store(false, Ordering::SeqCst);
             };
             if std::thread::Builder::new().name("system-proxy".into()).spawn(refresh).is_err() {
@@ -1252,9 +1259,23 @@ fn system_proxy() -> Arc<SystemProxy> {
         return s.clone();
     }
     // The first read: concurrent callers wait for this one.
+    crate::blocking(|| {
+        let mut cache = SYSTEM_PROXY.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, s)) = cache.as_ref() {
+            return s.clone();
+        }
+        let s = load_system_proxy();
+        *cache = Some((Instant::now(), s.clone()));
+        s
+    })
+}
+
+/// Reads the system proxy configuration again now, as happens once a
+/// minute (tests).
+#[doc(hidden)]
+pub fn reload_system_proxy() {
     let s = load_system_proxy();
-    *cache = Some((Instant::now(), s.clone()));
-    s
+    *SYSTEM_PROXY.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), s));
 }
 
 /// Reads the environment and the OS proxy settings, loading or discovering
@@ -1314,13 +1335,21 @@ impl ProxyResolver {
             resolver.matcher =
                 Some(Arc::new(Matcher::builder().all(String::from(url)).no(bypass_list(&settings.bypass)).build()));
         } else if settings.use_system {
-            let system = system_proxy();
-            resolver.matcher = Some(system.matcher.clone());
-            resolver.bypass = Some(system.bypass.clone());
-            resolver.bypass_simple = system.simple;
-            resolver.pac = system.pac.clone();
+            resolver = ProxyResolver::system();
         }
         Ok(resolver)
+    }
+
+    /// The system proxy as last read (see `system_proxy`).
+    fn system() -> ProxyResolver {
+        let system = system_proxy();
+        ProxyResolver {
+            matcher: Some(system.matcher.clone()),
+            bypass: Some(system.bypass.clone()),
+            bypass_simple: system.simple,
+            pac: system.pac.clone(),
+            pac_credentials: None,
+        }
     }
 
     /// Always connects directly.

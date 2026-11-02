@@ -7,7 +7,6 @@
 //! megabytes of memory.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,6 +14,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -273,7 +273,8 @@ impl HttpEngine {
                 return Ok(c.clone());
             }
         }
-        let client = build_client(&snapshot.config, &key, &self.cookies)?;
+        // Reads files, may load a PAC script or the system proxy settings.
+        let client = crate::blocking(|| build_client(&snapshot.config, &key, &self.cookies))?;
         let mut clients = self.clients.lock();
         // A `set_config` while it was built: it is not cached for the new settings.
         if clients.generation == snapshot.generation {
@@ -566,7 +567,7 @@ impl HttpEngine {
         };
         let total = resp.content_length();
         let mut mem: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(limit).min(1 << 20) as usize);
-        let mut file: Option<(std::io::BufWriter<std::fs::File>, tempfile::TempPath)> = None;
+        let mut file: Option<(tokio::io::BufWriter<tokio::fs::File>, tempfile::TempPath)> = None;
         let mut received = 0u64;
         loop {
             let chunk = tokio::select! {
@@ -576,22 +577,28 @@ impl HttpEngine {
             let Some(chunk) = chunk else { break };
             received += chunk.len() as u64;
             if file.is_none() && mem.len() as u64 + chunk.len() as u64 > limit {
-                let tmp = match &temp_dir {
+                // File I/O off the async worker: tokio::fs, and creating it
+                // on the blocking pool.
+                let dir = temp_dir.clone();
+                let tmp = tokio::task::spawn_blocking(move || match &dir {
                     Some(d) => {
                         std::fs::create_dir_all(d).ok();
                         tempfile::NamedTempFile::with_prefix_in("ternarywire-body-", d)
                     }
                     None => tempfile::NamedTempFile::with_prefix("ternarywire-body-"),
-                }
+                })
+                .await
+                .map_err(std::io::Error::other)
+                .flatten()
                 .map_err(|e| HttpError::new(HttpErrorKind::File, format!("Could not create temporary file: {e}")))?;
                 let (f, path) = tmp.into_parts();
-                let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
-                w.write_all(&mem).map_err(file_err)?;
+                let mut w = tokio::io::BufWriter::with_capacity(1 << 20, tokio::fs::File::from_std(f));
+                w.write_all(&mem).await.map_err(file_err)?;
                 mem = Vec::new();
                 file = Some((w, path));
             }
             match &mut file {
-                Some((w, _)) => w.write_all(&chunk).map_err(file_err)?,
+                Some((w, _)) => w.write_all(&chunk).await.map_err(file_err)?,
                 None => mem.extend_from_slice(&chunk),
             }
             if let Some(p) = &opts.progress {
@@ -600,7 +607,7 @@ impl HttpEngine {
         }
         Ok(match file {
             Some((mut w, path)) => {
-                w.flush().map_err(file_err)?;
+                w.flush().await.map_err(file_err)?;
                 ResponseBody::File { path: Arc::new(path), len: received }
             }
             None => ResponseBody::Memory(Bytes::from(mem)),
