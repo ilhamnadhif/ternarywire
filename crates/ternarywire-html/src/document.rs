@@ -543,6 +543,8 @@ pub struct ImageRef {
     /// Decoded bytes of a `data:` URI.
     pub data: Option<Arc<[u8]>>,
     pub mime: Option<String>,
+    /// Hash of `data`, its image cache key (hashed once, not every frame).
+    pub data_hash: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

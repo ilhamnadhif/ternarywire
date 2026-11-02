@@ -119,9 +119,16 @@ impl Dom {
     }
 
     /// Every element with this tag name in document order.
+    #[cfg(test)]
     pub fn find_all(&self, tag: &str) -> Vec<NodeId> {
+        self.find_all_in(0, tag)
+    }
+
+    /// Every element with this tag name in `root` (or `root` itself), in
+    /// document order.
+    pub fn find_all_in(&self, root: NodeId, tag: &str) -> Vec<NodeId> {
         let mut out = Vec::new();
-        self.walk(0, &mut |id| {
+        self.walk(root, &mut |id| {
             if self.tag(id) == Some(tag) {
                 out.push(id);
             }

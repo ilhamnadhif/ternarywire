@@ -34,7 +34,6 @@
 //!   inside it.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 use egui::epaint::ClippedShape;
 use egui::layers::ShapeIdx;
@@ -2053,12 +2052,10 @@ impl<'d> Renderer<'_, 'd> {
 
     fn image(&mut self, ui: &mut Ui, img: &ImageRef) {
         let source = if let Some(data) = &img.data {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            data.hash(&mut h);
             let ext = img.mime.as_deref().and_then(|m| m.strip_prefix("image/")).unwrap_or("png");
             let ext = ext.split('+').next().unwrap_or(ext);
             Some(egui::ImageSource::Bytes {
-                uri: format!("bytes://ternarywire-html/{:016x}.{ext}", h.finish()).into(),
+                uri: format!("bytes://ternarywire-html/{:016x}.{ext}", img.data_hash).into(),
                 bytes: egui::load::Bytes::Shared(data.clone()),
             })
         } else if img.src.starts_with("http://") || img.src.starts_with("https://") {

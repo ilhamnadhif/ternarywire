@@ -397,10 +397,16 @@ fn marker(style: ListStyle, n: i64) -> Option<String> {
     })
 }
 
+/// Longest `data:` URI payload decoded; a larger image shows its `alt` text.
+const MAX_DATA_URI: usize = 16 << 20;
+
 /// Decodes `data:[mime][;base64],payload`.
 pub(crate) fn decode_data_uri(src: &str) -> Option<(Option<String>, Vec<u8>)> {
     let rest = src.trim().strip_prefix("data:")?;
     let (meta, payload) = rest.split_once(',')?;
+    if payload.len() > MAX_DATA_URI {
+        return None;
+    }
     let base64 = meta.split(';').any(|p| p.eq_ignore_ascii_case("base64"));
     let mime = meta.split(';').next().filter(|m| !m.is_empty()).map(|m| m.to_ascii_lowercase());
     let bytes = if base64 {
@@ -706,8 +712,9 @@ impl Builder<'_> {
                 return;
             }
             "select" => {
-                let options = dom.find_all("option");
-                let mine: Vec<NodeId> = options.into_iter().filter(|o| is_descendant(dom, *o, id)).collect();
+                // Its own options: walking the whole document for every
+                // `<select>` made many of them quadratic.
+                let mine = dom.find_all_in(id, "option");
                 let chosen = mine.iter().find(|o| dom.attr(**o, "selected").is_some()).or(mine.first());
                 let text = chosen.map(|o| collapse_ws(&dom.text_content(*o)).trim().to_string()).unwrap_or_default();
                 self.push_text(&format!("{text} ▾"), &c, ictx, flow, ws);
@@ -848,7 +855,13 @@ impl Builder<'_> {
             Some((mime, bytes)) => (mime, Some(Arc::<[u8]>::from(bytes))),
             None => (None, None),
         };
-        ImageRef { src, alt, width: size(c.width), height: size(c.height), link: ictx.link.clone(), data, mime }
+        let data_hash = data.as_ref().map_or(0, |d| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(d, &mut h);
+            std::hash::Hasher::finish(&h)
+        });
+        let (width, height) = (size(c.width), size(c.height));
+        ImageRef { src, alt, width, height, link: ictx.link.clone(), data, mime, data_hash }
     }
 
     fn table(&mut self, el: NodeId, c: &Computed) -> Table {
@@ -968,10 +981,6 @@ impl Builder<'_> {
 
 fn span_attr(dom: &Dom, el: NodeId) -> usize {
     dom.attr(el, "span").and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000)
-}
-
-fn is_descendant(dom: &Dom, node: NodeId, ancestor: NodeId) -> bool {
-    std::iter::successors(dom.nodes[node].parent, |p| dom.nodes[*p].parent).any(|p| p == ancestor)
 }
 
 fn set_link(block: &mut Block, link: &str) {

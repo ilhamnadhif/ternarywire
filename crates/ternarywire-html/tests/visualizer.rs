@@ -351,6 +351,31 @@ fn links_and_images() {
 }
 
 #[test]
+fn image_data_is_hashed_once_and_capped() {
+    let image = |doc: &Document| match &doc.root.children()[0].inlines()[0] {
+        Inline::Image(img) => img.clone(),
+        other => panic!("{other:?}"),
+    };
+    let a = image(&Document::from_html("<p><img src='data:image/png;base64,iVBORw0K' alt=a></p>"));
+    let b = image(&Document::from_html("<p><img src='data:image/png;base64,iVBORw0L' alt=b></p>"));
+    assert!(a.data.is_some() && a.data_hash != 0 && a.data_hash != b.data_hash);
+    // Too large to decode: shown by its alt text.
+    let huge = format!("<p><img src='data:image/png;base64,{}' alt=huge></p>", "A".repeat(17 << 20));
+    let img = image(&Document::from_html(&huge));
+    assert_eq!((img.data.is_none(), img.alt.as_str()), (true, "huge"));
+}
+
+#[test]
+fn many_selects_lay_out_in_linear_time() {
+    let html = "<select><option>a</option><optgroup><option selected>b</option></optgroup></select>".repeat(20_000);
+    let start = std::time::Instant::now();
+    let doc = Document::from_html(&format!("<p>{html}</p><select><option>c</option></select>"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+    let text = doc.root.text();
+    assert!(text.starts_with("b ▾b ▾") && text.ends_with("c ▾"), "{}", &text[..40]);
+}
+
+#[test]
 fn blockquote_hr_and_rows() {
     let doc = Document::from_html(
         "<blockquote>quoted</blockquote><hr>\
