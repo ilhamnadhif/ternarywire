@@ -359,6 +359,8 @@ struct EditCtx {
     fetching: bool,
     max_pretty: u64,
     side_layout: bool,
+    /// Settings > Requests: what the request's own settings fall back to.
+    defaults: ternarywire_core::settings::RequestDefaults,
 }
 
 #[derive(Default)]
@@ -432,6 +434,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Reques
         fetching: app.pending_tokens.contains(&item.id),
         token,
         max_pretty: app.settings.max_pretty_bytes,
+        defaults: app.settings.request.clone(),
         // Side by side needs room for both; a narrower tab has the response below.
         side_layout: app.settings.ui.layout == ternarywire_core::settings::ResponseLayout::Side
             && ui.available_width() >= SIDE_MIN_WIDTH,
@@ -1000,19 +1003,18 @@ fn sections_http(
                 http.headers = headers;
             }
             ui.add_space(16.0);
-            auto_headers(ui, http);
+            auto_headers(ui, http, &ectx.defaults);
         }
         Section::Body => body_editor(ui, tab, http, ectx, actions),
-        Section::Settings => settings_editor(ui, &mut http.settings),
+        Section::Settings => settings_editor(ui, &mut http.settings, &ectx.defaults),
         Section::Scripts | Section::Docs => {}
     }
 }
 
 /// Headers the client adds by itself, in a collapsible, muted table. Default
 /// headers can be switched off; calculated ones are shown with a lock.
-fn auto_headers(ui: &mut Ui, http: &mut HttpRequest) {
+fn auto_headers(ui: &mut Ui, http: &mut HttpRequest, defaults: &ternarywire_core::settings::RequestDefaults) {
     let p = theme::pal(ui);
-    let defaults = ternarywire_core::settings::RequestDefaults::default();
     // (name, value, Some(on) when it can be switched off)
     let mut rows: Vec<(String, String, Option<bool>)> = Vec::new();
     for (k, v) in defaults.default_headers() {
@@ -2085,8 +2087,7 @@ fn number_setting<T: std::str::FromStr + ToString + Copy>(
     });
 }
 
-fn settings_editor(ui: &mut Ui, s: &mut RequestSettings) {
-    let d = ternarywire_core::settings::RequestDefaults::default();
+fn settings_editor(ui: &mut Ui, s: &mut RequestSettings, d: &ternarywire_core::settings::RequestDefaults) {
     let width = ui.available_width().min(860.0);
     ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_width(width);
@@ -3874,6 +3875,24 @@ pub(crate) fn stat_card(ui: &mut Ui, width: f32, label: &str, value: &str, color
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The request settings show the app's defaults (Settings > Requests)
+    /// as "Default (on/off)", not the built-in ones.
+    #[test]
+    fn request_settings_show_the_app_defaults() {
+        let defaults_off = |on: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = TernaryWireApp::for_test(dir.path());
+            app.settings.request.follow_redirects = on;
+            app.settings.request.verify_ssl = on;
+            let mut tab = RequestTab::scratch(RequestItem::new("r", HttpRequest::new("GET", "http://x.test")));
+            tab.section = Section::Settings;
+            app.add_tab(crate::app::TabKind::Request(Box::new(tab)));
+            app.draw_frame(Vec::new());
+            app.draw_frame(Vec::new()).labels.iter().filter(|l| *l == tr("Default (off)")).count()
+        };
+        assert_eq!(defaults_off(false), defaults_off(true) + 2);
+    }
 
     #[test]
     fn detects_subscriptions() {
