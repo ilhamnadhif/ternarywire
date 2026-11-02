@@ -5,7 +5,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use ternarywire_core::{PreparedBody, PreparedRequest};
 
 use crate::error::AuthError;
-use crate::util::{hmac_sha256, host_header, param, parse_url, rfc3986, sha256};
+use crate::util::{hmac_sha256, host_header, param, parse_url, read_file, rfc3986, sha256};
 
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 const UNSIGNED: &str = "UNSIGNED-PAYLOAD";
@@ -96,16 +96,29 @@ pub(crate) fn apply_at(req: &mut PreparedRequest, now: DateTime<Utc>) -> Result<
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let url = parse_url(req)?;
 
-    // Presigned S3 URLs leave the payload unsigned; other services sign it.
-    let payload_hash = if to_query && s3 {
-        UNSIGNED.to_string()
-    } else {
-        match &req.body {
-            PreparedBody::None => hex::encode(sha256(b"")),
-            PreparedBody::Bytes(b) => hex::encode(sha256(b)),
-            _ => UNSIGNED.to_string(),
+    // Only S3 takes an unsigned payload: presigned URLs, and bodies not in
+    // memory. Other services get the hash of a body file; form-data bytes
+    // (their boundary) are not known before sending.
+    let payload_hash = match &req.body {
+        _ if to_query && s3 => UNSIGNED.to_string(),
+        PreparedBody::None => hex::encode(sha256(b"")),
+        PreparedBody::Bytes(b) => hex::encode(sha256(b)),
+        PreparedBody::File(_) | PreparedBody::Multipart(_) if s3 => UNSIGNED.to_string(),
+        PreparedBody::File(path) => {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            read_file(path, &mut |b| h.update(b))?;
+            hex::encode(h.finalize())
+        }
+        PreparedBody::Multipart(_) => {
+            return Err(AuthError::invalid(format!(
+                "AWS Signature: a form-data body cannot be signed for `{service}` (its bytes are only known when \
+                 sending, and only S3 accepts an unsigned payload); send it as a raw or binary body"
+            )));
         }
     };
+    // The engine replaces a multipart Content-Type (reqwest adds the boundary): it cannot be signed.
+    let multipart = matches!(req.body, PreparedBody::Multipart(_));
 
     let mut extra_query = Vec::new();
     if to_query {
@@ -132,7 +145,7 @@ pub(crate) fn apply_at(req: &mut PreparedRequest, now: DateTime<Utc>) -> Result<
     if !to_query {
         for (k, v) in &req.headers {
             let lk = k.to_ascii_lowercase();
-            if lk != "host" && is_signed_header(&lk) {
+            if lk != "host" && is_signed_header(&lk) && !(multipart && lk == "content-type") {
                 match headers.iter_mut().find(|(n, _)| *n == lk) {
                     Some((_, existing)) => {
                         existing.push(',');
@@ -314,6 +327,55 @@ mod tests {
         // Other services keep encoding the path as sent once more.
         let other = |path: &str| canonical_uri(&url::Url::parse(&format!("https://h{path}")).unwrap(), false);
         assert_eq!(other("/my%20file/a=b"), "/my%2520file/a%3Db");
+    }
+
+    #[test]
+    fn file_and_form_data_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("body");
+        std::fs::write(&path, "Param1=value1").unwrap();
+        let signed = |body: PreparedBody, service: &str, content_type: &str| {
+            let mut req = PreparedRequest {
+                method: "POST".into(),
+                url: "https://example.amazonaws.com/".into(),
+                headers: vec![
+                    ("Content-Type".into(), content_type.into()),
+                    ("X-Amz-Date".into(), "20150830T123600Z".into()),
+                ],
+                body,
+                auth: suite_auth().with("service", service),
+                ..Default::default()
+            };
+            apply(&mut req).map(|()| req)
+        };
+        // A body file is hashed: the suite's post-x-www-form-urlencoded signature.
+        let form = "application/x-www-form-urlencoded";
+        let req = signed(PreparedBody::File(path.clone()), "service", form).unwrap();
+        assert!(
+            req.header("authorization")
+                .unwrap()
+                .ends_with("Signature=ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a")
+        );
+        let missing = signed(PreparedBody::File(dir.path().join("nope")), "service", form);
+        assert!(missing.unwrap_err().to_string().contains("nope"));
+
+        let parts = || {
+            PreparedBody::Multipart(vec![ternarywire_core::MultipartPart {
+                name: "a".into(),
+                value: ternarywire_core::MultipartValue::Text("b".into()),
+                content_type: None,
+            }])
+        };
+        let err = signed(parts(), "execute-api", "multipart/form-data").unwrap_err();
+        assert!(err.to_string().contains("form-data"), "{err}");
+        // S3 takes it unsigned, without the Content-Type the engine replaces.
+        let req = signed(parts(), "s3", "multipart/form-data").unwrap();
+        assert_eq!(req.header("x-amz-content-sha256"), Some(UNSIGNED));
+        let h = req.header("authorization").unwrap();
+        assert!(h.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date,"), "{h}");
+        let req = signed(PreparedBody::File(path), "s3", "text/plain").unwrap();
+        assert_eq!(req.header("x-amz-content-sha256"), Some(UNSIGNED));
+        assert!(req.header("authorization").unwrap().contains("SignedHeaders=content-type;host;"));
     }
 
     #[test]
