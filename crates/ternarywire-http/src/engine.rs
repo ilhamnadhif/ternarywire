@@ -591,8 +591,7 @@ impl HttpEngine {
                     None => tempfile::NamedTempFile::with_prefix("ternarywire-body-"),
                 })
                 .await
-                .map_err(std::io::Error::other)
-                .flatten()
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)))
                 .map_err(|e| HttpError::new(HttpErrorKind::File, format!("Could not create temporary file: {e}")))?;
                 let (f, path) = tmp.into_parts();
                 let mut w = tokio::io::BufWriter::with_capacity(1 << 20, tokio::fs::File::from_std(f));
