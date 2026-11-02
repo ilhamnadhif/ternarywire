@@ -18,6 +18,55 @@ use super::spec::Registry;
 /// Serialises lockfile updates of concurrent jobs in this process.
 static LOCK_WRITE: Mutex<()> = Mutex::new(());
 
+/// How long a lockfile update waits for another process.
+const FILE_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// A lock this old was left by a process that died while writing.
+const FILE_LOCK_STALE: Duration = Duration::from_secs(5);
+
+/// Serialises lockfile updates across processes (worker processes of the
+/// isolated engine, parallel CLI runs): `<lockfile>.lock`, created
+/// exclusively and removed when dropped.
+struct FileLock(PathBuf);
+
+impl FileLock {
+    fn acquire(lockfile: &Path) -> Result<FileLock, String> {
+        let mut name = lockfile.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        let path = lockfile.with_file_name(name);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let started = Instant::now();
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(FileLock(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+                    if age.is_some_and(|a| a >= FILE_LOCK_STALE) {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if started.elapsed() >= FILE_LOCK_WAIT {
+                        return Err(format!(
+                            "could not lock {}: another process holds {}",
+                            lockfile.display(),
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => return Err(format!("could not lock {}: {e}", lockfile.display())),
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub(crate) const LOCKFILE_VERSION: u32 = 1;
 
 /// Engine-wide limits for packages.
@@ -314,6 +363,7 @@ impl Session {
             return Ok(());
         }
         let _guard = LOCK_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = FileLock::acquire(&path)?;
         let mut lock = read_lock(&path)?;
         let before = lock.clone();
         lock.version = LOCKFILE_VERSION;
@@ -334,5 +384,39 @@ impl Session {
 
     pub fn library_dir(&self) -> Option<&PathBuf> {
         self.ctx.library_dir.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lockfile_updates_wait_for_other_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(PackageContext::for_workspace(dir.path(), "https://esm.sh"));
+        let lockfile = ctx.lockfile_path.clone().unwrap();
+        let limits = PackageLimits { module_bytes: 1024, graph_bytes: 1024, fetch_timeout: Duration::from_secs(1) };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut session = Session::new(ctx, limits, deadline, Arc::new(AtomicBool::new(false)));
+        session.check_pin("https://esm.sh/a", "sha256-a").unwrap();
+
+        // Another process is in the middle of its own update.
+        let held = lockfile.with_file_name("packages.lock.json.lock");
+        std::fs::write(&held, "").unwrap();
+        let writer = std::thread::spawn(move || session.flush());
+        std::thread::sleep(Duration::from_millis(200));
+        let other = Lockfile {
+            version: LOCKFILE_VERSION,
+            modules: [("https://esm.sh/b".to_string(), "sha256-b".to_string())].into(),
+            ..Default::default()
+        };
+        std::fs::write(&lockfile, serde_json::to_string(&other).unwrap()).unwrap();
+        std::fs::remove_file(&held).unwrap();
+
+        writer.join().unwrap().unwrap();
+        let merged = read_lock(&lockfile).unwrap();
+        assert_eq!(merged.modules.keys().collect::<Vec<_>>(), ["https://esm.sh/a", "https://esm.sh/b"]);
+        assert!(!held.exists());
     }
 }
