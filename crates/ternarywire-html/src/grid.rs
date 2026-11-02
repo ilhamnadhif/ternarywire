@@ -223,7 +223,7 @@ pub(crate) fn parse_areas(v: &str) -> Option<Vec<Vec<String>>> {
         rest = &after[end + 1..];
     }
     let width = rows.first().map(Vec::len)?;
-    rows.iter().all(|r| r.len() == width).then_some(rows)
+    (rows.len() <= MAX_TRACKS && width <= MAX_TRACKS && rows.iter().all(|r| r.len() == width)).then_some(rows)
 }
 
 pub(crate) fn parse_line(v: &str) -> GridLine {
@@ -295,24 +295,25 @@ pub(crate) fn expand_tracks(
             (max, min) => max.or(min),
         }
     };
+    // The tracks besides the automatic repetition, at most MAX_TRACKS.
     let others: Vec<f32> = list
         .iter()
         .flat_map(|e| match e {
-            Tracks::One(t) => vec![fixed(t).unwrap_or(0.0)],
-            Tracks::Repeat(Repeat::Count(n), ts) => {
-                std::iter::repeat_n(ts.iter().map(|t| fixed(t).unwrap_or(0.0)), *n as usize).flatten().collect()
-            }
-            Tracks::Repeat(..) => Vec::new(),
+            Tracks::One(t) => std::slice::from_ref(t).iter().cycle().take(1),
+            Tracks::Repeat(Repeat::Count(n), ts) => ts.iter().cycle().take(*n as usize * ts.len()),
+            Tracks::Repeat(_, ts) => ts.iter().cycle().take(0),
         })
+        .take(MAX_TRACKS)
+        .map(|t| fixed(t).unwrap_or(0.0))
         .collect();
+    let repeat = |out: &mut Vec<TrackSize>, ts: &[TrackSize], n: usize| {
+        let room = MAX_TRACKS.saturating_sub(out.len());
+        out.extend(ts.iter().cycle().take((n * ts.len()).min(room)));
+    };
     for entry in list {
         match entry {
-            Tracks::One(t) => out.push(*t),
-            Tracks::Repeat(Repeat::Count(n), ts) => {
-                for _ in 0..*n {
-                    out.extend_from_slice(ts);
-                }
-            }
+            Tracks::One(t) => repeat(&mut out, std::slice::from_ref(t), 1),
+            Tracks::Repeat(Repeat::Count(n), ts) => repeat(&mut out, ts, *n as usize),
             Tracks::Repeat(kind, ts) => {
                 let sizes: Option<Vec<f32>> = ts.iter().map(fixed).collect();
                 let count = match sizes {
@@ -324,9 +325,7 @@ pub(crate) fn expand_tracks(
                     _ => 1,
                 };
                 let start = out.len();
-                for _ in 0..count {
-                    out.extend_from_slice(ts);
-                }
+                repeat(&mut out, ts, count);
                 if *kind == Repeat::AutoFit {
                     fit = Some(start..out.len());
                 }
@@ -400,7 +399,15 @@ fn resolve_axis(start: &GridLine, end: &GridLine, explicit: usize, areas: &[Vec<
     }
 }
 
-/// Occupancy of grid cells, rows grow on demand.
+/// Explicit tracks of one axis kept; more (many `repeat()`s, or a huge
+/// `grid-template-areas`) are dropped, like the 1000 cap on counts and spans.
+pub(crate) const MAX_TRACKS: usize = 1000;
+/// Cells the occupancy grid tracks. Past them items are placed as if the
+/// cells were free (and may overlap): rows × columns of a crafted grid would
+/// otherwise need gigabytes.
+const MAX_CELLS: usize = 1 << 20;
+
+/// Occupancy of grid cells, rows grow on demand (up to [`MAX_CELLS`]).
 struct Occupancy {
     cols: usize,
     cells: Vec<bool>,
@@ -411,15 +418,18 @@ impl Occupancy {
         if c.1 > self.cols {
             return false;
         }
-        (r..r + rows).all(|r| (c.0..c.1).all(|c| !self.cells.get(r * self.cols + c).copied().unwrap_or(false)))
+        // Rows past the cells kept are free.
+        let end = (r + rows).min(self.cells.len() / self.cols);
+        (r..end).all(|r| (c.0..c.1).all(|c| !self.cells[r * self.cols + c]))
     }
 
     fn mark(&mut self, r: (usize, usize), c: (usize, usize)) {
-        let need = r.1 * self.cols;
+        let end = r.1.min(MAX_CELLS / self.cols);
+        let need = end * self.cols;
         if self.cells.len() < need {
             self.cells.resize(need, false);
         }
-        for r in r.0..r.1 {
+        for r in r.0..end {
             for c in c.0..c.1.min(self.cols) {
                 self.cells[r * self.cols + c] = true;
             }
@@ -717,6 +727,28 @@ mod tests {
         let list = parse_track_list(list, 16.0).expect("track list");
         let (tracks, _) = expand_tracks(&list, avail, gap, px);
         size_tracks(&tracks, items, avail, gap, &[], true, px)
+    }
+
+    #[test]
+    fn huge_grids_are_capped() {
+        // Many repetitions: at most MAX_TRACKS explicit tracks.
+        let list = parse_track_list(&"repeat(1000, 1px 2px) ".repeat(50), 16.0).unwrap();
+        assert_eq!(expand_tracks(&list, 800.0, 0.0, px).0.len(), MAX_TRACKS);
+        let list = parse_track_list(&format!("{} repeat(auto-fill, 1px)", "repeat(1000, 1px) ".repeat(50)), 16.0);
+        let (tracks, fit) = expand_tracks(&list.unwrap(), 1e6, 0.0, px);
+        assert_eq!((tracks.len(), fit), (MAX_TRACKS, None));
+        let areas = format!("'{}'", "a ".repeat(MAX_TRACKS + 1));
+        assert!(parse_areas(&areas).is_none());
+        // Items spanning 1000 rows and columns stack without a cell each.
+        let item =
+            GridPlacement { row_start: GridLine::Span(1000), column_start: GridLine::Span(1000), ..Default::default() };
+        let items = vec![&item; 400];
+        let start = std::time::Instant::now();
+        let (cells, cols, rows) = place(&items, 3000, 1, &[], false);
+        assert_eq!((cells.len(), cols), (400, 3000));
+        // Past the tracked cells, a cursor step per row of items, not per span.
+        assert!(rows <= MAX_CELLS / 3000 + 400 + 1000, "{rows}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
     }
 
     #[test]
