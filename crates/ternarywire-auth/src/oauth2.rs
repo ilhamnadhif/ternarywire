@@ -2,6 +2,7 @@
 //! attaching the access token to requests.
 
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 
 use base64::Engine;
@@ -544,6 +545,23 @@ fn place_token(req: &mut PreparedRequest, auth: &Auth, token: &str) {
     }
 }
 
+/// The lock refreshing or fetching the token stored under `key` takes:
+/// requests needing a new token at the same time wait for the first one
+/// and use its token (with refresh token rotation, only the first refresh
+/// succeeds).
+fn token_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    type Locks = HashMap<String, Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: LazyLock<std::sync::Mutex<Locks>> = LazyLock::new(Default::default);
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, l| l.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
 /// Attaches a token: a valid stored one, a refreshed one, the manually
 /// pasted `accessToken`, or a freshly fetched one for non-interactive grants.
 pub(crate) async fn apply(req: &mut PreparedRequest, ctx: &AuthContext<'_>) -> Result<AuthApplied, AuthError> {
@@ -551,9 +569,21 @@ pub(crate) async fn apply(req: &mut PreparedRequest, ctx: &AuthContext<'_>) -> R
     let key = owner_key(req);
     let grant = GrantType::of(&auth);
     let mut applied = AuthApplied::default();
-    let stored = ctx.tokens.get(&key);
-    let mut token: Option<String> =
-        stored.as_ref().filter(|t| !t.is_expired(EXPIRY_SKEW_SECS)).map(|t| t.access_token.clone());
+    let valid = |t: &Option<OAuth2Token>| {
+        t.as_ref().filter(|t| !t.is_expired(EXPIRY_SKEW_SECS)).map(|t| t.access_token.clone())
+    };
+    let mut stored = ctx.tokens.get(&key);
+    let mut token: Option<String> = valid(&stored);
+    // Held while refreshing or fetching; another request may have done it meanwhile.
+    let _refreshing = match token {
+        Some(_) => None,
+        None => {
+            let guard = token_lock(&key).lock_owned().await;
+            stored = ctx.tokens.get(&key);
+            token = valid(&stored);
+            Some(guard)
+        }
+    };
 
     if token.is_none()
         && auth.get_bool("autoRefresh", true)

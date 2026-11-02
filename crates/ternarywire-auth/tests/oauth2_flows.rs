@@ -22,6 +22,8 @@ struct ServerState {
     challenge: Mutex<Option<String>>,
     token_calls: AtomicUsize,
     last_form: Mutex<HashMap<String, String>>,
+    /// Rotated refresh tokens, each accepted once.
+    used_refresh_tokens: Mutex<Vec<String>>,
 }
 
 type Shared = Arc<ServerState>;
@@ -85,6 +87,20 @@ async fn token(State(s): State<Shared>, headers: HeaderMap, Form(f): Form<HashMa
                 return bad("invalid_grant");
             }
             Json(json!({"access_token": "pw-token", "refresh_token": "r1", "expires_in": 3600})).into_response()
+        }
+        Some("refresh_token") if f.get("refresh_token").is_some_and(|t| t.starts_with("rot-")) => {
+            // Refresh token rotation: a new refresh token every time, the old one invalid.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let old = f["refresh_token"].clone();
+            let mut used = s.used_refresh_tokens.lock().unwrap();
+            if used.contains(&old) {
+                return bad("invalid_grant");
+            }
+            used.push(old.clone());
+            Json(
+                json!({"access_token": format!("after-{old}"), "refresh_token": format!("{old}x"), "expires_in": 3600}),
+            )
+            .into_response()
         }
         Some("refresh_token") => {
             if f.get("refresh_token").map(String::as_str) != Some("r1") {
@@ -213,6 +229,32 @@ async fn password_grant_body_auth_and_refresh() {
     let after = tokens.get("f-1").unwrap();
     assert_eq!(after.refresh_token.as_deref(), Some("r1"), "old refresh token kept");
     assert_eq!(state.last_form.lock().unwrap().get("grant_type").map(String::as_str), Some("refresh_token"));
+}
+
+#[tokio::test]
+async fn concurrent_requests_refresh_a_rotating_token_once() {
+    let (server, state) = start().await;
+    let http = client();
+    let tokens = MemoryTokenStore::default();
+    let expired = OAuth2Token {
+        access_token: "old".into(),
+        refresh_token: Some("rot-1".into()),
+        expires_at: Some(0),
+        ..Default::default()
+    };
+    tokens.set("rot", Some(expired));
+    let ctx = AuthContext { tokens: &tokens, http: &http };
+    let auth = base_auth(&server, "authorization_code");
+    let send = || async {
+        let mut r = req(auth.clone(), "rot");
+        ternarywire_auth::apply(&mut r, &ctx).await.unwrap();
+        r.header("authorization").map(str::to_string)
+    };
+    let (a, b, c) = tokio::join!(send(), send(), send());
+    let fresh = Some("Bearer after-rot-1".to_string());
+    assert_eq!([a, b, c], [fresh.clone(), fresh.clone(), fresh]);
+    assert_eq!(state.token_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(tokens.get("rot").unwrap().refresh_token.as_deref(), Some("rot-1x"));
 }
 
 #[tokio::test]
