@@ -198,7 +198,9 @@ pub fn prepare(req: &HttpRequest, ctx: &PrepareContext<'_>) -> PreparedRequest {
         .headers
         .iter()
         .filter(|h| h.enabled && !h.key.trim().is_empty())
-        .map(|h| (r(h.key.trim()), r(&h.value)))
+        .map(|h| (r(h.key.trim()).trim().to_string(), r(&h.value)))
+        // A name from a variable that is empty is no header (and no valid one).
+        .filter(|(k, _)| !k.is_empty())
         .collect();
     let has = |headers: &[(String, String)], name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
 
@@ -244,30 +246,38 @@ pub fn prepare(req: &HttpRequest, ctx: &PrepareContext<'_>) -> PreparedRequest {
             PreparedBody::Multipart(parts)
         }
         BodyMode::Binary => {
-            if req.body.binary_path.trim().is_empty() {
-                PreparedBody::None
-            } else {
-                PreparedBody::File(resolve_path(&r(&req.body.binary_path), ctx.base_dir))
-            }
+            let path = r(req.body.binary_path.trim());
+            let path = path.trim();
+            if path.is_empty() { PreparedBody::None } else { PreparedBody::File(resolve_path(path, ctx.base_dir)) }
         }
         BodyMode::GraphQl => {
             let gql = &req.body.graphql;
             let vars_text = r(&gql.variables);
             let variables = if vars_text.trim().is_empty() {
-                serde_json::Value::Object(Default::default())
+                Ok(serde_json::Value::Object(Default::default()))
             } else {
-                serde_json::from_str(&vars_text).unwrap_or(serde_json::Value::Null)
+                serde_json::from_str(&vars_text)
             };
             let mut obj = serde_json::Map::new();
             obj.insert("query".into(), serde_json::Value::String(r(&gql.query)));
-            obj.insert("variables".into(), variables);
+            if let Ok(v) = &variables {
+                obj.insert("variables".into(), v.clone());
+            }
             if let Some(op) = gql.operation_name.as_ref().filter(|o| !o.is_empty()) {
                 obj.insert("operationName".into(), serde_json::Value::String(r(op)));
             }
             if !has(&headers, "content-type") {
                 headers.push(("Content-Type".into(), "application/json".into()));
             }
-            PreparedBody::Bytes(Bytes::from(serde_json::Value::Object(obj).to_string()))
+            let mut text = serde_json::Value::Object(obj).to_string();
+            if variables.is_err() {
+                // Variables that are not JSON are sent as typed, like Postman
+                // does: the server then reports them instead of the request
+                // silently going out without them.
+                text.pop();
+                text.push_str(&format!(",\"variables\":{vars_text}}}"));
+            }
+            PreparedBody::Bytes(Bytes::from(text))
         }
     };
 
@@ -350,6 +360,43 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(p.body.as_bytes().unwrap()).unwrap();
         assert_eq!(v["variables"]["x"], 1);
         assert_eq!(v["query"], "{ me { id } }");
+    }
+
+    #[test]
+    fn graphql_variables_that_are_not_json_are_sent_as_typed() {
+        let mut scopes = VariableScopes::default();
+        scopes.environment.insert("id".into(), "7".into());
+        let defaults = RequestDefaults::default();
+        let auth = Auth::default();
+        let mut req = HttpRequest::new("POST", "https://x.test/");
+        req.body.mode = BodyMode::GraphQl;
+        req.body.graphql.query = "query($id: ID!) { user(id: $id) { name } }".into();
+        req.body.graphql.variables = "{\"id\": {{id}},}".into();
+        let p = prepare(&req, &ctx(&scopes, &auth, &defaults));
+        let body = std::str::from_utf8(p.body.as_bytes().unwrap()).unwrap();
+        assert_eq!(body, r#"{"query":"query($id: ID!) { user(id: $id) { name } }","variables":{"id": 7,}}"#);
+    }
+
+    #[test]
+    fn empty_header_names_and_padded_binary_paths() {
+        let mut scopes = VariableScopes::default();
+        scopes.environment.insert("empty".into(), "".into());
+        scopes.environment.insert("name".into(), " X-Name ".into());
+        scopes.environment.insert("file".into(), "body.bin".into());
+        let defaults = RequestDefaults::default();
+        let auth = Auth::default();
+        let mut req = HttpRequest::new("POST", "https://x.test/");
+        req.headers.push(KeyValue::new("{{empty}}", "dropped"));
+        req.headers.push(KeyValue::new("{{name}}", "kept"));
+        req.body.mode = BodyMode::Binary;
+        req.body.binary_path = " {{file}} ".into();
+        let base = PathBuf::from("/ws");
+        let p = prepare(&req, &PrepareContext { base_dir: Some(&base), ..ctx(&scopes, &auth, &defaults) });
+        assert!(p.headers.iter().all(|(k, v)| !k.is_empty() && v != "dropped"), "{:?}", p.headers);
+        assert_eq!(p.header("x-name"), Some("kept"));
+        assert_eq!(p.body, PreparedBody::File(PathBuf::from("/ws/body.bin")));
+        req.body.binary_path = "{{empty}}".into();
+        assert_eq!(prepare(&req, &ctx(&scopes, &auth, &defaults)).body, PreparedBody::None);
     }
 
     #[test]
