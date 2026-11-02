@@ -237,16 +237,20 @@ impl<'a> View<'a> {
     }
 
     /// Body text parsed as JSON when the content type says JSON. Used by the
-    /// JavaScript generators, so `None` when a number would lose precision
-    /// as a JS double (integers beyond 2^53).
+    /// JavaScript generators to write `JSON.stringify(<literal>)`, so `None`
+    /// unless that sends the body unchanged but for whitespace (see
+    /// [`exact_in_js`]; escapes, duplicate keys and number spellings must
+    /// also survive the round trip).
     pub fn json_body(&self) -> Option<serde_json::Value> {
         match &self.body {
             BodyView::Text(t)
                 if self.content_type().map(|c| c.to_ascii_lowercase().contains("json")).unwrap_or(false) =>
             {
-                serde_json::from_str::<serde_json::Value>(t)
-                    .ok()
-                    .filter(|v| (v.is_object() || v.is_array()) && exact_in_js(v))
+                serde_json::from_str::<serde_json::Value>(t).ok().filter(|v| {
+                    (v.is_object() || v.is_array())
+                        && exact_in_js(v)
+                        && serde_json::to_string(v).is_ok_and(|s| s == compact_json(t))
+                })
             }
             _ => None,
         }
@@ -272,19 +276,61 @@ impl<'a> View<'a> {
     }
 }
 
-/// True when every number of `v` survives a round trip through a JS double.
+/// True when `JSON.stringify` of `v` written as a JS literal gives back `v`
+/// as serde_json writes it: every number survives a JS double and is spelled
+/// the same (JS writes `1` for 1.0 and `1e+21` for 1e21), no key is
+/// `__proto__` (a literal sets the prototype with it) and integer-like keys,
+/// which JS objects list first in ascending order, already are.
 fn exact_in_js(v: &serde_json::Value) -> bool {
     const MAX_SAFE: u64 = (1 << 53) - 1;
     match v {
-        serde_json::Value::Number(n) => match (n.as_u64(), n.as_i64()) {
-            (Some(u), _) => u <= MAX_SAFE,
-            (_, Some(i)) => i.unsigned_abs() <= MAX_SAFE,
-            _ => true,
+        serde_json::Value::Number(n) => match (n.as_u64(), n.as_i64(), n.as_f64()) {
+            (Some(u), _, _) => u <= MAX_SAFE,
+            (_, Some(i), _) => i.unsigned_abs() <= MAX_SAFE,
+            (_, _, Some(f)) => f.fract() != 0.0 && !n.to_string().contains(['e', 'E']),
+            _ => false,
         },
         serde_json::Value::Array(items) => items.iter().all(exact_in_js),
-        serde_json::Value::Object(map) => map.values().all(exact_in_js),
+        serde_json::Value::Object(map) => {
+            let mut last_index = None;
+            let mut named = false;
+            for k in map.keys() {
+                // An array index: canonical digits below 2^32 - 1.
+                let index = k.parse::<u32>().ok().filter(|&i| i < u32::MAX && i.to_string() == *k);
+                match index {
+                    Some(i) if named || last_index.is_some_and(|l| l >= i) => return false,
+                    Some(i) => last_index = Some(i),
+                    None if k == "__proto__" => return false,
+                    None => named = true,
+                }
+            }
+            map.values().all(exact_in_js)
+        }
         _ => true,
     }
+}
+
+/// JSON text without the whitespace between tokens.
+fn compact_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if matches!(c, ' ' | '\t' | '\n' | '\r') {
+            continue;
+        } else if c == '"' {
+            in_string = true;
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub(crate) fn file_name(p: &Path) -> String {

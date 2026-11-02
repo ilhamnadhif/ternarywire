@@ -528,3 +528,31 @@ fn paths_with_line_breaks_stay_out_of_code() {
         }
     }
 }
+
+#[test]
+fn js_json_literal_only_when_it_sends_the_same_body() {
+    let js_body = |body: &str| {
+        let mut r = HttpRequest::new("POST", "https://h.test/");
+        r.body = Body::raw_text(body, RawLanguage::Json);
+        let p = compact(&r);
+        let fetch = generate(Language::JavaScriptFetch, &p);
+        let axios = generate(Language::NodeAxios, &p);
+        assert_eq!(fetch.contains("= JSON.stringify("), axios.contains("= JSON.stringify("), "{fetch}\n{axios}");
+        fetch.contains("= JSON.stringify(")
+    };
+    // A `__proto__` key in a literal sets the prototype: JSON.stringify drops it.
+    assert!(!js_body(r#"{"__proto__": {"admin": true}, "a": 1}"#));
+    assert!(!js_body(r#"[{"x": {"__proto__": 1}}]"#));
+    // JS lists integer-like keys first, in ascending order.
+    assert!(!js_body(r#"{"b": 1, "2": 2}"#));
+    assert!(!js_body(r#"{"10": 1, "9": 2}"#));
+    assert!(js_body(r#"{"1": 1, "10": 2, "b": 3, "01": 4, "4294967295": 5}"#));
+    // Number spellings JS writes differently, digits a double drops, duplicate keys, escapes.
+    for body in [r#"{"a": 1.0}"#, r#"{"a": 1e2}"#, r#"{"a": 1.50}"#, r#"{"a": 0.1000000000000000055511}"#] {
+        assert!(!js_body(body), "{body}");
+    }
+    for body in [r#"{"a": -0}"#, r#"{"a": 1, "a": 2}"#, r#"{"a": "\u0041"}"#, r#"{"a": 1.5e300}"#] {
+        assert!(!js_body(body), "{body}");
+    }
+    assert!(js_body("{\n  \"a\": [1, -2.5, 0.001, \"x\\\"y\\n\", null, true],\n  \"b\": {}\n}"));
+}
