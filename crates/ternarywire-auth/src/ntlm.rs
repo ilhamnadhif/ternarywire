@@ -7,6 +7,10 @@
 //!   3. `handle_challenge` computes AUTHENTICATE (type 3) and asks for a retry.
 //!      The NEGOTIATE bytes covered by the MIC are read back from the request.
 //!
+//! A server that offers only `Negotiate` gets the same raw NTLMSSP messages
+//! under that scheme, as Windows sends them when Negotiate falls back to
+//! NTLM (IIS accepts them); Kerberos and SPNEGO tokens are not answered.
+//!
 //! Over HTTPS the AUTHENTICATE message is bound to the TLS channel (Extended
 //! Protection): MsvAvChannelBindings is the MD5 of a `gss_channel_bindings_struct`
 //! carrying the `tls-server-end-point` binding of the server certificate the
@@ -454,8 +458,8 @@ fn target_name(url: &str) -> String {
     }
 }
 
-/// AUTHENTICATE header value answering the CHALLENGE `token`, bound to
-/// `channel_bindings` (unhashed application data) when given.
+/// AUTHENTICATE message (base64) answering the CHALLENGE `token`, bound
+/// to `channel_bindings` (unhashed application data) when given.
 fn answer_challenge(
     req: &PreparedRequest,
     negotiate: &[u8],
@@ -475,7 +479,7 @@ fn answer_challenge(
     let input =
         ClientInput { user, password: auth.get("password"), domain, workstation, target_name: &spn, channel_bindings };
     let msg = authenticate_message(&input, negotiate, &ch, n);
-    Ok(format!("NTLM {}", B64.encode(msg.message)))
+    Ok(B64.encode(msg.message))
 }
 
 pub(crate) fn apply(req: &mut PreparedRequest) -> Result<(), AuthError> {
@@ -498,20 +502,36 @@ pub(crate) fn handle_challenge(
     }
     let values = headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("www-authenticate")).map(|(_, v)| v.as_str());
     let challenges = parse_challenges(values);
-    let Some(ntlm) = challenges.iter().find(|c| c.scheme == "ntlm") else { return Ok(false) };
+    // A server offering only Negotiate takes raw NTLMSSP tokens in it (what
+    // Windows sends when Negotiate falls back to NTLM; IIS accepts them).
+    let offered = |scheme: &str| challenges.iter().find(|c| c.scheme == scheme);
+    let (scheme, challenge) = match (offered("ntlm"), offered("negotiate")) {
+        (Some(c), _) => ("NTLM", c),
+        (None, Some(c)) => ("Negotiate", c),
+        (None, None) => return Ok(false),
+    };
     let sent = sent_message(req);
-    match (&ntlm.token68, sent.as_deref().and_then(message_type)) {
-        // Server wants NTLM but we have not started: send NEGOTIATE.
+    let sent_scheme = req.header("authorization").and_then(|h| h.split_whitespace().next()).unwrap_or_default();
+    match (&challenge.token68, sent.as_deref().and_then(message_type)) {
+        // Not started, or our NEGOTIATE went in the scheme the server did
+        // not offer (`apply` starts with NTLM): send NEGOTIATE.
         (None, None) => {
-            req.set_header("Authorization", format!("NTLM {}", B64.encode(negotiate_message())));
+            req.set_header("Authorization", format!("{scheme} {}", B64.encode(negotiate_message())));
             Ok(true)
         }
-        // CHALLENGE received in response to our NEGOTIATE.
-        (Some(token), Some(1)) => {
+        (None, Some(1)) if !sent_scheme.eq_ignore_ascii_case(scheme) => {
+            req.set_header("Authorization", format!("{scheme} {}", B64.encode(negotiate_message())));
+            Ok(true)
+        }
+        // CHALLENGE received in response to our NEGOTIATE. A Negotiate
+        // token that is not NTLMSSP (Kerberos, SPNEGO) is not ours to answer.
+        (Some(token), Some(1))
+            if scheme == "NTLM" || B64.decode(token.trim()).is_ok_and(|b| message_type(&b) == Some(2)) =>
+        {
             let negotiate = sent.unwrap_or_default();
             let bindings = peer_certificate.map(crate::channel_binding::tls_server_end_point);
             let value = answer_challenge(req, &negotiate, token, bindings.as_deref(), &Nonces::random())?;
-            req.set_header("Authorization", value);
+            req.set_header("Authorization", format!("{scheme} {value}"));
             Ok(true)
         }
         // Anything else (rejected AUTHENTICATE, unexpected challenge): give up.
@@ -799,6 +819,40 @@ mod tests {
         let headers = vec![("www-authenticate".to_string(), "NTLM".to_string())];
         assert!(handle_challenge(&mut req, &headers, None).unwrap());
         assert_eq!(sent_message_type(&req), Some(1));
+    }
+
+    #[test]
+    fn negotiate_only_servers_get_raw_ntlmssp() {
+        let mut req = PreparedRequest {
+            url: "http://intranet/".into(),
+            auth: Auth::new(AuthType::Ntlm).with("username", "User").with("password", "Password"),
+            ..Default::default()
+        };
+        apply(&mut req).unwrap();
+        let negotiate_only = |token: Option<&[u8]>| {
+            let v = token.map_or("Negotiate".into(), |t| format!("Negotiate {}", B64.encode(t)));
+            vec![("WWW-Authenticate".to_string(), v)]
+        };
+        // `apply` sent NEGOTIATE as NTLM: it goes again under Negotiate.
+        assert!(handle_challenge(&mut req, &negotiate_only(None), None).unwrap());
+        assert!(req.header("authorization").unwrap().starts_with("Negotiate TlRMTVNTUA"));
+        assert_eq!(sent_message_type(&req), Some(1));
+        // ...once: the same answer again means the server does not take it.
+        assert!(!handle_challenge(&mut req.clone(), &negotiate_only(None), None).unwrap());
+        // A Kerberos/SPNEGO token is not answered.
+        assert!(!handle_challenge(&mut req.clone(), &negotiate_only(Some(b"\x60\x28spnego")), None).unwrap());
+        let raw = challenge_bytes(NEGOTIATE_UNICODE | NEGOTIATE_NTLM, &av(0, &[]));
+        assert!(handle_challenge(&mut req, &negotiate_only(Some(&raw)), None).unwrap());
+        assert!(req.header("authorization").unwrap().starts_with("Negotiate "));
+        assert_eq!(sent_message_type(&req), Some(3));
+        // NTLM wins when both are offered.
+        let mut req = PreparedRequest { auth: req.auth.clone(), url: req.url.clone(), ..Default::default() };
+        let both = vec![
+            ("WWW-Authenticate".to_string(), "Negotiate".to_string()),
+            ("WWW-Authenticate".to_string(), "NTLM".to_string()),
+        ];
+        assert!(handle_challenge(&mut req, &both, None).unwrap());
+        assert!(req.header("authorization").unwrap().starts_with("NTLM "));
     }
 
     #[test]

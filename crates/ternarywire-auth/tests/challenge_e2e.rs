@@ -76,18 +76,28 @@ fn sent_channel_bindings(nt: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Minimal NTLM server: answers NEGOTIATE with a CHALLENGE and accepts any
-/// well-formed AUTHENTICATE for user "User" in domain "Domain" carrying the
-/// expected channel bindings.
 async fn ntlm_endpoint(State(epa): State<Epa>, headers: HeaderMap) -> Response {
+    ntlm_server("NTLM", &epa, &headers)
+}
+
+/// Like IIS with only the Negotiate provider: raw NTLMSSP under `Negotiate`.
+async fn negotiate_endpoint(State(epa): State<Epa>, headers: HeaderMap) -> Response {
+    ntlm_server("Negotiate", &epa, &headers)
+}
+
+/// Minimal NTLM server offering `scheme`: answers NEGOTIATE with a
+/// CHALLENGE and accepts any well-formed AUTHENTICATE for user "User" in
+/// domain "Domain" carrying the expected channel bindings.
+fn ntlm_server(scheme: &str, epa: &Epa, headers: &HeaderMap) -> Response {
     let unauthorized = |v: String| (StatusCode::UNAUTHORIZED, [("www-authenticate", v)]).into_response();
-    let Some(token) = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("NTLM "))
+    let prefix = format!("{scheme} ");
+    let Some(token) = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix(&prefix))
     else {
-        return unauthorized("NTLM".into());
+        return unauthorized(scheme.into());
     };
     let msg = B64.decode(token).unwrap_or_default();
     if msg.len() < 12 || &msg[..8] != b"NTLMSSP\0" {
-        return unauthorized("NTLM".into());
+        return unauthorized(scheme.into());
     }
     match msg[8] {
         1 => {
@@ -99,7 +109,7 @@ async fn ntlm_endpoint(State(epa): State<Epa>, headers: HeaderMap) -> Response {
             ch.extend_from_slice(&[0; 8]);
             ch.extend_from_slice(&[4, 0, 4, 0, 48, 0, 0, 0]); // target info: EOL only
             ch.extend_from_slice(&[0, 0, 0, 0]);
-            unauthorized(format!("NTLM {}", B64.encode(ch)))
+            unauthorized(format!("{scheme} {}", B64.encode(ch)))
         }
         3 => {
             let field = |at: usize| {
@@ -114,15 +124,19 @@ async fn ntlm_endpoint(State(epa): State<Epa>, headers: HeaderMap) -> Response {
             if field(28) == utf16("Domain") && field(36) == utf16("User") && bindings == epa.expected {
                 (StatusCode::OK, "ntlm ok").into_response()
             } else {
-                unauthorized("NTLM".into())
+                unauthorized(scheme.into())
             }
         }
-        _ => unauthorized("NTLM".into()),
+        _ => unauthorized(scheme.into()),
     }
 }
 
 fn app(epa: Epa) -> Router {
-    Router::new().route("/digest", get(digest_endpoint)).route("/ntlm", get(ntlm_endpoint)).with_state(epa)
+    Router::new()
+        .route("/digest", get(digest_endpoint))
+        .route("/ntlm", get(ntlm_endpoint))
+        .route("/negotiate", get(negotiate_endpoint))
+        .with_state(epa)
 }
 
 /// Plain HTTP server: NTLM must carry all-zero channel bindings.
@@ -287,6 +301,17 @@ async fn ntlm_over_https_binds_the_server_certificate() {
     let (status, _, sends) = run_with(&e, ntlm_request(format!("{base}/ntlm")), false).await;
     assert_eq!((status, sends), (401, 2));
     assert_eq!(epa.seen.lock().unwrap().last(), Some(&vec![0u8; 16]));
+}
+
+#[tokio::test]
+async fn negotiate_only_servers_get_ntlm_bound_to_the_certificate() {
+    let (base, epa, pem) = start_tls().await;
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(Some(&pem), &dir);
+    // NEGOTIATE as NTLM (refused) -> as Negotiate -> CHALLENGE -> AUTHENTICATE.
+    let (status, body, sends) = run(&e, ntlm_request(format!("{base}/negotiate"))).await;
+    assert_eq!((status, body.as_str(), sends), (200, "ntlm ok", 3));
+    assert_eq!(*epa.seen.lock().unwrap(), vec![epa.expected.to_vec()]);
 }
 
 #[tokio::test]
