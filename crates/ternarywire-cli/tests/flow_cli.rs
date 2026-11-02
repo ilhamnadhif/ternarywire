@@ -249,6 +249,16 @@ async fn flow_list_run_and_validate() {
     let r: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     assert_eq!(r["run"]["outputs"], json!({"detail": "detail-3", "label": "three"}));
 
+    // URL credentials are masked in the output unless --show-secrets.
+    let run = ["flow", "run", ws, "Saved item", "-e", "Local", "--var", "itemId=3?access_token=sekrit"];
+    let o = ternarywire(&[&run[..], &["--input", "label=x", "--verbose"]].concat(), dir.path()).await;
+    let t = text(&o);
+    assert_eq!(o.status.code(), Some(0), "{t}");
+    assert!(t.contains("/items/3?access_token=*** → 200"), "{t}");
+    assert!(!t.contains("sekrit"), "{t}");
+    let o = ternarywire(&[&run[..], &["--input", "label=x", "--show-secrets"]].concat(), dir.path()).await;
+    assert!(text(&o).contains("/items/3?access_token=sekrit → 200"), "{}", text(&o));
+
     // invalid flows and unknown flows are load errors (2)
     let o = ternarywire(&["flow", "run", ws, "Broken"], dir.path()).await;
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));

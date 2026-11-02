@@ -491,3 +491,24 @@ async fn convert_blanks_secrets_unless_asked() {
     let written = std::fs::read_to_string(dir.path().join("all.json")).unwrap();
     assert!(written.contains("tok-literal-123") && written.contains("sk-secret-456"), "{written}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verbose_network_lines_mask_credentials_unless_asked() {
+    let base = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &base);
+    let collection = json!({
+        "info": {"name": "Secrets", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [{"name": "Me", "request": {"method": "GET", "url": "{{baseUrl}}/v1/me?access_token=sekrit&page=2"}}]
+    });
+    let path = dir.path().join("secrets.postman_collection.json");
+    std::fs::write(&path, collection.to_string()).unwrap();
+    let args = ["run", path.to_str().unwrap(), "-e", env.to_str().unwrap(), "--verbose"];
+    let out = ternarywire(&args, dir.path()).await;
+    let t = text(&out);
+    assert!(t.contains("access_token=***&page=2 → 401"), "{t}");
+    assert!(!t.contains("sekrit"), "{t}");
+    let out = ternarywire(&[&args[..], &["--show-secrets"]].concat(), dir.path()).await;
+    let t = text(&out);
+    assert!(t.contains("access_token=sekrit&page=2 → 401"), "{t}");
+}

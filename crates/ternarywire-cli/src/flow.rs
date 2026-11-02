@@ -90,13 +90,17 @@ pub struct FlowRunArgs {
     /// No CLI output.
     #[arg(long)]
     pub silent: bool,
-    /// Also print network lines, debug logs, warnings and the text of
-    /// streaming AI blocks as it arrives.
+    /// Also print network lines, debug logs and the text of streaming AI
+    /// blocks as it arrives (warnings and errors always print).
     #[arg(long)]
     pub verbose: bool,
     /// Never use the OS keychain for workspace secrets.
     #[arg(long = "no-keychain")]
     pub no_keychain: bool,
+    /// Keep credentials (URL passwords, token query parameters) in the
+    /// console output; they are masked by default.
+    #[arg(long = "show-secrets")]
+    pub show_secrets: bool,
 }
 
 #[derive(Args, Debug)]
@@ -334,6 +338,7 @@ async fn run_flow(args: FlowRunArgs) -> Result<i32> {
     let mut printer = Printer {
         color,
         verbose: args.verbose,
+        show_secrets: args.show_secrets,
         quiet,
         steps: HashMap::new(),
         pending: HashMap::new(),
@@ -383,6 +388,7 @@ struct Running {
 struct Printer {
     color: bool,
     verbose: bool,
+    show_secrets: bool,
     quiet: bool,
     /// Running blocks by step.
     steps: HashMap<usize, Running>,
@@ -412,6 +418,11 @@ impl Printer {
     fn out(&self, line: String) {
         let mut o = std::io::stdout().lock();
         let _ = writeln!(o, "{line}");
+    }
+
+    /// `text` with the credentials in its URLs masked, unless `--show-secrets`.
+    fn masked(&self, text: &str) -> String {
+        if self.show_secrets { text.to_string() } else { ternarywire_runner::report::redact_urls_in(text) }
     }
 
     fn stream_line(&self, depth: usize, line: &str) {
@@ -468,7 +479,7 @@ impl Printer {
                         format!(
                             "  {} {}{status}",
                             output.get("method").and_then(Value::as_str).unwrap_or_default(),
-                            output.get("url").and_then(Value::as_str).unwrap_or_default()
+                            self.masked(output.get("url").and_then(Value::as_str).unwrap_or_default())
                         )
                     }
                     BlockKind::Loop if port == "item" => format!(
@@ -540,6 +551,9 @@ impl Printer {
                 };
                 let ind = Self::indent(depth);
                 let held = running.is_some();
+                // Log lines carry no phase: the runner's network lines (with
+                // the URLs as sent) look like any other, so all are masked.
+                let message = self.masked(message);
                 for (i, l) in message.lines().enumerate() {
                     let prefix = if i == 0 { tag } else { "" };
                     let line = self.paint("2", &format!("{ind}  │ {prefix}{l}"));

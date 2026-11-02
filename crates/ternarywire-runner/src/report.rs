@@ -106,6 +106,29 @@ pub fn redact_url(url: &str) -> String {
     out
 }
 
+/// `text` with every URL in it (a word containing `://`) passed through
+/// [`redact_url`], for lines such as the runner's `GET https://… → 200 OK`.
+pub fn redact_urls_in(text: &str) -> String {
+    if !text.contains("://") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(end);
+        if word.contains("://") {
+            out.push_str(&redact_url(word));
+        } else {
+            out.push_str(word);
+        }
+        let space = tail.find(|c: char| !c.is_whitespace()).unwrap_or(tail.len());
+        out.push_str(&tail[..space]);
+        rest = &tail[space..];
+    }
+    out
+}
+
 /// Masks the credentials of a result (URL, request and response headers)
 /// for reports and console output.
 pub fn redact_result(r: &mut RequestResult) {
@@ -649,6 +672,11 @@ mod tests {
         );
         assert_eq!(redact_url("http://api.test/?token"), "http://api.test/?token");
         assert_eq!(redact_url("{{base}}/x?key={{k}}"), "{{base}}/x?key=***");
+        assert_eq!(
+            redact_urls_in("GET https://u:pw@h/x?token=t&a=1 → 200 OK (5 ms)\nWebSocket connect wss://h/?api_key=k"),
+            "GET https://u:***@h/x?token=***&a=1 → 200 OK (5 ms)\nWebSocket connect wss://h/?api_key=***"
+        );
+        assert_eq!(redact_urls_in("variable \"x\" is not defined"), "variable \"x\" is not defined");
         assert_eq!(redact_url("http://user@h/p"), "http://user@h/p");
         let mut r = RequestResult {
             url: "http://h/?access_token=t".into(),
