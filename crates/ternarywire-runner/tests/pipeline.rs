@@ -140,7 +140,9 @@ async fn server() -> String {
         )
         .route(
             "/echo",
-            any(|uri: axum::http::Uri, h: HeaderMap| async move {
+            // Takes the body so the answer never races the client still
+            // writing it (a broken pipe on a busy machine).
+            any(|uri: axum::http::Uri, h: HeaderMap, _body: axum::body::Bytes| async move {
                 let hdrs: IndexMap<String, String> =
                     h.iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect();
                 axum::Json(serde_json::json!({"uri": uri.to_string(), "headers": hdrs}))
