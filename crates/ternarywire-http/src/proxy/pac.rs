@@ -4,15 +4,18 @@
 //!
 //! The script runs in its own JavaScript context on a dedicated thread with
 //! the standard helper functions (`shExpMatch`, `isInNet`, `dnsResolve`,
-//! ...) and nothing else: no network, files or timers. Results are cached
-//! per scheme, host and port. Every entry of the result is kept
+//! ...) and nothing else: no network, files or timers. Its answers are
+//! cached per URL it was given (without path and query for TLS
+//! connections, see `pac_url`); failed and timed out calls are not. A call
+//! that takes too long leaves its thread to finish it, and later calls go
+//! to a new one. Every entry of the result is kept
 //! (`PROXY a:8080; PROXY b:8080; DIRECT`): like browsers, the next one is
 //! used when a proxy cannot be reached (see `ProxyResolver`).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use boa_engine::{Context, JsResult, JsString, JsValue, NativeFunction, Source};
 use parking_lot::Mutex;
@@ -25,7 +28,7 @@ const MAX_SCRIPT_BYTES: usize = 1024 * 1024;
 pub(crate) const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one `FindProxyForURL` call may take (DNS lookups included).
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-/// Cached decisions per scheme, host and port.
+/// Cached decisions.
 const CACHE_ENTRIES: usize = 512;
 
 /// What the script chose for a URL.
@@ -38,13 +41,25 @@ pub(crate) enum PacChoice {
 
 /// A loaded PAC script.
 pub(crate) struct Pac {
-    jobs: Mutex<mpsc::Sender<Job>>,
+    /// To start a new script thread when a call hangs.
+    source: String,
+    worker: Mutex<Worker>,
     cache: Mutex<HashMap<String, Vec<PacChoice>>>,
+    call_timeout: Duration,
+}
+
+/// The script thread the calls go to, numbered so that concurrent calls
+/// timing out on it replace it once.
+struct Worker {
+    generation: u64,
+    jobs: mpsc::Sender<Job>,
 }
 
 struct Job {
     url: String,
     host: String,
+    /// When its caller stops waiting (and connects directly).
+    deadline: Instant,
     reply: mpsc::Sender<Result<String, String>>,
 }
 
@@ -67,55 +82,58 @@ impl Pac {
     /// Compiles `source` on the script thread; fails when it does not
     /// define `FindProxyForURL`.
     pub(crate) fn from_source(source: String) -> Result<Pac, ProxyError> {
-        let (tx, rx) = mpsc::channel::<Job>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-        std::thread::Builder::new()
-            .name("proxy-pac".into())
-            .spawn(move || {
-                let mut ctx = match compile(&source) {
-                    Ok(ctx) => {
-                        let _ = ready_tx.send(Ok(()));
-                        ctx
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
-                while let Ok(job) = rx.recv() {
-                    let _ = job.reply.send(call(&mut ctx, &job.url, &job.host));
-                }
-            })
-            .map_err(|e| config_error(format!("cannot start the script thread: {e}")))?;
-        match ready_rx.recv_timeout(LOAD_TIMEOUT) {
-            Ok(Ok(())) => Ok(Pac { jobs: Mutex::new(tx), cache: Mutex::new(HashMap::new()) }),
+        let (jobs, ready) = start_worker(source.clone())?;
+        match ready.recv_timeout(LOAD_TIMEOUT) {
+            Ok(Ok(())) => Ok(Pac {
+                source,
+                worker: Mutex::new(Worker { generation: 0, jobs }),
+                cache: Mutex::new(HashMap::new()),
+                call_timeout: CALL_TIMEOUT,
+            }),
             Ok(Err(e)) => Err(config_error(e)),
             Err(_) => Err(config_error("the script took too long to load".into())),
         }
     }
 
-    /// The choices for a connection to `host:port`, in the script's order
-    /// (`url` is the full URL passed to the script); never empty. Errors
-    /// and timeouts connect directly, as browsers do.
-    pub(crate) fn choose(&self, url: &str, scheme: &str, host: &str, port: u16) -> Vec<PacChoice> {
-        let key = format!("{scheme}://{host}:{port}");
+    /// The choices for a connection to `host`, in the script's order (`url`
+    /// is the URL passed to the script); never empty. Errors and timeouts
+    /// connect directly, as browsers do, and are not remembered.
+    pub(crate) fn choose(&self, url: &str, host: &str) -> Vec<PacChoice> {
+        // What the script sees: for plain HTTP the path and query too.
+        let key = format!("{url} {host}");
         if let Some(c) = self.cache.lock().get(&key) {
             return c.clone();
         }
         let (reply, answer) = mpsc::channel();
-        let job = Job { url: url.to_string(), host: host.to_string(), reply };
-        if self.jobs.lock().send(job).is_err() {
-            return vec![PacChoice::Direct];
-        }
-        let choice = match answer.recv_timeout(CALL_TIMEOUT) {
+        let deadline = Instant::now() + self.call_timeout;
+        let mut job = Job { url: url.to_string(), host: host.to_string(), deadline, reply };
+        let generation = {
+            let mut worker = self.worker.lock();
+            // A dead script thread (it failed to start again) gets one more try.
+            if let Err(mpsc::SendError(back)) = worker.jobs.send(job) {
+                job = back;
+                self.restart(&mut worker);
+                if worker.jobs.send(job).is_err() {
+                    return vec![PacChoice::Direct];
+                }
+            }
+            worker.generation
+        };
+        let result = crate::blocking(|| answer.recv_timeout(self.call_timeout));
+        let choice = match result {
             Ok(Ok(result)) => Some(parse_result(&result)).filter(|c| !c.is_empty()).unwrap_or(vec![PacChoice::Direct]),
             Ok(Err(e)) => {
                 tracing::warn!("FindProxyForURL failed: {e}");
-                vec![PacChoice::Direct]
+                return vec![PacChoice::Direct];
             }
             Err(_) => {
                 tracing::warn!("FindProxyForURL took too long");
-                vec![PacChoice::Direct]
+                // Later calls must not queue up behind this one.
+                let mut worker = self.worker.lock();
+                if worker.generation == generation {
+                    self.restart(&mut worker);
+                }
+                return vec![PacChoice::Direct];
             }
         };
         let mut cache = self.cache.lock();
@@ -125,6 +143,47 @@ impl Pac {
         cache.insert(key, choice.clone());
         choice
     }
+
+    /// Sends the next calls to a new script thread; the old one exits once
+    /// it is done with the calls it has.
+    fn restart(&self, worker: &mut Worker) {
+        match start_worker(self.source.clone()) {
+            Ok((jobs, _)) => *worker = Worker { generation: worker.generation + 1, jobs },
+            Err(e) => tracing::warn!("{e}"),
+        }
+    }
+}
+
+/// Whether a script thread compiled its script.
+type Ready = mpsc::Receiver<Result<(), String>>;
+
+/// Starts a thread running `source`: its job queue, and whether the script
+/// compiled.
+fn start_worker(source: String) -> Result<(mpsc::Sender<Job>, Ready), ProxyError> {
+    let (tx, rx) = mpsc::channel::<Job>();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    std::thread::Builder::new()
+        .name("proxy-pac".into())
+        .spawn(move || {
+            let mut ctx = match compile(&source) {
+                Ok(ctx) => {
+                    let _ = ready_tx.send(Ok(()));
+                    ctx
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            while let Ok(job) = rx.recv() {
+                // Its caller gave up while an earlier call hung.
+                if Instant::now() < job.deadline {
+                    let _ = job.reply.send(call(&mut ctx, &job.url, &job.host));
+                }
+            }
+        })
+        .map_err(|e| config_error(format!("cannot start the script thread: {e}")))?;
+    Ok((tx, ready_rx))
 }
 
 fn config_error(message: String) -> ProxyError {
@@ -570,15 +629,76 @@ mod tests {
         )
         .unwrap();
         let proxy = |u: &str| PacChoice::Proxy(url::Url::parse(u).unwrap());
-        let first = pac.choose("http://a.test/x", "http", "a.test", 80);
+        let first = pac.choose("http://a.test/x", "a.test");
         assert_eq!(first, [proxy("http://p1:3128"), PacChoice::Direct]);
-        assert_eq!(pac.choose("http://a.test/y", "http", "a.test", 80), first);
-        assert_eq!(pac.choose("https://a.test/", "https", "a.test", 443), [proxy("http://p2:3128"), PacChoice::Direct]);
-        assert_eq!(pac.choose("http://boom/", "http", "boom", 80), [PacChoice::Direct]);
+        assert_eq!(pac.choose("http://a.test/x", "a.test"), first);
+        // The script sees the path of plain HTTP URLs: another one is asked again.
+        assert_eq!(pac.choose("http://a.test/y", "a.test"), [proxy("http://p2:3128"), PacChoice::Direct]);
+        assert_eq!(pac.choose("https://a.test/", "a.test"), [proxy("http://p3:3128"), PacChoice::Direct]);
+        assert_eq!(pac.choose("http://boom/", "boom"), [PacChoice::Direct]);
         // An answer without a usable entry connects directly too.
         let odd = Pac::from_source("function FindProxyForURL() { return 'QUIC q:443; PROXY'; }".into()).unwrap();
-        assert_eq!(odd.choose("http://a.test/", "http", "a.test", 80), [PacChoice::Direct]);
+        assert_eq!(odd.choose("http://a.test/", "a.test"), [PacChoice::Direct]);
         assert!(Pac::from_source("nope(".into()).is_err());
+    }
+
+    #[test]
+    fn failed_calls_are_not_remembered() {
+        let pac = Pac::from_source(
+            "var calls = 0; function FindProxyForURL(url, host) { calls++; \
+             if (calls === 1) throw new Error('flaky'); return 'PROXY p' + calls + ':3128'; }"
+                .into(),
+        )
+        .unwrap();
+        let proxy = |u: &str| PacChoice::Proxy(url::Url::parse(u).unwrap());
+        assert_eq!(pac.choose("http://a.test/", "a.test"), [PacChoice::Direct]);
+        assert_eq!(pac.choose("http://a.test/", "a.test"), [proxy("http://p2:3128")]);
+    }
+
+    #[test]
+    fn a_hung_call_does_not_hold_up_later_ones() {
+        // Busy for 1.5 s for `slow` (a loop per call frame stays under the
+        // iteration limit).
+        let script = "function spin() { for (var i = 0; i < 2000; i++) {} }
+            function FindProxyForURL(url, host) {
+              if (host === 'slow') { var t = Date.now(); while (Date.now() - t < 1500) spin(); }
+              return 'PROXY p:3128';
+            }";
+        let mut pac = Pac::from_source(script.into()).unwrap();
+        pac.call_timeout = Duration::from_millis(200);
+        let started = Instant::now();
+        assert_eq!(pac.choose("http://slow/", "slow"), [PacChoice::Direct]);
+        assert!(started.elapsed() >= Duration::from_millis(200), "it timed out rather than failed");
+        // The first thread is still busy: the next call runs on a new one.
+        assert_eq!(pac.choose("http://fast/", "fast"), [PacChoice::Proxy(url::Url::parse("http://p:3128").unwrap())]);
+        assert!(started.elapsed() < Duration::from_millis(1200), "{:?}", started.elapsed());
+        // The timed out answer was not remembered.
+        assert!(!pac.cache.lock().keys().any(|k| k.contains("slow")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn waiting_for_a_call_does_not_stall_the_runtime() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let script = "function spin() { for (var i = 0; i < 2000; i++) {} }
+            function FindProxyForURL(url, host) {
+              var t = Date.now(); while (Date.now() - t < 400) spin();
+              return 'DIRECT';
+            }";
+        let pac = Arc::new(Pac::from_source(script.into()).unwrap());
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let counter = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        // On the only worker: the other task keeps running meanwhile.
+        let choice = tokio::spawn(async move { pac.choose("http://a.test/", "a.test") }).await.unwrap();
+        assert_eq!(choice, [PacChoice::Direct]);
+        ticker.abort();
+        assert!(ticks.load(Ordering::SeqCst) >= 10, "{} ticks", ticks.load(Ordering::SeqCst));
     }
 
     #[test]

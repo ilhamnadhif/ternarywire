@@ -1332,21 +1332,19 @@ impl ProxyResolver {
     /// `DIRECT`, credentials included), except that proxies which recently
     /// could not be reached come last, as in Chrome. Empty without a script.
     fn pac_choices(&self, url: &url::Url) -> Vec<Option<url::Url>> {
-        let (Some(pac), Some(host), Some(port)) = (self.pac.as_ref(), url.host_str(), url.port_or_known_default())
-        else {
+        let (Some(pac), Some(host)) = (self.pac.as_ref(), url.host_str()) else {
             return Vec::new();
         };
-        let choices =
-            pac.choose(&pac_url(url), url.scheme(), strip_brackets(host), port).into_iter().filter_map(|c| match c {
-                PacChoice::Direct => Some(None),
-                PacChoice::Proxy(mut proxy) => {
-                    if let Some((user, password)) = &self.pac_credentials {
-                        proxy.set_username(user).ok()?;
-                        proxy.set_password(Some(password)).ok()?;
-                    }
-                    Some(Some(proxy))
+        let choices = pac.choose(&pac_url(url), strip_brackets(host)).into_iter().filter_map(|c| match c {
+            PacChoice::Direct => Some(None),
+            PacChoice::Proxy(mut proxy) => {
+                if let Some((user, password)) = &self.pac_credentials {
+                    proxy.set_username(user).ok()?;
+                    proxy.set_password(Some(password)).ok()?;
                 }
-            });
+                Some(Some(proxy))
+            }
+        });
         let unreachable = |c: &Option<url::Url>| c.as_ref().and_then(proxy_key).is_some_and(|k| is_unreachable(&k));
         let (mut ordered, last): (Vec<_>, Vec<_>) = choices.partition(|c| !unreachable(c));
         ordered.extend(last);
