@@ -236,6 +236,36 @@ async fn emits_before_connect_are_queued() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acks_before_connect_are_sent_once_connected() {
+    for (transport, version) in matrix() {
+        let server = server(version).await;
+        // `/early` asks for an ack before its CONNECT reply.
+        let (s, mut ev) = start(config(server.url(), "/early", transport, version));
+        assert_eq!(ev.incoming("early").await, vec![json!("before connect")]);
+        assert!(!ev.seen.iter().any(|e| matches!(e, SocketIoEvent::Connected { .. })), "{:?}", ev.seen);
+        assert_eq!(s.pending_acks().len(), 1);
+        assert!(s.ack(7, vec![json!("ok")]));
+        ev.wait_for("connected", |e| matches!(e, SocketIoEvent::Connected { .. })).await;
+        assert_eq!(ev.incoming("answered").await, vec![json!(7), json!("ok")]);
+        assert!(s.pending_acks().is_empty());
+        assert!(ev.errors().is_empty(), "{:?}", ev.errors());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_event_names_are_refused_before_connecting() {
+    let server = server(SocketIoVersion::V4).await;
+    let (s, mut ev) = start(config(server.url(), "/early", SocketIoTransport::Auto, SocketIoVersion::V4));
+    s.emit("connect", vec![], false);
+    s.emit("echo", vec![json!("queued")], false);
+    ev.wait_for("reserved error", |e| matches!(e, SocketIoEvent::Error(m) if m.contains("reserved"))).await;
+    assert!(!ev.seen.iter().any(|e| matches!(e, SocketIoEvent::Connected { .. })), "{:?}", ev.seen);
+    // Valid emits are still queued and sent once connected.
+    assert_eq!(ev.incoming("echo").await, vec![json!("queued")]);
+    assert!(!server.frames().iter().any(|f| f.contains("\"connect\"")), "{:?}", server.frames());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_upgrades_to_websocket_without_losing_messages() {
     for version in VERSIONS {
         let server = server(version).await;

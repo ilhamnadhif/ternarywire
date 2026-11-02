@@ -590,10 +590,18 @@ fn on_text(state: &State, sess: &Arc<Sess>, text: &str) {
                 sess.push(Out::Text(format!("{}{err}", prefix(4))));
             } else {
                 sess.logic.lock().unwrap().auths.insert(ns.clone(), auth);
-                if v2 {
-                    sess.push(Out::Text(prefix(0)));
+                let reply =
+                    if v2 { prefix(0) } else { format!("{}{}", prefix(0), json!({"sid": format!("sock-{}", sess.n)})) };
+                if ns == "/early" {
+                    // An event asking for an ack before the CONNECT reply (300 ms later).
+                    sess.push(Out::Text(format!("{}7{}", prefix(2), json!(["early", "before connect"]))));
+                    let sess = sess.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        sess.push(Out::Text(reply));
+                    });
                 } else {
-                    sess.push(Out::Text(format!("{}{}", prefix(0), json!({"sid": format!("sock-{}", sess.n)}))));
+                    sess.push(Out::Text(reply));
                 }
             }
         }

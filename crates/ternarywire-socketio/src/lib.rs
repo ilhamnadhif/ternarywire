@@ -295,6 +295,12 @@ struct Emit {
     ack: Option<u64>,
 }
 
+/// What the user sent before the namespace was connected, in order.
+enum Queued {
+    Emit(Emit),
+    Ack(u64, Vec<EmitArg>),
+}
+
 enum Command {
     Emit(Emit),
     Ack(u64, Vec<EmitArg>),
@@ -333,7 +339,8 @@ impl SocketIoSession {
     /// Queues an event with JSON arguments. With `want_ack` the returned id
     /// matches the later [`SocketIoEvent::Ack`]. Returns `None` without
     /// `want_ack` or when the session has ended. Invalid (empty or reserved)
-    /// event names are reported as [`SocketIoEvent::Error`].
+    /// event names are reported as [`SocketIoEvent::Error`] right away, also
+    /// before the namespace is connected.
     pub fn emit(&self, event: &str, args: Vec<Value>, want_ack: bool) -> Option<u64> {
         self.emit_args(event, args.into_iter().map(EmitArg::Json).collect(), want_ack)
     }
@@ -429,6 +436,17 @@ fn url_path(raw: &str) -> Option<String> {
     let url = url::Url::parse(&with_scheme(raw)).ok()?;
     let path = url.path().trim_end_matches('/');
     (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Why the client API refuses to emit `event`, if it does.
+fn invalid_event_name(event: &str) -> Option<String> {
+    if event.is_empty() {
+        Some("Event name must not be empty".into())
+    } else if RESERVED_EVENTS.contains(&event) {
+        Some(format!("\"{event}\" is a reserved event name"))
+    } else {
+        None
+    }
 }
 
 /// Query keys the Engine.IO client sets itself.
@@ -556,7 +574,7 @@ struct Session {
     connect_query: String,
     engine_sid: String,
     phase: Phase,
-    pending: Vec<Emit>,
+    pending: Vec<Queued>,
     /// A binary packet waiting for its attachments.
     partial: Option<Partial>,
     auto_ack: Option<Vec<EmitArg>>,
@@ -638,10 +656,12 @@ async fn run(cfg: SocketIoConfig, mut rx: mpsc::UnboundedReceiver<Command>, on_e
             }
             cmd = rx.recv() => match cmd {
                 Some(Command::Emit(e)) => {
-                    if s.phase == Phase::Connected {
+                    if let Some(problem) = invalid_event_name(&e.event) {
+                        s.emit_event(SocketIoEvent::Error(problem));
+                    } else if s.phase == Phase::Connected {
                         s.send_emit(e);
                     } else {
-                        s.pending.push(e);
+                        s.pending.push(Queued::Emit(e));
                     }
                 }
                 Some(Command::Ack(id, args)) => s.send_ack(id, args),
@@ -748,14 +768,6 @@ impl Session {
     }
 
     fn send_emit(&mut self, e: Emit) {
-        if e.event.is_empty() {
-            self.emit_event(SocketIoEvent::Error("Event name must not be empty".into()));
-            return;
-        }
-        if RESERVED_EVENTS.contains(&e.event.as_str()) {
-            self.emit_event(SocketIoEvent::Error(format!("\"{}\" is a reserved event name", e.event)));
-            return;
-        }
         let mut data = Vec::with_capacity(e.args.len() + 1);
         data.push(EmitArg::Json(Value::String(e.event.clone())));
         data.extend(e.args.iter().cloned());
@@ -773,8 +785,13 @@ impl Session {
             let i = p.iter().position(|a| a.id == id)?;
             Some(p.remove(i))
         });
-        if found.is_none() || self.phase != Phase::Connected {
+        if found.is_none() {
             self.emit_event(SocketIoEvent::Error(format!("No acknowledgement #{id} is pending")));
+            return;
+        }
+        if self.phase != Phase::Connected {
+            // The server emitted before its CONNECT reply: answer once connected.
+            self.pending.push(Queued::Ack(id, args));
             return;
         }
         self.send_data(ACK, Some(id), &args);
@@ -828,8 +845,11 @@ impl Session {
                     };
                     self.phase = Phase::Connected;
                     self.emit_event(SocketIoEvent::Connected { sid, namespace: self.namespace.clone() });
-                    for e in std::mem::take(&mut self.pending) {
-                        self.send_emit(e);
+                    for q in std::mem::take(&mut self.pending) {
+                        match q {
+                            Queued::Emit(e) => self.send_emit(e),
+                            Queued::Ack(id, args) => self.send_data(ACK, Some(id), &args),
+                        }
                     }
                 }
                 false
