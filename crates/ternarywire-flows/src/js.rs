@@ -21,11 +21,94 @@ pub const VARS_KEY: &str = "__ternarywire_vars";
 /// Prefix of internal keys that never become flow variables.
 pub const INTERNAL_PREFIX: &str = "__ternarywire_";
 
+/// True when `code` uses `await` as a word outside of comments and string
+/// literals. When the scan gets lost (an unterminated string or comment,
+/// say after a regular expression with a quote in it), any `await` counts:
+/// missing a real one would be a syntax error.
+pub(crate) fn uses_await(code: &str) -> bool {
+    let b = code.as_bytes();
+    let lost = || code.contains("await");
+    let ident = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$') || c >= 0x80;
+    // Brace depth where each open `${` of a template literal started.
+    let mut subs: Vec<usize> = Vec::new();
+    let (mut depth, mut i, mut template) = (0usize, 0usize, false);
+    while i < b.len() {
+        if template {
+            match b[i] {
+                b'\\' => i += 2,
+                b'`' => {
+                    template = false;
+                    i += 1;
+                }
+                b'$' if b.get(i + 1) == Some(&b'{') => {
+                    subs.push(depth);
+                    depth += 1;
+                    template = false;
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i = code[i..].find('\n').map_or(b.len(), |n| i + n),
+            b'/' if b.get(i + 1) == Some(&b'*') => match code[i + 2..].find("*/") {
+                Some(n) => i += n + 4,
+                None => return lost(),
+            },
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                loop {
+                    match b.get(i) {
+                        None | Some(b'\n') => return lost(),
+                        Some(b'\\') => i += 2,
+                        Some(c) => {
+                            i += 1;
+                            if *c == q {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            b'`' => {
+                template = true;
+                i += 1;
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if subs.last() == Some(&depth) {
+                    subs.pop();
+                    template = true;
+                }
+                i += 1;
+            }
+            c if ident(c) => {
+                let start = i;
+                while i < b.len() && ident(b[i]) {
+                    i += 1;
+                }
+                if &b[start..i] == b"await" {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    if template { lost() } else { false }
+}
+
 /// Wraps user code (a function body; `return` sets the result). Everything
 /// before the user code stays on the first line so error line numbers match
-/// what the user typed.
+/// what the user typed. Only code that awaits gets the async wrapper, which
+/// also resolves a returned promise; an `await` in a comment or a string
+/// must not change the result.
 pub fn wrap(body: &str) -> String {
-    let is_async = body.contains("await");
+    let is_async = uses_await(body);
     let (open, close) = if is_async { ("await (async function () {", "})()") } else { ("(function () {", "})()") };
     format!(
         "const __mf = pm.iterationData.get(\"{CONTEXT_KEY}\") || {{}}; \
@@ -71,5 +154,40 @@ pub async fn run_job(services: &Services, mut job: ScriptJob, cancel: &Cancellat
             errors: vec![ScriptError { location: "script engine".into(), message: format!("engine crashed: {e}") }],
             ..Default::default()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn await_outside_comments_and_strings() {
+        for code in [
+            "await pm.sendRequest(url);",
+            "const r = await fetch(); // done",
+            "return `${await x()}`;",
+            "return `a ${ {b: await y()}.b } c`;",
+            "if (a) {\n  await b;\n}",
+            "x = '\\'' + await y;",
+            // Lost in a regular expression: counted, to be safe.
+            "const re = /'/; await z;",
+        ] {
+            assert!(uses_await(code), "{code}");
+        }
+        for code in [
+            "// await later\nreturn 1;",
+            "/* await */ return 2;",
+            "return 'please await';",
+            "return \"await\";",
+            "return `await ${x} later`;",
+            "const awaitTime = 3; return awaitTime;",
+            "return obj.awaited;",
+            "",
+        ] {
+            assert!(!uses_await(code), "{code}");
+        }
+        assert!(wrap("await 1;").contains("await (async function"));
+        assert!(!wrap("// await\nreturn 1;").contains("(async function"));
     }
 }

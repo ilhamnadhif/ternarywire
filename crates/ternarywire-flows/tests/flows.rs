@@ -2435,3 +2435,35 @@ async fn vault_secrets_are_fetched_before_the_run_and_together() {
     assert_eq!(vault.most_at_once.load(Ordering::SeqCst), 4);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn await_in_a_comment_does_not_change_the_result() {
+    let (base, _) = server().await;
+    let f = flow(
+        vec![
+            script("plain", "return Promise.resolve(5);"),
+            script("comment", "// no await here\nreturn Promise.resolve(5);"),
+            script("text", "return ['await', `await ${1}`];"),
+            script("awaited", "return await Promise.resolve(5);"),
+            output("o1", "plain", "{{blocks.plain.output}}"),
+            output("o2", "comment", "{{blocks.comment.output}}"),
+            output("o3", "text", "{{blocks.text.output}}"),
+            output("o4", "awaited", "{{blocks.awaited.output}}"),
+        ],
+        &[
+            ("start", "next", "plain"),
+            ("plain", "success", "comment"),
+            ("comment", "success", "text"),
+            ("text", "success", "awaited"),
+            ("awaited", "success", "o1"),
+            ("o1", "next", "o2"),
+            ("o2", "next", "o3"),
+            ("o3", "next", "o4"),
+        ],
+    );
+    let r = run(&f, &base, &[]).await.result;
+    assert!(r.success, "{r:#?}");
+    assert_eq!(r.outputs["comment"], r.outputs["plain"]);
+    assert_eq!(r.outputs["text"], json!(["await", "await 1"]));
+    assert_eq!(r.outputs["awaited"], json!(5));
+}
+
