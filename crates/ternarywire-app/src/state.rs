@@ -45,6 +45,8 @@ pub struct WsState {
     dirty_globals: bool,
     dirty_cookies: bool,
     last_change: Instant,
+    /// Counts changes to the collections (see [`WsState::collections_revision`]).
+    collections_revision: u64,
     pub last_error: Option<String>,
     /// Local forks (`.ternarywire/forks.json`).
     pub forks: Vec<ternarywire_core::fork::ForkLink>,
@@ -183,6 +185,7 @@ impl WsState {
             dirty_globals: false,
             dirty_cookies: false,
             last_change: Instant::now(),
+            collections_revision: 0,
             last_error: None,
             forks: std::fs::read(local.join("forks.json"))
                 .ok()
@@ -203,6 +206,13 @@ impl WsState {
     pub fn mark_collection(&mut self, id: &str) {
         self.dirty_collections.insert(id.to_string());
         self.last_change = Instant::now();
+        self.collections_revision += 1;
+    }
+
+    /// A number that changes whenever a collection is edited, added or
+    /// deleted (views built from a collection rebuild when it changes).
+    pub fn collections_revision(&self) -> u64 {
+        self.collections_revision
     }
 
     pub fn mark_env(&mut self, id: &str) {
@@ -308,6 +318,7 @@ impl WsState {
         }
         self.data.collections.retain(|c| c.id != id);
         self.dirty_collections.remove(id);
+        self.collections_revision += 1;
         let _ = self.saver.send(SaveJob::DeleteCollection(id.to_string()));
     }
 

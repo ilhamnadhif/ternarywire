@@ -42,9 +42,12 @@ enum Filter {
 
 pub struct RunnerTab {
     pub collection: Id,
+    folder: Option<Id>,
     mode: Mode,
-    /// (request id, name, selected) in run order.
+    /// (request id, name, badge, selected) in run order.
     plan: Vec<(Id, String, String, bool)>,
+    /// [`WsState::collections_revision`] the plan was made at.
+    plan_revision: u64,
     iterations: usize,
     delay_ms: u64,
     data_path: Option<PathBuf>,
@@ -80,21 +83,13 @@ pub struct RunnerTab {
 
 impl RunnerTab {
     pub fn new(ws: &WsState, collection: Id, folder: Option<Id>) -> Self {
-        let mut plan = Vec::new();
-        if let Some(c) = ws.data.collection(&collection) {
-            let opts = RunOptions { folder: folder.clone(), ..Default::default() };
-            if let Ok(list) = ternarywire_runner::runner::plan(c, &opts) {
-                // Every protocol runs: HTTP, gRPC, AI, MCP, and WebSocket,
-                // Socket.IO and MQTT as sessions with a stop condition.
-                for (r, _) in list {
-                    plan.push((r.id.clone(), r.name.clone(), r.request.badge(), true));
-                }
-            }
-        }
+        let plan = plan_of(ws, &collection, folder.as_ref());
         RunnerTab {
             collection,
+            folder,
             mode: Mode::Functional,
             plan,
+            plan_revision: ws.collections_revision(),
             iterations: 1,
             delay_ms: 0,
             data_path: None,
@@ -127,6 +122,32 @@ impl RunnerTab {
 
     pub fn is_running(&self) -> bool {
         self.cancel.is_some()
+    }
+
+    /// Follows edits of the collection (requests added, removed, renamed)
+    /// while keeping the chosen order and selection.
+    fn refresh_plan(&mut self, ws: &WsState) {
+        if self.plan_revision == ws.collections_revision() || self.is_running() {
+            return;
+        }
+        self.plan_revision = ws.collections_revision();
+        let fresh = plan_of(ws, &self.collection, self.folder.as_ref());
+        let chosen: std::collections::HashMap<&Id, (usize, bool)> =
+            self.plan.iter().enumerate().map(|(i, p)| (&p.0, (i, p.3))).collect();
+        // Requests already planned keep their place; new ones come last.
+        let mut next: Vec<(usize, (Id, String, String, bool))> = fresh
+            .into_iter()
+            .map(|mut p| match chosen.get(&p.0) {
+                Some(&(i, on)) => {
+                    p.3 = on;
+                    (i, p)
+                }
+                None => (usize::MAX, p),
+            })
+            .collect();
+        next.sort_by_key(|(i, _)| *i);
+        self.plan = next.into_iter().map(|(_, p)| p).collect();
+        self.drag = None;
     }
 
     pub fn cancel_all(&self) {
@@ -315,7 +336,20 @@ fn export(tab: &RunnerTab, format: &str) -> Result<(), String> {
     reporter.finish(summary).map_err(|e| e.to_string())
 }
 
+/// The requests of `collection` (or one folder of it) in run order, all
+/// selected.
+fn plan_of(ws: &WsState, collection: &Id, folder: Option<&Id>) -> Vec<(Id, String, String, bool)> {
+    let Some(c) = ws.data.collection(collection) else { return Vec::new() };
+    let opts = RunOptions { folder: folder.cloned(), ..Default::default() };
+    // Every protocol runs: HTTP, gRPC, AI, MCP, and WebSocket, Socket.IO and
+    // MQTT as sessions with a stop condition.
+    ternarywire_runner::runner::plan(c, &opts)
+        .map(|list| list.into_iter().map(|(r, _)| (r.id.clone(), r.name.clone(), r.request.badge(), true)).collect())
+        .unwrap_or_default()
+}
+
 pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut RunnerTab) {
+    tab.refresh_plan(&app.ws);
     let p = theme::pal(ui);
     let name = app.ws.data.collection(&tab.collection).map(|c| c.name.clone()).unwrap_or_default();
     view_title(ui, tab, &name, p.accent);
@@ -1415,6 +1449,44 @@ fn timeline_chart(ui: &mut Ui, samples: &[PerfSample]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run order follows the collection: a request added after the
+    /// runner opened is in it, a deleted one is gone; the user's order and
+    /// selection stay.
+    #[test]
+    fn plan_follows_collection_edits() {
+        use ternarywire_core::model::{HttpRequest, Item, RequestItem};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let cid = app.new_collection("C");
+        let add = |app: &mut TernaryWireApp, name: &str| {
+            let r = RequestItem::new(name, HttpRequest::new("GET", "http://x.test"));
+            let id = r.id.clone();
+            app.ws.data.collection_mut(&cid).unwrap().items.push(Item::Request(r));
+            app.ws.mark_collection(&cid);
+            id
+        };
+        add(&mut app, "a");
+        let b = add(&mut app, "b");
+        add(&mut app, "d");
+        let mut tab = RunnerTab::new(&app.ws, cid.clone(), None);
+        tab.plan.swap(0, 2);
+        tab.plan[0].3 = false;
+        add(&mut app, "c");
+        app.ws.data.collection_mut(&cid).unwrap().remove(&b);
+        app.ws.mark_collection(&cid);
+        tab.refresh_plan(&app.ws);
+        let plan: Vec<(&str, bool)> = tab.plan.iter().map(|p| (p.1.as_str(), p.3)).collect();
+        assert_eq!(plan, [("d", false), ("a", true), ("c", true)]);
+        let name = app.ws.data.collection_mut(&cid).unwrap().items.iter_mut().find_map(|i| match i {
+            Item::Request(r) if r.name == "a" => Some(&mut r.name),
+            _ => None,
+        });
+        *name.unwrap() = "renamed".into();
+        app.ws.mark_collection(&cid);
+        tab.refresh_plan(&app.ws);
+        assert_eq!(tab.plan[1].1, "renamed");
+    }
 
     fn result(name: String) -> RunEvent {
         RunEvent::RequestFinished(Box::new(RequestResult { name, ..Default::default() }))

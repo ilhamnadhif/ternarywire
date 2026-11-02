@@ -215,6 +215,8 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
     ui.add_space(8.0);
     // Server events waiting for our acknowledgement.
     let pending = tab.session.as_ref().map(|s| s.pending_acks()).unwrap_or_default();
+    // Replies of acknowledgements that were sent (or whose connection closed).
+    tab.ack_replies.retain(|id, _| pending.iter().any(|a| a.id == *id));
     let mut send_ack = None;
     if !pending.is_empty() {
         pc::notice_card(ui, icons::HOURGLASS, tr("The server is waiting for acknowledgements"), |ui| {

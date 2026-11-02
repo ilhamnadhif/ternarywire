@@ -1734,10 +1734,56 @@ fn graphql_editor(ui: &mut Ui, tab: &mut RequestTab, body: &mut Body, ectx: &Edi
     });
 }
 
+/// The tokens of a GraphQL document for [`prettify_graphql`]: braces on
+/// their own, strings (`"…"`, `"""…"""`) and comments whole (they may hold
+/// braces and spaces), the rest split on whitespace.
+fn graphql_tokens(q: &str) -> Vec<&str> {
+    let b = q.as_bytes();
+    let mut out = Vec::new();
+    let mut word: Option<usize> = None;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' | b'}' => {
+                out.extend(word.take().map(|s| &q[s..i]));
+                out.push(&q[i..i + 1]);
+                i += 1;
+            }
+            b'"' => {
+                word.get_or_insert(i);
+                if q[i..].starts_with("\"\"\"") {
+                    i = q[i + 3..].find("\"\"\"").map_or(b.len(), |e| i + 3 + e + 3);
+                } else {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' && b[i] != b'\n' {
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i = (i + 1).min(b.len());
+                }
+            }
+            b'#' if word.is_none() => {
+                let end = q[i..].find('\n').map_or(b.len(), |e| i + e);
+                out.push(q[i..end].trim_end());
+                i = end;
+            }
+            c if c.is_ascii_whitespace() => {
+                out.extend(word.take().map(|s| &q[s..i]));
+                i += 1;
+            }
+            _ => {
+                word.get_or_insert(i);
+                i += 1;
+            }
+        }
+    }
+    out.extend(word.map(|s| &q[s..]));
+    out
+}
+
 fn prettify_graphql(q: &str) -> String {
     let mut out = String::new();
     let mut depth = 0usize;
-    for token in q.replace('{', " { ").replace('}', " } ").split_whitespace() {
+    for token in graphql_tokens(q) {
         match token {
             "{" => {
                 out.push_str(" {\n");
@@ -1754,6 +1800,16 @@ fn prettify_graphql(q: &str) -> String {
                 }
                 out.push_str(&"  ".repeat(depth));
                 out.push_str("}\n");
+                out.push_str(&"  ".repeat(depth));
+            }
+            // A comment ends its line.
+            t if t.starts_with('#') => {
+                if !out.is_empty() && !out.ends_with(' ') && !out.ends_with('\n') {
+                    out.push('\n');
+                    out.push_str(&"  ".repeat(depth));
+                }
+                out.push_str(t);
+                out.push('\n');
                 out.push_str(&"  ".repeat(depth));
             }
             t => {
@@ -3875,6 +3931,18 @@ pub(crate) fn stat_card(ui: &mut Ui, width: f32, label: &str, value: &str, color
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Prettify keeps strings and comments as they are: braces and spaces
+    /// in them used to be split onto lines of their own.
+    #[test]
+    fn prettify_graphql_keeps_strings_and_comments() {
+        let q = r#"query { search(q: "a {b} c", tag: """x { y""") { id # the {id}
+ name } }"#;
+        let want =
+            "query {\n  search(q: \"a {b} c\", tag: \"\"\"x { y\"\"\") {\n    id\n    # the {id}\n    name\n  }\n}";
+        assert_eq!(prettify_graphql(q), want);
+        assert_eq!(prettify_graphql("{ a b }"), "{\n  a\n  b\n}");
+    }
 
     /// The request settings show the app's defaults (Settings > Requests)
     /// as "Default (on/off)", not the built-in ones.
