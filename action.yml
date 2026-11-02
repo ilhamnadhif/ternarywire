@@ -53,24 +53,66 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ github.action_path }}/target
-        key: ternarywire-cli-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
+        # The ref matters too: `version` builds another checkout.
+        key: ternarywire-cli-${{ runner.os }}-${{ inputs.version }}-${{ hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
     - name: Build TernaryWire CLI
       shell: bash
       working-directory: ${{ github.action_path }}
+      # Inputs reach the scripts as environment variables, never as script
+      # text: a value such as a PR title cannot inject shell commands.
+      env:
+        TW_VERSION: ${{ inputs.version }}
+        TW_REPOSITORY: ${{ github.action_repository }}
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
-        if [ -n "${{ inputs.version }}" ]; then git fetch --depth 1 origin "${{ inputs.version }}" && git checkout FETCH_HEAD; fi
+        if [ -n "$TW_VERSION" ]; then
+          # `uses: owner/repo@ref` downloads the action without .git.
+          downloaded=
+          if [ ! -e .git ]; then
+            if [ -z "$TW_REPOSITORY" ]; then
+              echo "::error::version \"$TW_VERSION\" needs the action's repository, which the runner did not provide"
+              exit 1
+            fi
+            git init -q .
+            git remote add origin "$GITHUB_SERVER_URL/$TW_REPOSITORY.git"
+            downloaded=1
+          fi
+          # `--`: a version starting with `-` is not an option.
+          git fetch --depth 1 -- origin "$TW_VERSION"
+          git -c advice.detachedHead=false checkout -q --force FETCH_HEAD
+          # Files of the downloaded ref that the requested one does not have
+          # (only in our own download; the build cache in target/ is ignored).
+          if [ -n "$downloaded" ]; then git clean -q -fd; fi
+        fi
         cargo build --release --locked -p ternarywire-cli --bin ternarywire
-        echo "${{ github.action_path }}/target/release" >> "$GITHUB_PATH"
+        echo "$GITHUB_ACTION_PATH/target/release" >> "$GITHUB_PATH"
     - name: Run collection
       shell: bash
       env:
         TERNARYWIRE_NO_KEYCHAIN: "1"
+        TW_COLLECTION: ${{ inputs.collection }}
+        TW_COLLECTION_NAME: ${{ inputs.collection-name }}
+        TW_ENVIRONMENT: ${{ inputs.environment }}
+        TW_DATA: ${{ inputs.iteration-data }}
+        TW_REPORTERS: ${{ inputs.reporters }}
+        TW_JUNIT: ${{ inputs.junit-export }}
+        TW_ARGS: ${{ inputs.args }}
       run: |
-        args=(run "${{ inputs.collection }}" -r "${{ inputs.reporters }}" --reporter-junit-export "${{ inputs.junit-export }}")
-        [ -n "${{ inputs.collection-name }}" ] && args+=(-c "${{ inputs.collection-name }}")
-        [ -n "${{ inputs.environment }}" ] && args+=(-e "${{ inputs.environment }}")
-        [ -n "${{ inputs.iteration-data }}" ] && args+=(-d "${{ inputs.iteration-data }}")
-        # shellcheck disable=SC2206
-        extra=(${{ inputs.args }})
+        args=(run "$TW_COLLECTION" -r "$TW_REPORTERS" --reporter-junit-export "$TW_JUNIT")
+        if [ -n "$TW_COLLECTION_NAME" ]; then args+=(-c "$TW_COLLECTION_NAME"); fi
+        if [ -n "$TW_ENVIRONMENT" ]; then args+=(-e "$TW_ENVIRONMENT"); fi
+        if [ -n "$TW_DATA" ]; then args+=(-d "$TW_DATA"); fi
+        # `args` is split into words like a shell would (quotes and
+        # backslashes work) but never expanded: no variables, commands or
+        # globs. xargs does the splitting; NUL-separated words survive any
+        # character.
+        extra=()
+        if [ -n "${TW_ARGS//[[:space:]]/}" ]; then
+          words="$RUNNER_TEMP/ternarywire-args"
+          if ! printf '%s\n' "$TW_ARGS" | xargs printf '%s\0' > "$words"; then
+            echo "::error::could not split the args input (unbalanced quotes?)"
+            exit 1
+          fi
+          while IFS= read -r -d '' word; do extra+=("$word"); done < "$words"
+        fi
         ternarywire "${args[@]}" "${extra[@]}"
