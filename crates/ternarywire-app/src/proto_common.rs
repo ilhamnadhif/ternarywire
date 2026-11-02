@@ -1558,7 +1558,12 @@ pub fn basic_credentials(ui: &mut Ui, auth: &mut ternarywire_core::auth::Auth, v
 
 /// Read-only, selectable text; JSON keeps its indentation and is highlighted.
 pub fn text_view(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, text: &str) {
-    let is_json = matches!(serde_json::from_str::<serde_json::Value>(text), Ok(v) if v.is_object() || v.is_array());
+    // Drawn every frame: a large text is taken for JSON by its first
+    // character (parsing megabytes each frame stalls the UI), a small one
+    // is checked without building it.
+    let start = text.trim_start();
+    let is_json = (start.starts_with('{') || start.starts_with('['))
+        && (text.len() > 64 * 1024 || serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok());
     let lang = if is_json { crate::highlight::Lang::Json } else { crate::highlight::Lang::Text };
     let mut t = text.to_string();
     widgets::code_editor(ui, id, &mut t, lang, None, 1, true);

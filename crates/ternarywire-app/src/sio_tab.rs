@@ -839,10 +839,18 @@ fn answer_ack(app: &mut TernaryWireApp, tab: &mut SioTab, id: u64, collection: O
     }
 }
 
-/// Event names the request listens to (for filtering).
+/// Event names the request listens to, when the tab shows only those
+/// (looked up for every incoming event: without cloning the request).
 pub fn listened(app: &TernaryWireApp, tab: &SioTab) -> Vec<String> {
-    match tab.slot.load(app).map(|i| i.request) {
-        Some(RequestKind::SocketIo(r)) => r.listeners.into_iter().filter(|l| l.enabled).map(|l| l.event).collect(),
+    if !tab.only_listened {
+        return Vec::new();
+    }
+    let item = match &tab.slot.location {
+        Some(loc) => app.ws.data.collection(&loc.collection).and_then(|c| c.find_request(&loc.item)),
+        None => tab.slot.scratch.as_ref(),
+    };
+    match item.map(|i| &i.request) {
+        Some(RequestKind::SocketIo(r)) => r.listeners.iter().filter(|l| l.enabled).map(|l| l.event.clone()).collect(),
         _ => Vec::new(),
     }
 }
@@ -850,6 +858,26 @@ pub fn listened(app: &TernaryWireApp, tab: &SioTab) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Incoming events look the listeners up only when the tab shows just
+    /// those (it used to clone the request for every event).
+    #[test]
+    fn listeners_are_looked_up_only_to_filter() {
+        use ternarywire_core::model::RequestItem;
+        use ternarywire_core::protocols::{SocketIoListener, SocketIoRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let app = TernaryWireApp::for_test(dir.path());
+        let mut item = RequestItem::new("socket", ternarywire_core::model::HttpRequest::default());
+        let listeners = vec![
+            SocketIoListener { event: "a".into(), enabled: true },
+            SocketIoListener { event: "b".into(), enabled: false },
+        ];
+        item.request = RequestKind::SocketIo(SocketIoRequest { listeners, ..Default::default() });
+        let mut tab = SioTab::new(crate::proto_common::ItemSlot { location: None, scratch: Some(item) });
+        assert!(listened(&app, &tab).is_empty());
+        tab.only_listened = true;
+        assert_eq!(listened(&app, &tab), ["a"]);
+    }
 
     #[test]
     fn inherited_auth_reaches_the_handshake() {
