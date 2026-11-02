@@ -598,7 +598,11 @@ impl McpClientBuilder {
                             });
                             match ctx.run(Kind::Sse, Some(&remote)).await {
                                 Ok(c) => Ok(c),
-                                Err(sse) => Err(Failed { error: combine(failed.error, &sse.error), started: true }),
+                                Err(sse) => Err(Failed {
+                                    error: combine(failed.error, &sse.error),
+                                    started: true,
+                                    closed_sent: sse.closed_sent,
+                                }),
                             }
                         }
                         other => other,
@@ -607,7 +611,7 @@ impl McpClientBuilder {
             }
         };
         result.map_err(|f| {
-            if f.started {
+            if f.started && !f.closed_sent {
                 (on_event)(McpEvent::Closed(format!("Initialization failed: {}", f.error)));
             }
             f.error
@@ -648,6 +652,8 @@ struct Failed {
     error: McpError,
     /// The transport was up (a `Closed` event is due).
     started: bool,
+    /// The transport ended by itself and already sent `Closed`.
+    closed_sent: bool,
 }
 
 struct Attempt<'a> {
@@ -659,7 +665,7 @@ struct Attempt<'a> {
 
 impl Attempt<'_> {
     async fn run(&self, kind: Kind, remote: Option<&Remote>) -> Result<McpClient, Failed> {
-        let early = |error| Failed { error, started: false };
+        let early = |error| Failed { error, started: false, closed_sent: false };
         let (tx, rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared::new(self.on_event.clone(), tx, self.busy.clone(), self.features.clone()));
         let transport = match (kind, remote, &self.cfg.transport) {
@@ -689,8 +695,9 @@ impl Attempt<'_> {
                 match started {
                     Ok(c) => TransportHandle::Sse(c),
                     Err(e) => {
+                        let closed_sent = shared.closed_reason().is_some();
                         shared.close(format!("Connection failed: {e}"), false);
-                        return Err(Failed { error: e, started: true });
+                        return Err(Failed { error: e, started: true, closed_sent });
                     }
                 }
             }
@@ -707,11 +714,13 @@ impl Attempt<'_> {
                 Ok(McpClient { conn, info: Arc::new(info) })
             }
             Err(e) => {
+                // A transport that ended during `initialize` reported `Closed` itself.
+                let closed_sent = conn.shared.closed_reason().is_some();
                 conn.shared.close(format!("Initialization failed: {e}"), false);
                 if let TransportHandle::Stdio(s) = &conn.transport {
                     s.wait_exit(Duration::from_secs(3)).await;
                 }
-                Err(Failed { error: e, started: true })
+                Err(Failed { error: e, started: true, closed_sent })
             }
         }
     }

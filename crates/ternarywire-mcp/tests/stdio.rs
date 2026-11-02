@@ -149,7 +149,9 @@ async fn reports_exit_and_stderr_when_server_dies() {
     assert!(matches!(err, McpError::Closed(_)), "{err:?}");
     assert!(msg.contains("exited with code 3"), "{msg}");
     assert!(msg.contains("fatal: boom"), "{msg}");
-    assert!(events.lock().iter().any(|e| matches!(e, McpEvent::Closed(_))));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let closed: Vec<_> = events.lock().iter().filter(|e| matches!(e, McpEvent::Closed(_))).cloned().collect();
+    assert_eq!(closed.len(), 1, "Closed is sent once: {closed:?}");
 }
 
 #[tokio::test]
