@@ -16,6 +16,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use parking_lot::Mutex;
@@ -457,6 +458,7 @@ enum FoldCmd {
 // Prepared content
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 enum Source {
     Text(Arc<String>),
     File(ResponseBody),
@@ -607,18 +609,37 @@ enum Content {
     File {
         body: ResponseBody,
         lang: Lang,
-        index: Arc<Mutex<Option<Arc<LineIndex>>>>,
+        index: FileIndex,
     },
+}
+
+/// The row index of a body in a file once the background thread made it,
+/// or why it could not.
+type FileIndex = Arc<Mutex<Option<Result<Arc<LineIndex>, String>>>>;
+
+/// A search of the row viewer for the n-th match, on a worker thread (the
+/// body in a file may be very large). Dropping it stops the scan.
+struct RowSearch {
+    stop: Arc<AtomicBool>,
+    /// The row found (`Some(None)`: no match), once the scan is done.
+    row: Arc<Mutex<Option<Option<usize>>>>,
+}
+
+impl Drop for RowSearch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 struct Prepared {
     view: BodyView,
     note: Option<String>,
-    is_image: bool,
     is_html: bool,
     is_binary: bool,
     /// Pixel size of an image body.
     image_size: Option<[u32; 2]>,
+    /// An image body for the preview and its URI (read and hashed once).
+    image: Option<(String, Arc<[u8]>)>,
     /// The body as JSON (JSON bodies within the pretty-print limit).
     json: Option<Arc<Value>>,
     /// Show `json` as a tree.
@@ -722,6 +743,9 @@ pub struct BodyState {
     rows_width: f32,
     pending_fold: Option<FoldCmd>,
     pending_scroll: Option<egui::Vec2>,
+    /// The row index of a body in a file, made once for all views.
+    file_index: Option<FileIndex>,
+    row_search: Option<RowSearch>,
 }
 
 impl Default for BodyState {
@@ -745,6 +769,8 @@ impl Default for BodyState {
             rows_width: 0.0,
             pending_fold: None,
             pending_scroll: None,
+            file_index: None,
+            row_search: None,
         }
     }
 }
@@ -752,6 +778,7 @@ impl Default for BodyState {
 impl BodyState {
     pub fn reset(&mut self) {
         self.prepared = None;
+        self.row_search = None;
         self.jump = false;
         self.match_cursor = 0;
         self.menu = None;
@@ -789,7 +816,7 @@ impl BodyState {
 
     fn prepare(&mut self, resp: &HttpResponse, max_pretty: u64, ctx: &egui::Context) {
         if self.prepared.as_ref().is_none_or(|p| p.view != self.view) {
-            self.prepared = Some(prepare(resp, self.view, max_pretty, ctx, &mut self.parsed));
+            self.prepared = Some(prepare(resp, self.view, max_pretty, ctx, &mut self.parsed, &mut self.file_index));
         }
     }
 
@@ -895,6 +922,7 @@ fn prepare(
     max_pretty: u64,
     ctx: &egui::Context,
     parsed: &mut Option<Option<Arc<Value>>>,
+    file_index: &mut Option<FileIndex>,
 ) -> Prepared {
     let language = resp.language();
     let lang = if is_yaml(resp.content_type()) { Lang::Yaml } else { Lang::from_language(language) };
@@ -902,10 +930,10 @@ fn prepare(
     let mut p = Prepared {
         view,
         note: None,
-        is_image: language == BodyLanguage::Image,
         is_html: language == BodyLanguage::Html,
         is_binary: language == BodyLanguage::Binary,
         image_size: None,
+        image: None,
         json: None,
         tree: false,
         content: Content::Empty,
@@ -913,13 +941,15 @@ fn prepare(
     if language == BodyLanguage::Binary && view != BodyView::Raw {
         return p;
     }
-    if language == BodyLanguage::Image && view == BodyView::Preview && !resp.body.is_file() {
-        let bytes = resp.body.read_all().unwrap_or_default();
+    if language == BodyLanguage::Image && view == BodyView::Preview {
+        // Once, not on every frame (a body in a file is read from disk).
+        let bytes: Arc<[u8]> = Arc::from(&resp.body.read_all().unwrap_or_default()[..]);
         p.image_size = image::ImageReader::new(std::io::Cursor::new(&bytes[..]))
             .with_guessed_format()
             .ok()
             .and_then(|r| r.into_dimensions().ok())
             .map(|(w, h)| [w, h]);
+        p.image = Some((image_uri(&resp.url, &bytes), bytes));
         return p;
     }
     if view == BodyView::Tree && language != BodyLanguage::Json {
@@ -964,16 +994,18 @@ fn prepare(
             let lang = if len > 20 * 1024 * 1024 { Lang::Text } else { lang };
             match &resp.body {
                 ResponseBody::File { path, .. } => {
-                    let index = Arc::new(Mutex::new(None));
-                    p.content = Content::File { body: resp.body.clone(), lang, index: index.clone() };
-                    let path = path.to_path_buf();
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(ix) = LineIndex::from_file(&path) {
-                            *index.lock() = Some(Arc::new(ix));
-                        }
-                        ctx.request_repaint();
+                    // Indexed once; every view of the body shares the index.
+                    let index = file_index.get_or_insert_with(|| {
+                        let index = FileIndex::default();
+                        let (slot, path, ctx) = (index.clone(), path.to_path_buf(), ctx.clone());
+                        std::thread::spawn(move || {
+                            let ix = LineIndex::from_file(&path).map(Arc::new).map_err(|e| e.to_string());
+                            *slot.lock() = Some(ix);
+                            ctx.request_repaint();
+                        });
+                        index
                     });
+                    p.content = Content::File { body: resp.body.clone(), lang, index: index.clone() };
                 }
                 ResponseBody::Memory(b) => {
                     p.content = Content::Doc(Doc::new(String::from_utf8_lossy(b).into_owned(), lang, None, false));
@@ -1260,8 +1292,8 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
         return None;
     }
     if state.view == BodyView::Preview {
-        if p.is_image {
-            image_preview(ui, resp, p.image_size);
+        if let Some(image) = &p.image {
+            image_preview(ui, resp, p.image_size, image);
             return None;
         }
         if p.is_html {
@@ -1319,7 +1351,10 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
         (None, Content::File { body, lang, index }) => {
             let ix = index.lock().clone();
             match ix {
-                Some(ix) => rows_viewer(ui, state, &Source::File(body), &ix, lang, "file"),
+                Some(Ok(ix)) => rows_viewer(ui, state, &Source::File(body), &ix, lang, "file"),
+                Some(Err(e)) => {
+                    kit::empty_state(ui, icons::WARNING_CIRCLE, tr("Could not read the response body"), &e, |_| {})
+                }
                 None => {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
@@ -1714,7 +1749,7 @@ fn read_rows(source: &Source, index: &LineIndex, rows: std::ops::Range<usize>) -
 /// Large texts: only the visible rows are read and laid out. Every row is
 /// drawn at a fixed place in a content as wide as the longest row of the
 /// whole body, so scrolling down never changes the horizontal range.
-fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &LineIndex, lang: Lang, salt: &str) {
+fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &Arc<LineIndex>, lang: Lang, salt: &str) {
     let dark = ui.visuals().dark_mode;
     let font_size = mono_size(ui);
     let font = FontId::monospace(font_size);
@@ -1723,20 +1758,42 @@ fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &Line
     let rows = index.rows();
     let pal = theme::pal(ui);
     let search = state.search.clone();
-    ui.label(
-        RichText::new(trf("{} rows · {}", &[&rows, &ternarywire_core::util::human_bytes(index.total)]))
-            .small()
-            .color(pal.text_muted),
-    );
+    // Searching scans the whole body, which may be large: off the UI thread.
+    if std::mem::take(&mut state.jump) && !search.is_empty() {
+        let job = RowSearch { stop: Arc::default(), row: Arc::default() };
+        let (stop, slot, ctx) = (job.stop.clone(), job.row.clone(), ui.ctx().clone());
+        let (source, index, search, nth) = (source.clone(), index.clone(), search.clone(), state.match_cursor);
+        std::thread::spawn(move || {
+            let row = find_match_row(&source, &index, &search, nth, &stop);
+            if !stop.load(Ordering::Relaxed) {
+                *slot.lock() = Some(row);
+                ctx.request_repaint();
+            }
+        });
+        state.row_search = Some(job);
+    }
+    let found = state.row_search.as_ref().and_then(|s| s.row.lock().take());
+    if found.is_some() {
+        state.row_search = None;
+    }
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(trf("{} rows · {}", &[&rows, &ternarywire_core::util::human_bytes(index.total)]))
+                .small()
+                .color(pal.text_muted),
+        );
+        if state.row_search.is_some() {
+            ui.add(egui::Spinner::new().size(11.0).color(pal.text_muted));
+            ui.label(RichText::new(tr("Searching…")).small().color(pal.text_muted));
+        }
+    });
     ui.add_space(4.0);
     let gutter_w = rows.to_string().len().max(2) as f32 * char_w + 18.0;
     let text_x = gutter_w + 10.0;
     let text_w = (index.max_cols as f32 * char_w).max(state.rows_width) + 24.0;
     let content_w = text_x + text_w;
     let mut area = egui::ScrollArea::both().auto_shrink([false; 2]).id_salt(("rows-scroll", salt));
-    if std::mem::take(&mut state.jump)
-        && let Some(r) = find_match_row(source, index, &search, state.match_cursor)
-    {
+    if let Some(Some(r)) = found {
         area = area.vertical_scroll_offset((r as f32 * row_h - 80.0).max(0.0));
     }
     if let Some(off) = state.pending_scroll.take() {
@@ -1817,8 +1874,9 @@ fn nth_match_byte(text: &str, search: &str, nth: usize) -> Option<usize> {
     origin.get(byte).map(|&b| b as usize)
 }
 
-/// Row of the n-th search match (wrapping), scanning the body in chunks.
-fn find_match_row(source: &Source, index: &LineIndex, search: &str, nth: usize) -> Option<usize> {
+/// Row of the n-th search match (wrapping), scanning the body in chunks
+/// until `stop` is set.
+fn find_match_row(source: &Source, index: &LineIndex, search: &str, nth: usize, stop: &AtomicBool) -> Option<usize> {
     if search.is_empty() {
         return None;
     }
@@ -1827,6 +1885,9 @@ fn find_match_row(source: &Source, index: &LineIndex, search: &str, nth: usize) 
     let chunk_rows = 4096;
     let mut row = 0;
     while row < index.rows() && found.len() < nth.max(1) + 1 {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
         let end = (row + chunk_rows).min(index.rows());
         for (i, text) in read_rows(source, index, row..end).into_iter().enumerate() {
             if text.to_lowercase().contains(&needle) {
@@ -1857,10 +1918,8 @@ fn binary_state(ui: &mut Ui, resp: &HttpResponse) {
 }
 
 /// An image body on a checkerboard (shows transparency), with its size.
-fn image_preview(ui: &mut Ui, resp: &HttpResponse, size: Option<[u32; 2]>) {
+fn image_preview(ui: &mut Ui, resp: &HttpResponse, size: Option<[u32; 2]>, (uri, bytes): &(String, Arc<[u8]>)) {
     let p = theme::pal(ui);
-    let bytes = resp.body.read_all().unwrap_or_default();
-    let uri = image_uri(&resp.url, &bytes);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let ct = resp.content_type().split(';').next().unwrap_or("").trim().to_string();
@@ -1905,7 +1964,7 @@ fn image_preview(ui: &mut Ui, resp: &HttpResponse, size: Option<[u32; 2]>) {
                 }
             }
         }
-        egui::Image::from_bytes(uri, bytes.to_vec()).paint_at(ui, img_rect);
+        egui::Image::from_bytes(uri.clone(), bytes.clone()).paint_at(ui, img_rect);
         ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
     });
 }
@@ -2146,7 +2205,8 @@ mod tests {
         assert_eq!(ix.rows(), 3);
         let src = Source::Text(Arc::new("one\ntwo\nthree".into()));
         assert_eq!(read_rows(&src, &ix, 1..3), vec!["two", "three"]);
-        assert_eq!(find_match_row(&src, &ix, "THR", 1), Some(2));
+        assert_eq!(find_match_row(&src, &ix, "THR", 1, &AtomicBool::new(false)), Some(2));
+        assert_eq!(find_match_row(&src, &ix, "THR", 1, &AtomicBool::new(true)), None, "stopped");
     }
 
     /// The row viewer's content width comes from the longest row of the
