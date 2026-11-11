@@ -44,6 +44,9 @@ pub enum Size {
     Sm,
     Md,
     Lg,
+    /// The prototype's `.btn.lg`: 34 high, 16 px padding (Cancel in place
+    /// of Send).
+    Tall,
 }
 
 /// Everything a button can show.
@@ -75,6 +78,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
         Size::Sm => (24.0, 12.0, 13.0, (8.0, 8.0), 5.0, RADIUS_SM),
         Size::Md => (30.0, 12.5, 15.0, (12.0, 12.0), 6.0, RADIUS),
         Size::Lg => (38.0, 13.0, 15.0, (14.0, 16.0), 6.0, 9),
+        Size::Tall => (34.0, 13.0, 15.0, (16.0, 16.0), 6.0, RADIUS),
     };
     let enabled = ui.is_enabled();
     let text_color = match kind {

@@ -43,6 +43,8 @@ pub struct ResultView {
     pub body: BodyState,
     /// When the response arrived (shown when comparing).
     pub at: chrono::DateTime<chrono::Local>,
+    /// How long the send took (shown when it failed).
+    pub took: Option<std::time::Duration>,
 }
 
 /// How much of the tab the response panel takes.
@@ -304,7 +306,7 @@ impl RequestTab {
             return;
         }
         // Only a send ends the send in progress (re-running tests is not one).
-        self.running = None;
+        let took = self.running.take().map(|r| r.started.elapsed());
         let had_tests = !exec.tests.is_empty();
         // The new body keeps how the last one was viewed (view, wrap, filter).
         let mut body = BodyState::default();
@@ -323,7 +325,7 @@ impl RequestTab {
             self.prev = Some(Box::new(crate::response_diff::Snapshot { resp, at: old.at }));
         }
         self.compare.reset();
-        self.result = Some(Box::new(ResultView { exec, body, at: chrono::Local::now() }));
+        self.result = Some(Box::new(ResultView { exec, body, at: chrono::Local::now(), took }));
         if self.resp_section == RespSection::Tests && !had_tests {
             self.resp_section = RespSection::Body;
         }
@@ -1170,7 +1172,8 @@ fn url_row(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &Edi
     kit::bar(ui, size::ACTION_ROW, true, |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if running {
-                let r = kit::action_button(ui, Kind::Secondary, icons::STOP, tr("Cancel"));
+                let opts = ButtonOpts { icon: Some(icons::STOP), ..Default::default() };
+                let r = kit::button(ui, Kind::Secondary, Size::Tall, tr("Cancel"), opts);
                 if r.on_hover_text(format!("{} (⌘↩)", tr("Cancel"))).clicked() {
                     actions.cancel = true;
                 }
@@ -3222,6 +3225,10 @@ fn status_row(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &mut A
                 Tone::Err,
                 PillOpts { large: true, icon: Some(icons::WARNING_CIRCLE), ..Default::default() },
             );
+            // How long it took to fail.
+            if let Some(took) = tab.result.as_ref().and_then(|r| r.took) {
+                kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(took.as_secs_f64() * 1000.0));
+            }
         } else if exec.is_some_and(|e| e.skipped) {
             kit::pill_ex(ui, tr("Skipped"), Tone::Neutral, PillOpts { large: true, ..Default::default() });
         } else {
@@ -3446,7 +3453,7 @@ fn response_content(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: 
         }
         RespSection::Body | RespSection::Headers | RespSection::Cookies if exec.response.is_none() => {
             if let Some(err) = &exec.error {
-                error_state(ui, err, actions);
+                error_state(ui, err, exec, actions);
             } else if exec.skipped {
                 center_v(ui, ui.make_persistent_id("resp-skipped"), |ui| {
                     empty_block(
@@ -3688,7 +3695,90 @@ fn error_kind_look(kind: ternarywire_http::error::HttpErrorKind) -> (&'static st
 
 /// The request could not be sent: a card with the cause, a checklist and
 /// the next steps.
-fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &mut Actions) {
+/// A piece of a line of the error card: text, code, a `{{variable}}` chip
+/// or a key cap.
+enum Seg<'a> {
+    Text(&'a str),
+    Mono(String),
+    Chip(String),
+    Kbd(&'a str),
+}
+
+/// `template` with `mid` in place of its `{}`.
+fn fill<'a>(template: &'a str, mid: Seg<'a>) -> Vec<Seg<'a>> {
+    let (before, after) = template.split_once("{}").unwrap_or((template, ""));
+    vec![Seg::Text(before), mid, Seg::Text(after)]
+}
+
+/// Lays `segs` out on 1.45 lines, `width` wide, and paints the chips and
+/// key caps behind their text.
+fn seg_line(ui: &mut Ui, segs: &[Seg<'_>], size: f32, color: Color32, width: f32) {
+    use egui::text::{LayoutJob, TextFormat};
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    let line = size * 1.45;
+    let fmt =
+        |font: egui::FontId, color: Color32| TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) };
+    let mut job = LayoutJob::default();
+    // (char range, None for a chip or the keys of a key cap) to paint after
+    // the layout.
+    let mut marks: Vec<(std::ops::Range<usize>, Option<&str>)> = Vec::new();
+    let mut at = 0usize;
+    let mut lead = 0.0;
+    for seg in segs {
+        let (text, format, mark, shift) = match seg {
+            Seg::Text(t) => (t.to_string(), fmt(egui::FontId::proportional(size), color), None, 0.0),
+            Seg::Mono(t) => (t.clone(), fmt(theme::mono(size), color), None, 0.0),
+            Seg::Chip(t) => {
+                (t.clone(), fmt(egui::FontId::proportional(size), theme::var_defined(dark)), Some(None), 2.0)
+            }
+            Seg::Kbd(t) => {
+                (t.to_string(), fmt(egui::FontId::proportional(10.5), Color32::TRANSPARENT), Some(Some(*t)), 6.0)
+            }
+        };
+        let n = text.chars().count();
+        job.append(&text, lead + shift, format);
+        if let Some(chip) = mark {
+            marks.push((at..at + n, chip));
+        }
+        lead = shift;
+        at += n;
+    }
+    job.wrap.max_width = width;
+    let galley = ui.painter().layout_job(job);
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let r = ui.add(egui::Label::new(galley.clone()).selectable(false));
+    let mut shapes = Vec::new();
+    for (range, keys) in marks {
+        let a = galley.pos_from_cursor(egui::text::CCursor::new(range.start)).translate(r.rect.min.to_vec2());
+        let b = galley.pos_from_cursor(egui::text::CCursor::new(range.end)).translate(r.rect.min.to_vec2());
+        if let Some(keys) = keys {
+            let right = if range.end < at { b.left() - 6.0 } else { b.left() };
+            let rect = Rect::from_x_y_ranges(a.left() - 6.0..=right + 6.0, a.center().y - 9.0..=a.center().y + 9.0);
+            kit::paint_kbd(ui, rect, keys);
+        } else {
+            let right = if range.end < at { b.left() - 2.0 } else { b.left() };
+            let rect = Rect::from_x_y_ranges(a.left() - 3.0..=right + 3.0, a.top()..=a.top() + line);
+            shapes.push(egui::Shape::rect_filled(rect, CornerRadius::same(4), p.var_ok_bg));
+        }
+    }
+    ui.painter().set(slot, egui::Shape::Vec(shapes));
+}
+
+/// The design's lines for a refused connection: where nothing listens,
+/// the URL's first variable to check, and the environment switch.
+fn refused_lines(exec: &Execution) -> Option<(String, Option<String>)> {
+    let prepared = exec.prepared.as_ref()?;
+    let url = url::Url::parse(&prepared.url).ok()?;
+    let host = format!("{}:{}", url.host_str()?, url.port_or_known_default()?);
+    let var = exec.request.as_ref().and_then(|r| {
+        let rest = r.url.strip_prefix("{{")?;
+        rest.find("}}").map(|i| format!("{{{{{}}}}}", &rest[..i]))
+    });
+    Some((host, var))
+}
+
+fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, exec: &Execution, actions: &mut Actions) {
     let p = theme::pal(ui);
     let detail_id = ui.make_persistent_id("err-detail");
     let mut show_detail: bool = ui.data(|d| d.get_temp(detail_id).unwrap_or(false));
@@ -3702,6 +3792,11 @@ fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let (icon, category) = error_kind_look(err.kind);
+                    let refused = if err.kind == ternarywire_http::error::HttpErrorKind::ConnectionRefused {
+                        refused_lines(exec)
+                    } else {
+                        None
+                    };
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
                         let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
@@ -3713,24 +3808,68 @@ fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &
                                 ui.label(
                                     RichText::new(tr("Could not send request"))
                                         .font(theme::semibold(14.0))
-                                        .color(p.text),
+                                        .color(p.text)
+                                        .line_height(Some(14.0 * 1.45)),
                                 );
                                 kit::tone_pill(ui, category, Tone::Err);
                             });
-                            ui.add(egui::Label::new(RichText::new(&err.message).size(13.0).color(p.text_muted)).wrap());
+                            let w = ui.available_width();
+                            match &refused {
+                                Some((host, _)) => {
+                                    let segs = fill(
+                                        tr("Nothing is listening on {} — the connection was refused."),
+                                        Seg::Mono(host.clone()),
+                                    );
+                                    seg_line(ui, &segs, 13.0, p.text_muted, w);
+                                }
+                                None => {
+                                    let text = RichText::new(&err.message)
+                                        .size(13.0)
+                                        .color(p.text_muted)
+                                        .line_height(Some(13.0 * 1.45));
+                                    ui.add(egui::Label::new(text).wrap());
+                                }
+                            }
                         });
                     });
-                    let lines = error_checklist(err.kind);
+                    // The checklist: 12.5 px lines, a faint check 8 px before each.
+                    let mut lines: Vec<Vec<Seg<'_>>> =
+                        error_checklist(err.kind).into_iter().map(|l| vec![Seg::Text(l)]).collect();
+                    if let Some((_, var)) = &refused {
+                        let check = match var {
+                            Some(v) => fill(
+                                tr("Is the server running? Start it, or check the port in {}."),
+                                Seg::Chip(v.clone()),
+                            ),
+                            None => {
+                                vec![Seg::Text(tr("Is the server running? Start it, or check the port in the URL."))]
+                            }
+                        };
+                        lines = vec![
+                            check,
+                            vec![Seg::Text(tr("Using a proxy? Check Settings › Proxy."))],
+                            fill(tr("Switch environment with {} if this should go to another server."), Seg::Kbd("⌘E")),
+                        ];
+                    }
                     if !lines.is_empty() {
                         ui.add_space(14.0);
                         for (i, line) in lines.iter().enumerate() {
                             if i > 0 {
                                 ui.add_space(6.0);
                             }
-                            ui.horizontal_top(|ui| {
+                            // The check centers on its item (`.row`).
+                            ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.label(RichText::new(icons::CHECK).font(theme::icon_font(13.0)).color(p.text_faint));
-                                ui.add(egui::Label::new(RichText::new(*line).size(12.5).color(p.text)).wrap());
+                                let (r, _) = ui.allocate_exact_size(vec2(12.5, 12.5 * 1.45), Sense::hover());
+                                ui.painter().text(
+                                    r.center(),
+                                    Align2::CENTER_CENTER,
+                                    icons::CHECK,
+                                    theme::icon_font(12.5),
+                                    p.text_faint,
+                                );
+                                let w = ui.available_width();
+                                seg_line(ui, line, 12.5, p.text, w);
                             });
                         }
                     }

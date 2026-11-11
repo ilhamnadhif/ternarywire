@@ -2104,6 +2104,10 @@ TTFB	TTFB
 Waiting for the first byte from {}	Menunggu byte pertama dari {}
 Last sent from History	Terakhir dikirim dari Riwayat
 Using a proxy? Check Settings › Proxy.	Memakai proxy? Periksa Pengaturan › Proxy.
+Nothing is listening on {} — the connection was refused.	Tidak ada yang mendengarkan di {} — koneksi ditolak.
+Is the server running? Start it, or check the port in {}.	Apakah server berjalan? Jalankan, atau periksa port di {}.
+Is the server running? Start it, or check the port in the URL.	Apakah server berjalan? Jalankan, atau periksa port di URL.
+Switch environment with {} if this should go to another server.	Ganti environment dengan {} jika ini seharusnya ke server lain.
 Switch environment with ⌘E if this should go to another server.	Ganti environment dengan ⌘E bila ini seharusnya ke server lain.
 Undefined variables are sent as typed; Details lists them.	Variabel yang belum didefinisikan dikirim apa adanya; Detail mendaftarnya.
 Open console	Buka konsol
