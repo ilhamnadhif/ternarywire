@@ -489,7 +489,7 @@ pub(crate) async fn execute_keeping_locals(
     let mut prepared = prepare(&request, &ctx);
     exec.unresolved = prepared.unresolved.clone();
     for name in &prepared.unresolved {
-        exec.network(ConsoleKind::Warn, format!("variable \"{name}\" is not defined"));
+        exec.network(ConsoleKind::Warn, format!("Undefined variable {{{{{name}}}}} — sent as typed"));
     }
     exec.request = Some(request);
 
@@ -553,7 +553,7 @@ pub(crate) async fn execute_keeping_locals(
             exec.network(
                 ConsoleKind::Network,
                 format!(
-                    "{} {} → {} {} ({}, {})",
+                    "{} {} → {} {} · {} · {}",
                     prepared.method,
                     out.sent.url,
                     r.status,

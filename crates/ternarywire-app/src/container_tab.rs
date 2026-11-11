@@ -316,49 +316,16 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut ContainerTab) {
                         let side = width >= 620.0;
                         let mut main = |ui: &mut Ui, changed: &mut bool| {
                             ui.spacing_mut().item_spacing.y = 18.0;
-                            kit::group(ui, tr("General"), "", |ui, rows| {
-                                let help = if is_folder {
-                                    tr("Shown in the sidebar and in run reports.")
-                                } else {
-                                    tr("Also the name of the collection file.")
-                                };
-                                // Label and help on the left, a 280 wide input (26 high) on the right.
-                                rows.block(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let input_w = 280.0_f32.min(ui.available_width() * 0.6);
-                                        let label_w = ui.available_width() - input_w - 14.0;
-                                        ui.allocate_ui_with_layout(
-                                            vec2(label_w, 0.0),
-                                            Layout::top_down(Align::Min),
-                                            |ui| {
-                                                ui.set_width(label_w);
-                                                ui.spacing_mut().item_spacing.y = 1.0;
-                                                let p = theme::pal(ui);
-                                                ui.label(
-                                                    RichText::new(tr("Name")).font(theme::medium(13.0)).color(p.text),
-                                                );
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(help).size(12.0).color(p.text_muted),
-                                                    )
-                                                    .wrap(),
-                                                );
-                                            },
-                                        );
-                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            ui.spacing_mut().interact_size.y = 26.0;
-                                            let r = ui.add(
-                                                egui::TextEdit::singleline(name)
-                                                    .font(FontId::proportional(12.0))
-                                                    .desired_width(input_w)
-                                                    .min_size(vec2(0.0, 26.0))
-                                                    .margin(egui::Margin::symmetric(8, 0))
-                                                    .align(Align2::LEFT_CENTER),
-                                            );
-                                            widgets::a11y_name(&r, tr("Name"));
-                                            *changed |= r.changed();
-                                        });
-                                    });
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                title_line(ui, tr("General"));
+                                kit::group(ui, "", "", |ui, rows| {
+                                    let help = if is_folder {
+                                        tr("Shown in the sidebar and in run reports.")
+                                    } else {
+                                        tr("Also the name of the collection file.")
+                                    };
+                                    rows.block(ui, |ui| name_row(ui, name, help, changed));
                                 });
                             });
                             *changed |= description_ui(ui, &mut tab.preview, description);
@@ -497,6 +464,53 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut ContainerTab) {
 // Overview
 // ---------------------------------------------------------------------------
 
+/// A section title (12.5 semibold) on the prototype's 18 px line.
+fn title_line(ui: &mut Ui, text: &str) {
+    ui.label(kit::section_title(text).color(theme::pal(ui).text).line_height(Some(18.0)));
+}
+
+/// The Name row of the General group: label (13 medium, 19 line) and help
+/// (12 muted, 17.5 lines) on the left, a 280 × 26 input centered on them on
+/// the right, 14 apart.
+fn name_row(ui: &mut Ui, name: &mut String, help: &str, changed: &mut bool) {
+    let p = theme::pal(ui);
+    let w = ui.available_width();
+    let input_w = 280.0_f32.min(w * 0.6);
+    let label_w = w - input_w - 14.0;
+    let col = ui
+        .allocate_ui_with_layout(vec2(label_w, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(label_w);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // Lines of 18 and 17.25 (+ 1 below) put the glyphs where the
+            // prototype's 18.85 + 1 + 17.4 lines do.
+            ui.label(RichText::new(tr("Name")).font(theme::medium(13.0)).color(p.text).line_height(Some(18.0)));
+            ui.add(
+                egui::Label::new(RichText::new(help).size(12.0).color(p.text_muted).line_height(Some(17.25))).wrap(),
+            );
+            ui.add_space(1.0);
+        })
+        .response
+        .rect;
+    let input = Rect::from_min_size(pos2(col.left() + w - input_w, col.center().y - 13.0), vec2(input_w, 26.0));
+    let r = ui
+        .scope_builder(UiBuilder::new().max_rect(input), |ui| {
+            ui.spacing_mut().interact_size.y = 26.0;
+            ui.add(
+                egui::TextEdit::singleline(name)
+                    .font(FontId::proportional(12.0))
+                    .desired_width(input_w)
+                    .min_size(vec2(input_w, 26.0))
+                    .margin(egui::Margin::symmetric(8, 0))
+                    .align(Align2::LEFT_CENTER),
+            )
+        })
+        .inner;
+    // The input moved the cursor to its own bottom, above the labels' one.
+    ui.advance_cursor_after_rect(col.union(input));
+    widgets::a11y_name(&r, tr("Name"));
+    *changed |= r.changed();
+}
+
 /// A number card with an icon before its label (the prototype's `.stat`).
 fn stat(ui: &mut Ui, width: f32, icon: &str, label: &str, value: &str, value_size: f32, sub: &str) {
     let p = theme::pal(ui);
@@ -518,7 +532,11 @@ fn stat(ui: &mut Ui, width: f32, icon: &str, label: &str, value: &str, value_siz
                 };
                 line(ui, 17.0, &mut |ui| {
                     let mut job = LayoutJob::default();
-                    job.append(icon, 0.0, TextFormat::simple(theme::icon_font(11.5), p.text_muted));
+                    let icon_format = TextFormat {
+                        valign: Align::Center,
+                        ..TextFormat::simple(theme::icon_font(11.5), p.text_muted)
+                    };
+                    job.append(icon, 0.0, icon_format);
                     job.append(label, 6.0, TextFormat::simple(FontId::proportional(11.5), p.text_muted));
                     ui.add(egui::Label::new(job).truncate());
                 });
@@ -580,8 +598,9 @@ fn description_ui(ui: &mut Ui, preview: &mut bool, text: &mut String) -> bool {
     let mut changed = false;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 26.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_size(vec2(w, 26.0));
             ui.label(kit::section_title(tr("Description")));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut mode = *preview;
@@ -603,7 +622,7 @@ fn description_ui(ui: &mut Ui, preview: &mut bool, text: &mut String) -> bool {
             kit::well(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let rows = text.lines().count().clamp(8, 30);
-                let r = widgets::code_editor_gutter(ui, "desc", text, Lang::Text, None, rows, false, None);
+                let r = widgets::code_editor_gutter(ui, "desc", text, Lang::Markdown, None, rows, false, None);
                 widgets::a11y_name(&r, tr("Description"));
                 changed |= r.changed();
             });
@@ -718,7 +737,7 @@ fn actions_card(ui: &mut Ui, is_folder: bool, f: &Facts, acts: &mut Vec<Act>) {
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(kit::section_title(tr("Actions")));
+        title_line(ui, tr("Actions"));
         egui::Frame::new()
             .fill(p.surface)
             .stroke(Stroke::new(1.0, p.border))
@@ -767,17 +786,18 @@ fn actions_card(ui: &mut Ui, is_folder: bool, f: &Facts, acts: &mut Vec<Act>) {
                 }
             });
         if let (Some(dir), false) = (&f.dir, is_folder) {
-            ui.horizontal_wrapped(|ui| {
-                ui.add_space(4.0);
-                ui.spacing_mut().item_spacing.x = 4.0;
+            // Where the files are: 12 muted on 17.5 lines, 4 in from the card.
+            // (No right margin: egui wraps a little earlier than the browser.)
+            egui::Frame::new().inner_margin(egui::Margin { left: 4, ..Default::default() }).show(ui, |ui| {
+                let line = |font: FontId| TextFormat {
+                    line_height: Some(17.5),
+                    valign: Align::Center,
+                    ..TextFormat::simple(font, p.text_muted)
+                };
                 let mut job = LayoutJob::default();
-                job.append(icons::FOLDER_SIMPLE, 0.0, TextFormat::simple(theme::icon_font(12.0), p.text_muted));
-                job.append(dir, 4.0, TextFormat::simple(theme::mono(11.0), p.text_muted));
-                job.append(
-                    &format!(" · {}", tr("one file per request")),
-                    0.0,
-                    TextFormat::simple(FontId::proportional(12.0), p.text_muted),
-                );
+                job.append(icons::FOLDER_SIMPLE, 0.0, line(theme::icon_font(12.0)));
+                job.append(dir, 4.0, line(theme::mono(11.0)));
+                job.append(&format!(" · {}", tr("one file per request")), 0.0, line(FontId::proportional(12.0)));
                 ui.add(egui::Label::new(job).wrap());
             });
         }

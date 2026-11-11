@@ -6,6 +6,8 @@
   {"sidebar": "flows"},
   {"open_flow": "Catalog summary"},
   {"wait_ms": 500},
+  {"flow_action": "view:0.78:12:64"},
+  {"wait_ms": 200},
   {"flow_action": "validate"},
   {"wait_ms": 300},
   {"flow_action": "add-block"},

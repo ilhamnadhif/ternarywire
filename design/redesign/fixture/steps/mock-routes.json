@@ -3,10 +3,12 @@
   {"theme": "@THEME"},
   {"expand": "Bookstore API"},
   {"expand": "Realtime & AI"},
+  {"sidebar": "servers"},
   {"mock": "Bookstore API"},
+  {"auto": "port:3151"},
   {"auto": "start"},
   {"wait_ms": 1200},
-  {"auto": "routes"},
+  {"auto": "route:List books"},
   {"wait_ms": 800},
   {"screenshot": "@OUT"},
   {"quit": true}

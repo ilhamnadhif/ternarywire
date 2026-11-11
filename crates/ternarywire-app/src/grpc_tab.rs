@@ -162,7 +162,12 @@ impl GrpcTab {
                         }
                     }
                     let title = if dir == Dir::In { &self.msg_types.1 } else { &self.msg_types.0 };
-                    self.log.push(dir, title.clone(), json, at_ms);
+                    // Compact JSON in the log (its detail pretty-prints it).
+                    let text = serde_json::from_str::<serde_json::Value>(&json)
+                        .ok()
+                        .and_then(|v| serde_json::to_string(&v).ok())
+                        .unwrap_or(json);
+                    self.log.push(dir, title.clone(), text, at_ms);
                 }
                 GrpcEvent::Trailers(t) => self.trailers = t,
                 GrpcEvent::Finished { code, code_name, message, elapsed_ms } => {
@@ -352,7 +357,10 @@ fn method_picker(ui: &mut Ui, picker: Picker<'_>, service: &str, method: &str) -
     }
     let frame =
         egui::Frame::popup(ui.style()).corner_radius(egui::CornerRadius::same(12)).inner_margin(egui::Margin::same(6));
+    // Under the method, its right edge 10 px inside the bar's (the prototype's
+    // `right: 124px` of the row).
     let popup = egui::Popup::from_toggle_button_response(&resp)
+        .anchor(egui::PopupAnchor::ParentRect(resp.rect.translate(egui::vec2(-9.0, 0.0))))
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .align(egui::RectAlign::BOTTOM_END)
         .gap(5.0)
@@ -367,6 +375,9 @@ fn method_picker(ui: &mut Ui, picker: Picker<'_>, service: &str, method: &str) -
             let r = kit::search_field_sm(ui, "grpc-method-search", search, tr("Search methods"), ui.available_width());
             if !r.has_focus() && search.is_empty() {
                 r.request_focus();
+            }
+            if r.has_focus() {
+                kit::focus_ring(ui, r.rect, theme::RADIUS_SM);
             }
         });
         let q = search.to_lowercase();
@@ -428,9 +439,12 @@ fn method_picker(ui: &mut Ui, picker: Picker<'_>, service: &str, method: &str) -
                     let text_w = pill.left() - rect.left() - 20.0;
                     let ng = kit::elide(ui, &m.name, theme::medium(13.0), p.text, text_w);
                     let ig = kit::elide(ui, &signature(m), theme::mono(11.0), p.text_faint, text_w);
-                    let top = rect.center().y - (ng.size().y + ig.size().y) / 2.0;
-                    ui.painter().galley(egui::pos2(rect.left() + 10.0, top), ng.clone(), p.text);
-                    ui.painter().galley(egui::pos2(rect.left() + 10.0, top + ng.size().y), ig, p.text_faint);
+                    // Lines of 1.45 × 13 and 1.45 × 11, centered together.
+                    let (nh, ih) = (13.0 * 1.45, 11.0 * 1.45);
+                    let top = rect.center().y - (nh + ih) / 2.0;
+                    let x = rect.left() + 10.0;
+                    ui.painter().galley(egui::pos2(x, top + (nh - ng.size().y) / 2.0), ng.clone(), p.text);
+                    ui.painter().galley(egui::pos2(x, top + nh + (ih - ig.size().y) / 2.0), ig, p.text_faint);
                     if r.clicked() {
                         pick = Some(Pick::Method(svc.name.clone(), m.name.clone()));
                         ui.close();
@@ -630,7 +644,8 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
                                     kit::tone_pill(ui, kind, tone);
                                     let full = format!("{} → {}", m.input_type, m.output_type);
                                     ui.scope(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        // A monospace space around the arrow.
+                                        ui.spacing_mut().item_spacing.x = 7.2;
                                         ui.label(
                                             RichText::new(short(&m.input_type)).font(theme::mono(12.0)).color(p.text),
                                         )
@@ -819,11 +834,12 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
                     Tab::new(RespSection::Trailers, tr("Trailers")).count(trailers.len()),
                 ];
                 let messages = *resp_section == RespSection::Messages;
+                let tabs_w = kit::tabs_width(ui, &tabs);
                 kit::tabs_with(ui, resp_section, &tabs, |ui| {
                     if messages {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        // The search gives way to the tabs.
-                        let w = (ui.available_width() - 320.0 - 34.0).clamp(90.0, 160.0);
+                        // The search (160) gives way to the tabs.
+                        let w = (ui.available_width() - tabs_w - 8.0 - 6.0 - 22.0).clamp(90.0, 160.0);
                         log.tools(ui, ("grpc-log", tab_id), false, w);
                     }
                 });

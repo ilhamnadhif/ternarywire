@@ -129,6 +129,7 @@ fn make_fixture() {
     write_specs(&root);
     write_flows(&root);
     write_data(&root);
+    write_packages(&root);
     write_history(&root);
     write_cookies(&root);
     write_session(&root);
@@ -218,6 +219,20 @@ fn folder(id: &str, name: &str, items: Vec<RequestItem>) -> Item {
 
 fn pretty(v: Value) -> String {
     serde_json::to_string_pretty(&v).unwrap()
+}
+
+/// A JSON example response (served by the mock server).
+fn example(id: &str, name: &str, status: u16, status_text: &str, body: Option<Value>) -> Example {
+    Example {
+        id: id.into(),
+        name: name.into(),
+        request: None,
+        status,
+        status_text: status_text.into(),
+        headers: vec![kv("Content-Type", "application/json; charset=utf-8")],
+        body: body.map(pretty).unwrap_or_default(),
+        language: Some("json".into()),
+    }
 }
 
 fn json_headers() -> Vec<KeyValue> {
@@ -391,6 +406,36 @@ fn bookstore() -> Collection {
         h.headers = json_headers();
         h.body = Body::raw_json(pretty(json!({"status": "shipped"})));
     }
+
+    // The mock server's routes (mock-routes): one example per request, two on Get book.
+    login.examples = vec![example(
+        "ex-login-200",
+        "Signed in",
+        200,
+        "OK",
+        Some(json!({"token": "eyJhbGciOiJIUzI1NiJ9.mock", "expiresIn": 3600})),
+    )];
+    me.examples = vec![example(
+        "ex-me-200",
+        "Profile",
+        200,
+        "OK",
+        Some(json!({"id": "u_192", "name": "Ilham", "email": "ilham@example.com"})),
+    )];
+    get.examples = vec![
+        example("ex-get-200", "One book", 200, "OK", Some(json!({"id": 2, "title": "Clean Code", "price": 42.5}))),
+        example("ex-get-404", "Missing book", 404, "Not Found", Some(json!({"error": "not_found"}))),
+    ];
+    create.examples = vec![example(
+        "ex-create-201",
+        "Created",
+        201,
+        "Created",
+        Some(json!({"id": 6, "title": "Bumi Manusia", "price": 15.5})),
+    )];
+    update.examples =
+        vec![example("ex-update-200", "Updated", 200, "OK", Some(json!({"id": 2, "price": 52, "inStock": true})))];
+    delete.examples = vec![example("ex-delete-204", "Deleted", 204, "No Content", None)];
 
     let mut c = Collection::new("Bookstore API");
     c.id = C_BOOK.into();
@@ -1014,6 +1059,8 @@ fn write_flows(root: &Path) {
     summarize["id"] = json!("sum");
     summarize["position"] = json!([774.0, 200.0]);
     summarize["config"]["base_url"] = json!(AI_BASE);
+    // Streams, so the run log shows the answer (the prototype's info line).
+    summarize["config"]["stream"] = json!(true);
     summarize["config"]["system"] = json!("You summarize the Bookstore catalogue in one or two sentences.");
     summarize["config"]["prompt"] = json!(
         "Summarize the catalog for {{inputs.user}}: {{blocks.Books.output.json}}. The signed-in user: {{blocks.User.output.json}}."
@@ -1153,6 +1200,36 @@ fn write_data(root: &Path) {
         csv.push_str(&format!("{},{id},{title}\n", i + 1));
     }
     std::fs::write(dir.join("books.csv"), csv).unwrap();
+}
+
+/// The Package Library of Settings › Scripts: three modules of the
+/// workspace and a lockfile with two pinned packages.
+fn write_packages(root: &Path) {
+    let dir = root.join("packages");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, body) in [
+        ("my-helpers", "module.exports = {\n  isoNow: () => new Date().toISOString(),\n};\n"),
+        ("signing", "module.exports = {\n  sign: (body, key) => CryptoJS.HmacSHA256(body, key).toString(),\n};\n"),
+        ("fixtures", "module.exports = {\n  book: { title: 'Bumi Manusia', price: 15.5 },\n};\n"),
+    ] {
+        std::fs::write(dir.join(format!("{name}.js")), body).unwrap();
+    }
+    let pin = |n: u8| format!("sha256-{}=", String::from_utf8(vec![b'A' + n; 43]).unwrap());
+    let lock = json!({
+        "lockfileVersion": 1,
+        "packages": {
+            "npm:lodash-es@4": "https://esm.sh/lodash-es@4.17.21",
+            "jsr:@std/encoding": "https://esm.sh/jsr/@std/encoding@1.0.5",
+        },
+        "modules": {
+            "https://esm.sh/lodash-es@4.17.21": pin(0),
+            "https://esm.sh/lodash-es@4.17.21/es2022/lodash-es.mjs": pin(1),
+            "https://esm.sh/jsr/@std/encoding@1.0.5": pin(2),
+            "https://esm.sh/jsr/@std/encoding@1.0.5/es2022/base64.mjs": pin(3),
+            "https://esm.sh/jsr/@std/encoding@1.0.5/es2022/hex.mjs": pin(4),
+        },
+    });
+    std::fs::write(root.join("packages.lock.json"), serde_json::to_string_pretty(&lock).unwrap()).unwrap();
 }
 
 /// Unix milliseconds of `day` (days after REFERENCE_DAY, negative = before)

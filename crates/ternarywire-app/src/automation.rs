@@ -81,7 +81,8 @@ pub enum Step {
     /// the selection).
     FlowSelect(String),
     /// Flow tab action: `validate` (lists the problems, no toast),
-    /// `add-block` (opens the Add block menu), `fit`.
+    /// `add-block` (opens the Add block menu), `fit`, `view:<zoom>:<x>:<y>`
+    /// (a fixed zoom with the canvas origin at x, y).
     FlowAction(String),
     /// Sets options of the active runner tab: `mode` (`functional`,
     /// `performance`), `iterations`, `delay_ms`, `data_file` (relative to the
@@ -126,12 +127,32 @@ pub enum Step {
     /// `ternarywire_secrets::ProviderConfig` JSON:
     /// `{"id": "corp-vault", "name": "corp-vault", "kind": "hashicorp_vault", "address": "…"}`.
     VaultProvider(serde_json::Value),
+    /// Links a vault name to an external secret, as
+    /// `ternarywire_secrets::LinkedSecret` JSON (nothing is fetched):
+    /// `{"name": "db_password", "provider_id": "corp-vault", "reference": "path/to/db#password"}`.
+    VaultLink(serde_json::Value),
+    /// Stores a credential of an external provider: `["corp-vault", "token", "…"]`.
+    VaultCredential([String; 3]),
     /// Closes every tab (the start page shows).
     CloseAllTabs(bool),
     /// Opens the newest History entry whose URL contains the text, as a tab.
     OpenHistory(String),
     /// Collapses a folder of the tree: `Collection/Folder`.
     Collapse(String),
+    /// Opens the request named in that collection: `["Payments (fork)",
+    /// "List customers"]` (`open` takes the first of that name).
+    OpenIn([String; 2]),
+    /// Adds an HTTP request at the top level of a collection:
+    /// `["Payments", "Refund charge", "POST", "{{baseUrl}}/v1/refunds"]`.
+    AddRequest([String; 4]),
+    /// Deletes the request named in that collection: `["Payments", "Legacy webhook"]`.
+    DeleteRequest([String; 2]),
+    /// Sets (or adds) a collection variable: `["Payments", "apiVersion", "2026-11-01"]`.
+    CollectionVar([String; 3]),
+    /// Open pull/merge dialog: includes or leaves out the change of this name.
+    ForkToggle(String),
+    /// Open pull/merge dialog: shows the diff of the change of this name.
+    ForkSelect(String),
     Quit(bool),
 }
 
@@ -640,6 +661,22 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                 (_, None) => eprintln!("automation: vault_provider: external secrets are unavailable"),
             }
         }
+        Step::VaultLink(v) => {
+            app.attach_external_secrets(true);
+            match (serde_json::from_value::<ternarywire_secrets::LinkedSecret>(v), app.ws.external.clone()) {
+                (Ok(link), Some(ext)) => {
+                    if let Err(e) = ext.link(link) {
+                        eprintln!("automation: vault_link: {}", e.message);
+                    }
+                }
+                (Err(e), _) => eprintln!("automation: vault_link: {e}"),
+                (_, None) => eprintln!("automation: vault_link: external secrets are unavailable"),
+            }
+        }
+        Step::VaultCredential([provider, field, value]) => match app.ws.external.clone() {
+            Some(ext) => ext.set_credential(&provider, &field, &value),
+            None => eprintln!("automation: vault_credential: external secrets are unavailable"),
+        },
         Step::CloseAllTabs(_) => {
             while !app.tabs.is_empty() {
                 app.close_tab(app.tabs.len() - 1);
@@ -673,6 +710,68 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                         app.sidebar.expanded.remove(&id);
                     }
                 }
+            }
+        }
+        Step::OpenIn([coll, name]) => {
+            let found = find_collection(app, &coll).and_then(|c| {
+                let col = app.ws.data.collection(&c)?;
+                col.requests()
+                    .into_iter()
+                    .find(|r| r.name == name)
+                    .map(|r| ItemRef { collection: c.clone(), item: r.id.clone() })
+            });
+            match found {
+                Some(r) => app.open_item(r),
+                None => eprintln!("automation: request {coll}/{name} not found"),
+            }
+        }
+        Step::AddRequest([coll, name, method, url]) => {
+            if let Some(c) = find_collection(app, &coll) {
+                let item = ternarywire_core::model::RequestItem::new(
+                    name,
+                    ternarywire_core::model::HttpRequest::new(method, url),
+                );
+                if let Some(col) = app.ws.data.collection_mut(&c) {
+                    col.items.push(ternarywire_core::model::Item::Request(item));
+                    app.ws.mark_collection(&c);
+                }
+            }
+        }
+        Step::DeleteRequest([coll, name]) => {
+            let found = find_collection(app, &coll).and_then(|c| {
+                let id = app.ws.data.collection(&c)?.requests().into_iter().find(|r| r.name == name)?.id.clone();
+                Some((c, id))
+            });
+            if let Some((c, id)) = found
+                && let Some(col) = app.ws.data.collection_mut(&c)
+            {
+                col.remove(&id);
+                app.ws.mark_collection(&c);
+            }
+        }
+        Step::CollectionVar([coll, key, value]) => {
+            if let Some(c) = find_collection(app, &coll)
+                && let Some(col) = app.ws.data.collection_mut(&c)
+            {
+                match col.variables.iter_mut().find(|v| v.key == key) {
+                    Some(v) => v.value = value,
+                    None => col.variables.push(ternarywire_core::variables::Variable::new(key, value)),
+                }
+                app.ws.mark_collection(&c);
+            }
+        }
+        Step::ForkToggle(name) => {
+            if let Some(crate::dialogs::Dialog::ForkSync(f)) = &mut app.dialog
+                && let Some(e) = f.plan.entries.iter_mut().find(|e| e.name == name)
+            {
+                e.apply = !e.apply;
+            }
+        }
+        Step::ForkSelect(name) => {
+            if let Some(crate::dialogs::Dialog::ForkSync(f)) = &mut app.dialog
+                && let Some(i) = f.plan.entries.iter().position(|e| e.name == name)
+            {
+                f.selected = i;
             }
         }
         Step::Quit(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),

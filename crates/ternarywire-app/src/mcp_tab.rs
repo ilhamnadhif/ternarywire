@@ -551,14 +551,17 @@ fn entries(c: &Catalog, view: View) -> Vec<Entry> {
 fn entry_card(ui: &mut Ui, e: &Entry, selected: bool) -> egui::Response {
     let p = theme::pal(ui);
     let w = ui.available_width();
-    let inner_w = (w - 20.0).max(20.0);
-    let name = kit::elide(ui, &e.name, theme::medium(12.5), p.text, inner_w);
+    // `.tcard`: a 1 px border, 8 / 10 padding, lines 3 apart: the name (13 on
+    // 1.45 lines), the tag (10.5 on 1.45) and two lines of detail (11.5 on 1.4).
+    let inner_w = (w - 22.0).max(20.0);
+    let (name_h, tag_h, detail_line) = (13.0 * 1.45, 10.5 * 1.45, 11.5 * 1.4);
+    let name = kit::elide(ui, &e.name, theme::medium(13.0), p.text, inner_w);
     let tag = e.tag.as_ref().map(|t| kit::elide(ui, t, theme::mono(10.5), p.text_faint, inner_w));
     let detail = e.detail.as_ref().map(|d| {
         let mut job = egui::text::LayoutJob::single_section(
             d.replace('\n', " "),
             egui::TextFormat {
-                line_height: Some(16.0),
+                line_height: Some(detail_line),
                 ..egui::TextFormat::simple(egui::FontId::proportional(11.5), p.text_muted)
             },
         );
@@ -570,10 +573,8 @@ fn entry_card(ui: &mut Ui, e: &Entry, selected: bool) -> egui::Response {
         };
         ui.painter().layout_job(job)
     });
-    let h = 16.0
-        + name.size().y
-        + tag.as_ref().map_or(0.0, |t| t.size().y + 3.0)
-        + detail.as_ref().map_or(0.0, |d| d.size().y + 3.0);
+    let h =
+        18.0 + name_h + tag.as_ref().map_or(0.0, |_| tag_h + 3.0) + detail.as_ref().map_or(0.0, |d| d.size().y + 3.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
     widgets::a11y_button(&resp, &e.name);
     if ui.is_rect_visible(rect) {
@@ -590,15 +591,16 @@ fn entry_card(ui: &mut Ui, e: &Entry, selected: bool) -> egui::Response {
         } else if resp.hovered() {
             painter.rect_filled(rect, r, p.hover);
         }
-        let mut y = rect.top() + 8.0;
-        painter.galley(egui::pos2(rect.left() + 10.0, y), name.clone(), p.text);
-        y += name.size().y + 3.0;
+        let x = rect.left() + 11.0;
+        let mut y = rect.top() + 9.0;
+        painter.galley(egui::pos2(x, y + (name_h - name.size().y) / 2.0), name.clone(), p.text);
+        y += name_h + 3.0;
         if let Some(t) = tag {
-            painter.galley(egui::pos2(rect.left() + 10.0, y), t.clone(), p.text_faint);
-            y += t.size().y + 3.0;
+            painter.galley(egui::pos2(x, y + (tag_h - t.size().y) / 2.0), t.clone(), p.text_faint);
+            y += tag_h + 3.0;
         }
         if let Some(d) = detail {
-            painter.galley(egui::pos2(rect.left() + 10.0, y), d, p.text_muted);
+            painter.galley(egui::pos2(x, y), d, p.text_muted);
         }
     }
     resp
@@ -881,7 +883,8 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut McpTab
                             if let Some(ms) = res.ms {
                                 kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(ms));
                             }
-                            ui.add_space(4.0);
+                            // A `.mt` of its own: 6 px in.
+                            ui.add_space(6.0);
                             ui.add(
                                 egui::Label::new(RichText::new(&res.title).font(theme::mono(11.5)).color(p.text_muted))
                                     .truncate(),
@@ -1196,24 +1199,30 @@ fn call_form(
             ui.painter().text(tile.center(), egui::Align2::CENTER_CENTER, icon, theme::icon_font(16.0), p.accent_text);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let tag_w = if view == View::Saved || title != target {
-                        ui.painter().layout_no_wrap(target.clone(), theme::mono(11.0), p.text_muted).size().x + 20.0
-                    } else {
-                        0.0
-                    };
-                    let w = (ui.available_width() - tag_w).max(60.0);
-                    let g = kit::elide(ui, &title, theme::semibold(14.0), p.text, w);
-                    let (r, _) = ui.allocate_exact_size(g.size(), egui::Sense::hover());
-                    ui.painter().galley(r.min, g, p.text);
-                    let tag = if view == View::Saved || title != target { Some(target.as_str()) } else { None };
-                    if let Some(t) = tag {
-                        pc::mono_tag(ui, t, ui.available_width().max(40.0));
-                    }
-                });
+                // The title on a 1.45 line (14), top-aligned with the tile.
+                let row_w = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(row_w, 14.0 * 1.45),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let tag_w = if view == View::Saved || title != target {
+                            ui.painter().layout_no_wrap(target.clone(), theme::mono(10.5), p.text_muted).size().x + 22.0
+                        } else {
+                            0.0
+                        };
+                        let w = (ui.available_width() - tag_w).max(60.0);
+                        let g = kit::elide(ui, &title, theme::semibold(14.0), p.text, w);
+                        let (r, _) = ui.allocate_exact_size(g.size(), egui::Sense::hover());
+                        ui.painter().galley(r.min, g, p.text);
+                        let tag = if view == View::Saved || title != target { Some(target.as_str()) } else { None };
+                        if let Some(t) = tag {
+                            pc::mono_tag_ex(ui, t, ui.available_width().max(40.0), 10.5);
+                        }
+                    },
+                );
                 if let Some(d) = &description {
-                    ui.add(egui::Label::new(kit::hint(ui, d)).wrap());
+                    ui.add(egui::Label::new(kit::hint(ui, d).line_height(Some(12.0 * 1.45))).wrap());
                 }
             });
         });
@@ -1521,6 +1530,9 @@ fn connection_view(
 
 /// The result of the last call: its content (texts and other parts) and
 /// structured content, or the text of an error.
+/// The height of an eyebrow line (10.5 on 1.45).
+const EYEBROW_H: f32 = 10.5 * 1.45;
+
 fn result_ui(ui: &mut Ui, result: Option<&CallResult>, busy: bool) {
     let p = theme::pal(ui);
     if busy {
@@ -1545,13 +1557,15 @@ fn result_ui(ui: &mut Ui, result: Option<&CallResult>, busy: bool) {
         let content = res.raw.get("content").and_then(|c| c.as_array());
         let structured = res.raw.get("structuredContent").filter(|v| !v.is_null());
         if content.is_none() && structured.is_none() {
-            ui.label(kit::eyebrow(ui, if res.is_error { tr("error") } else { &res.title }));
+            ui.label(
+                kit::eyebrow(ui, if res.is_error { tr("error") } else { &res.title }).line_height(Some(EYEBROW_H)),
+            );
             pc::code_block(ui, "mcp-result-text", &res.text);
             return;
         }
         for (i, part) in content.into_iter().flatten().enumerate() {
             let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("content");
-            ui.label(kit::eyebrow(ui, &format!("content · {kind}")));
+            ui.label(kit::eyebrow(ui, &format!("content · {kind}")).line_height(Some(EYEBROW_H)));
             match part.get("text").and_then(|t| t.as_str()) {
                 Some(text) => {
                     egui::Frame::new()
@@ -1563,7 +1577,11 @@ fn result_ui(ui: &mut Ui, result: Option<&CallResult>, busy: bool) {
                             ui.set_width(ui.available_width());
                             let color = if res.is_error { p.err } else { p.text };
                             ui.add(
-                                egui::Label::new(RichText::new(text).size(12.5).color(color)).wrap().selectable(true),
+                                egui::Label::new(
+                                    RichText::new(text).size(12.5).line_height(Some(12.5 * 1.45)).color(color),
+                                )
+                                .wrap()
+                                .selectable(true),
                             );
                         });
                 }
@@ -1571,7 +1589,7 @@ fn result_ui(ui: &mut Ui, result: Option<&CallResult>, busy: bool) {
             }
         }
         if let Some(s) = structured {
-            ui.label(kit::eyebrow(ui, "structuredContent"));
+            ui.label(kit::eyebrow(ui, "structuredContent").line_height(Some(EYEBROW_H)));
             pc::code_block_gutter(ui, "mcp-structured", &serde_json::to_string_pretty(s).unwrap_or_default());
         }
     });
@@ -1719,13 +1737,22 @@ fn pending_ui(
                     }
                 },
                 |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(&e.request.message).size(12.0).color(p.text));
-                        if let Some(url) = &e.request.url
-                            && ui.link(RichText::new(url).size(12.0).color(p.accent_text)).clicked()
-                        {
-                            crate::widgets::open_web_link(url);
-                        }
+                    // `.small` text on 1.45 lines.
+                    let line = 12.0 * 1.45;
+                    ui.scope(|ui| {
+                        ui.spacing_mut().interact_size.y = line;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(&e.request.message).size(12.0).line_height(Some(line)).color(p.text),
+                            );
+                            if let Some(url) = &e.request.url
+                                && ui
+                                    .link(RichText::new(url).size(12.0).line_height(Some(line)).color(p.accent_text))
+                                    .clicked()
+                            {
+                                crate::widgets::open_web_link(url);
+                            }
+                        });
                     });
                     elicit_fields(ui, tab_id, e);
                     for problem in &e.problems {
@@ -1734,30 +1761,36 @@ fn pending_ui(
                             ui.label(RichText::new(problem).size(12.0).color(p.err));
                         });
                     }
-                    ui.horizontal(|ui| {
-                        if kit::button(ui, kit::Kind::Primary, kit::Size::Sm, tr("Submit"), Default::default())
-                            .clicked()
-                        {
-                            let content: serde_json::Map<String, serde_json::Value> = e
-                                .values
-                                .iter()
-                                .filter(|(_, v)| !v.is_null())
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
-                            e.problems = e.request.validate(&content);
-                            if e.problems.is_empty() {
-                                out = Some(Pending::Elicit(ternarywire_mcp::ElicitationResponse::Accept(content)));
+                    let w = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(w, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if kit::button(ui, kit::Kind::Primary, kit::Size::Sm, tr("Submit"), Default::default())
+                                .clicked()
+                            {
+                                let content: serde_json::Map<String, serde_json::Value> = e
+                                    .values
+                                    .iter()
+                                    .filter(|(_, v)| !v.is_null())
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect();
+                                e.problems = e.request.validate(&content);
+                                if e.problems.is_empty() {
+                                    out = Some(Pending::Elicit(ternarywire_mcp::ElicitationResponse::Accept(content)));
+                                }
                             }
-                        }
-                        if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Decline"), Default::default())
-                            .clicked()
-                        {
-                            out = Some(Pending::Elicit(ternarywire_mcp::ElicitationResponse::Decline));
-                        }
-                        if kit::ghost(ui, None, tr("Cancel")).clicked() {
-                            out = Some(Pending::Elicit(ternarywire_mcp::ElicitationResponse::Cancel));
-                        }
-                    });
+                            if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Decline"), Default::default())
+                                .clicked()
+                            {
+                                out = Some(Pending::Elicit(ternarywire_mcp::ElicitationResponse::Decline));
+                            }
+                            if kit::ghost(ui, None, tr("Cancel")).clicked() {
+                                out = Some(Pending::Elicit(ternarywire_mcp::ElicitationResponse::Cancel));
+                            }
+                        },
+                    );
                 },
             );
         }
@@ -1783,13 +1816,18 @@ fn elicit_fields(ui: &mut Ui, tab_id: u64, e: &mut PendingElicit) {
                         match &f.kind {
                             ternarywire_mcp::ElicitFieldKind::Boolean => {
                                 let mut b = v.as_bool().unwrap_or(false);
-                                ui.horizontal(|ui| {
-                                    ui.set_height(26.0);
-                                    let text = f.description.clone().unwrap_or_else(|| f.label().to_string());
-                                    if kit::checkbox(ui, &mut b, &text).changed() {
-                                        *v = serde_json::Value::Bool(b);
-                                    }
-                                });
+                                let row = egui::vec2(ui.available_width(), 26.0);
+                                ui.allocate_ui_with_layout(
+                                    row,
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let text = f.description.clone().unwrap_or_else(|| f.label().to_string());
+                                        // `label.row` (gap 6) with a `.small` label.
+                                        if kit::checkbox_ex(ui, &mut b, &text, 6.0, 12.0).changed() {
+                                            *v = serde_json::Value::Bool(b);
+                                        }
+                                    },
+                                );
                             }
                             ternarywire_mcp::ElicitFieldKind::Number { integer, .. } => {
                                 let mut text = if v.is_null() { String::new() } else { v.to_string() };

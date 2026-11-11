@@ -14,6 +14,12 @@ pub enum Lang {
     Xml,
     GraphQl,
     Yaml,
+    /// A shell command (cURL, HTTPie, Wget snippets): the command name,
+    /// `--flags`, quoted strings and `#` comments.
+    Shell,
+    /// Headings in the key color and list markers as punctuation (the
+    /// descriptions of collections and folders).
+    Markdown,
     Text,
 }
 
@@ -205,6 +211,23 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
     let mut i = 0;
     match lang {
         Lang::Text => push(0, Kind::Text),
+        Lang::Markdown => {
+            let mut line_start = 0;
+            for line in text.split_inclusive('\n') {
+                let trimmed = line.trim_start();
+                let pos = line_start + line.len() - trimmed.len();
+                if trimmed.starts_with('#') {
+                    push(line_start, Kind::Key);
+                } else if ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m)) {
+                    push(line_start, Kind::Text);
+                    push(pos, Kind::Punct);
+                    push(pos + 1, Kind::Text);
+                } else {
+                    push(line_start, Kind::Text);
+                }
+                line_start += line.len();
+            }
+        }
         Lang::Yaml => {
             let mut line_start = 0;
             for line in text.split_inclusive('\n') {
@@ -212,8 +235,11 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                 let indent = line.len() - trimmed.len();
                 let mut pos = line_start + indent;
                 let mut rest = trimmed;
+                // Like the prototype: the list dash in the text color, keys,
+                // then scalar values (and lines without a key) as strings,
+                // numbers and versions (`3.0.3`) as numbers.
                 if let Some(r) = rest.strip_prefix("- ") {
-                    push(pos, Kind::Punct);
+                    push(line_start, Kind::Text);
                     pos += 2;
                     rest = r;
                 }
@@ -227,22 +253,77 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                     let value = rest[colon + 1..].trim_start();
                     let vpos = pos + colon + 1 + (rest[colon + 1..].len() - value.len());
                     let v = value.trim_end();
-                    let kind = if v.starts_with('"') || v.starts_with('\'') {
-                        Kind::Str
-                    } else if v.starts_with('#') {
+                    let number = !v.is_empty()
+                        && v.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+                    let kind = if v.starts_with('#') {
                         Kind::Comment
                     } else if matches!(v, "true" | "false" | "null" | "~") {
                         Kind::Keyword
-                    } else if v.parse::<f64>().is_ok() {
+                    } else if number || v.parse::<f64>().is_ok() {
                         Kind::Num
                     } else {
-                        Kind::Text
+                        Kind::Str
                     };
                     push(vpos, kind);
+                } else if !rest.trim().is_empty() {
+                    push(pos, Kind::Str);
                 } else {
                     push(pos, Kind::Text);
                 }
                 line_start += line.len();
+            }
+        }
+        Lang::Shell => {
+            // The first word of a command (not of a `\` continuation line).
+            let mut command = true;
+            while i < b.len() {
+                let c = b[i];
+                if c == b'\n' {
+                    let continued = text[..i].trim_end_matches([' ', '\t']).ends_with('\\');
+                    command = !continued;
+                    push(i, Kind::Text);
+                    i += 1;
+                    continue;
+                }
+                if c == b' ' || c == b'\t' {
+                    push(i, Kind::Text);
+                    i += 1;
+                    continue;
+                }
+                if c == b'#' {
+                    push(i, Kind::Comment);
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == b'\'' || c == b'"' {
+                    push(i, Kind::Str);
+                    i += 1;
+                    while i < b.len() && b[i] != c {
+                        if c == b'"' && b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i = (i + 1).min(b.len());
+                    continue;
+                }
+                // A word runs to the next space or quote.
+                let start = i;
+                while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\'' | b'"') {
+                    i += 1;
+                }
+                let word = &text[start..i];
+                let kind = if command && word != "\\" {
+                    Kind::Keyword
+                } else if word.starts_with('-') {
+                    Kind::Key
+                } else {
+                    Kind::Text
+                };
+                command = false;
+                push(start, kind);
             }
         }
         Lang::Json | Lang::JavaScript | Lang::GraphQl => {
@@ -726,7 +807,16 @@ mod tests {
         ];
         let vars = VarNames::new(["é".to_string()]);
         for text in samples {
-            for lang in [Lang::Xml, Lang::Json, Lang::JavaScript, Lang::GraphQl, Lang::Yaml, Lang::Text] {
+            for lang in [
+                Lang::Xml,
+                Lang::Json,
+                Lang::JavaScript,
+                Lang::GraphQl,
+                Lang::Yaml,
+                Lang::Shell,
+                Lang::Markdown,
+                Lang::Text,
+            ] {
                 for search in ["", "é", "★", "a"] {
                     let job = highlight(HlKey {
                         text,
@@ -761,6 +851,7 @@ mod tests {
             ("<a href=\"x\">t</a><!-- c -->", Lang::Xml),
             ("query { me { id } } # c", Lang::GraphQl),
             ("a: 1\n- b: \"x\"\n# c\nkey:\n  nested: true\n", Lang::Yaml),
+            ("# T\n\nText {{ok}}\n- **a**: `b`\n", Lang::Markdown),
         ] {
             let job = highlight(HlKey {
                 text,

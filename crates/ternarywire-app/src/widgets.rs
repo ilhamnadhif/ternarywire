@@ -202,14 +202,14 @@ pub fn var_line(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, true, false)
+    var_line_ex(ui, id, text, vars, hint, width, true, false, None)
 }
 
-/// [`var_line`] without its own frame, for table cells and grouped inputs.
 /// Text in a table cell starts 9 px in and may run to the cell's edge
 /// (`padding: 0 9px` with the overflow cut at the border).
 const CELL_MARGIN: egui::Margin = egui::Margin { left: 9, right: 0, top: 0, bottom: 0 };
 
+/// [`var_line`] without its own frame, for table cells and grouped inputs.
 pub fn var_cell(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -218,7 +218,20 @@ pub fn var_cell(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, false, false)
+    var_line_ex(ui, id, text, vars, hint, width, false, false, None)
+}
+
+/// [`var_cell`] with text of `size` (12 in small inputs, `.input.sm`).
+pub fn var_cell_sized(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    vars: &VarCtx,
+    hint: &str,
+    width: f32,
+    size: f32,
+) -> egui::Response {
+    var_line_ex(ui, id, text, vars, hint, width, false, false, Some(size))
 }
 
 /// [`var_cell`] for a URL: the `?`, `=` and `&` of its query are muted.
@@ -230,7 +243,7 @@ pub fn url_cell(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, false, true)
+    var_line_ex(ui, id, text, vars, hint, width, false, true, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -243,10 +256,12 @@ fn var_line_ex(
     width: f32,
     frame: bool,
     url: bool,
+    size: Option<f32>,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
-    let font_size = ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5);
+    let font_size =
+        size.or_else(|| ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size)).unwrap_or(12.5);
     // A text color override (a disabled table row) recolors the plain text;
     // `{{variable}}` chips keep their colors.
     let override_color = ui.visuals().override_text_color;
@@ -303,11 +318,13 @@ fn var_line_ex(
         }
         ui.fonts_mut(|f| f.layout_job(job))
     };
+    // The placeholder in the field's font (the prototype's placeholders are
+    // in the input's font, faint; see the weak color below).
     let mut edit = TextEdit::singleline(text)
         .id(id)
-        .hint_text(hint)
+        .hint_text(RichText::new(hint).font(theme::mono(font_size)))
         .desired_width(width)
-        .font(egui::TextStyle::Monospace)
+        .font(egui::FontId::monospace(font_size))
         .margin(if frame { egui::Margin::symmetric(10, 0) } else { egui::Margin::symmetric(9, 0) })
         .layouter(&mut layouter);
     if frame {
@@ -322,7 +339,19 @@ fn var_line_ex(
             .align(egui::Align2::LEFT_CENTER);
     }
     let chip_slot = ui.painter().add(egui::Shape::Noop);
-    let out = edit.show(ui);
+    // Not taller than the cell (the default interact height would push the
+    // text below its middle in a small input).
+    let faint = theme::pal(ui).text_faint;
+    let out = ui
+        .scope(|ui| {
+            ui.visuals_mut().weak_text_color = Some(faint);
+            if !frame {
+                let h = ui.available_height().clamp(20.0, 34.0);
+                ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.min(h);
+            }
+            edit.show(ui)
+        })
+        .inner;
     if !chips.is_empty() {
         paint_chips(ui, chip_slot, &out, text, &chips, font_size * 1.45);
     }
@@ -442,7 +471,7 @@ pub fn code_editor_with(
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
 ) -> egui::Response {
-    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, false)
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, Look::default())
 }
 
 /// The code editor of the redesign: frameless (put it in a `kit::well` or a
@@ -459,7 +488,68 @@ pub fn code_editor_gutter(
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
 ) -> egui::Response {
-    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, true)
+    let look = Look { gutter: true, line_h: Some(20.0), ..Default::default() };
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, look)
+}
+
+/// [`code_editor_gutter`] whose lines do not wrap (the prototype's spec
+/// editor): the text scrolls sideways next to the line numbers.
+#[allow(clippy::too_many_arguments)]
+pub fn code_editor_gutter_nowrap(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+    vars: Option<&VarCtx>,
+    min_rows: usize,
+    readonly: bool,
+    completions: Option<CompletionFn<'_>>,
+) -> egui::Response {
+    let look = Look { gutter: true, line_h: Some(20.0), nowrap: true, ..Default::default() };
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, look)
+}
+
+/// Read-only code (`.code` without its gutter): highlighted, 20 px lines,
+/// no padding of its own (the frame around it has the prototype's 8 / 14).
+pub fn code_view(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+) -> egui::Response {
+    let look = Look { line_h: Some(20.0), bare: true, ..Default::default() };
+    code_editor_impl(ui, id, text, lang, None, 1, true, None, look)
+}
+
+/// A frameless multi-line editor without padding (put it in a frame, a card
+/// or a bubble): `line_h` lines of code, or of Inter at size `prose`, with
+/// `{{variables}}` as chips.
+#[allow(clippy::too_many_arguments)]
+pub fn line_editor(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+    vars: Option<&VarCtx>,
+    min_rows: usize,
+    prose: Option<f32>,
+    line_h: f32,
+) -> egui::Response {
+    let look = Look { line_h: Some(line_h), prose, bare: true, ..Default::default() };
+    code_editor_impl(ui, id, text, lang, vars, min_rows, false, None, look)
+}
+
+/// How [`code_editor_impl`] draws: a line-number gutter, a fixed line
+/// height, Inter of a size instead of the monospace font.
+#[derive(Clone, Copy, Default)]
+struct Look {
+    gutter: bool,
+    line_h: Option<f32>,
+    prose: Option<f32>,
+    /// No frame and no padding.
+    bare: bool,
+    /// Lines don't wrap; the text scrolls sideways (with `gutter`).
+    nowrap: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -472,8 +562,10 @@ fn code_editor_impl(
     min_rows: usize,
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
-    gutter: bool,
+    look: Look,
 ) -> egui::Response {
+    let gutter = look.gutter;
+    let wrap = !look.nowrap;
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
     let font_size = ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5);
@@ -503,17 +595,23 @@ fn code_editor_impl(
             ui.ctx(),
             HlKey { text: buf.as_str(), lang, dark, search: "", vars: names, font_size, wrap: true },
         );
-        job.wrap.max_width = wrap_width;
+        job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
         if gutter {
             // Long tokens (URLs, base64) wrap anywhere, like the prototype's editors.
             job.wrap.break_anywhere = true;
-            for section in &mut job.sections {
-                section.format.line_height = Some(20.0);
+        }
+        for section in &mut job.sections {
+            if let Some(h) = look.line_h {
+                section.format.line_height = Some(h);
+            }
+            if let Some(size) = look.prose {
+                section.format.font_id = egui::FontId::proportional(size);
             }
         }
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let lines = text.split('\n').count().max(1);
+    let longest = if wrap { 0 } else { text.split('\n').map(|l| l.chars().count()).max().unwrap_or(0) };
     let mut edit = TextEdit::multiline(text)
         .id(id)
         .code_editor()
@@ -522,11 +620,17 @@ fn code_editor_impl(
         .lock_focus(true)
         .interactive(!readonly)
         .layouter(&mut layouter);
+    if let Some(size) = look.prose {
+        edit = edit.font(egui::FontId::proportional(size));
+    }
+    if look.bare {
+        edit = edit.frame(egui::Frame::NONE);
+    }
     let p = theme::pal(ui);
-    // 12 px in, the digits, a 10 px fold column 4 px after them and 8 px out
-    // (the prototype's `.code .gut`).
+    // 12 px in, the digits, a 10 px fold column 4 px after them, 8 px out
+    // and the 1 px border (the prototype's `.code .gut`).
     let gutter_w =
-        if gutter { 12.0 + lines.to_string().len().max(2) as f32 * (font_size * 0.6) + 4.0 + 10.0 + 8.0 } else { 0.0 };
+        if gutter { 12.0 + lines.to_string().len() as f32 * (font_size * 0.6) + 4.0 + 10.0 + 8.0 + 1.0 } else { 0.0 };
     let start = ui.cursor().min;
     let full_w = ui.available_width();
     let gutter_bg = ui.painter().add(egui::Shape::Noop);
@@ -538,7 +642,29 @@ fn code_editor_impl(
             egui::pos2(start.x + gutter_w, start.y),
             egui::pos2(start.x + full_w, ui.max_rect().bottom().max(start.y + 40.0)),
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+        if wrap {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+        } else {
+            // As wide as the longest line, scrolling sideways in its column.
+            let char_w = ui.fonts_mut(|f| f.glyph_width(&theme::mono(font_size), 'M'));
+            let width = (longest as f32 * char_w + 28.0 + char_w).max(rect.width());
+            edit = edit.desired_width(width);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt(id.with("sideways"))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| edit.show(ui))
+                    .inner
+            })
+            .inner
+        }
+    } else if look.bare {
+        // Exactly as high as its lines (not the default interact height).
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = look.line_h.unwrap_or(font_size);
+            edit.show(ui)
+        })
+        .inner
     } else {
         edit.show(ui)
     };
@@ -557,7 +683,7 @@ fn code_editor_impl(
                 let y = out.galley_pos.y + row.rect().center().y;
                 if y > ui.clip_rect().top() - 20.0 && y < ui.clip_rect().bottom() + 20.0 {
                     ui.painter().text(
-                        egui::pos2(g.right() - 22.0, y),
+                        egui::pos2(g.right() - 23.0, y),
                         egui::Align2::RIGHT_CENTER,
                         n.to_string(),
                         font.clone(),

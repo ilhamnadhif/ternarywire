@@ -514,7 +514,7 @@ Profile	Profil
 Prompt	Prompt
 Prompts{}	Prompt{}
 Provider	Penyedia
-Providers keep their settings in .ternarywire/external-secrets.json; tokens and keys go to the secret store.	Penyedia menyimpan pengaturannya di .ternarywire/external-secrets.json; token dan kunci masuk ke penyimpanan rahasia.
+Providers keep their settings in {}; tokens and keys go to the secret store.	Penyedia menyimpan pengaturannya di {}; token dan kunci masuk ke penyimpanan rahasia.
 Proxy URL	URL proxy
 Publish	Terbitkan
 Pull changes from	Tarik perubahan dari
@@ -707,7 +707,7 @@ connecting…	menghubungkan…
 decrypted	didekripsi
 default (JSON)	bawaan (JSON)
 each of	setiap
-esm.sh-compatible; serves pm.require('npm:…') and pm.require('jsr:…')	kompatibel esm.sh; melayani pm.require('npm:…') dan pm.require('jsr:…')
+esm.sh-compatible; serves {} and {}.	kompatibel esm.sh; melayani {} dan {}.
 failed	gagal
 fetching…	mengambil…
 first token {}	token pertama {}
@@ -1067,6 +1067,8 @@ Limits	Batas
 Script timeout	Batas waktu skrip
 Scripts that run longer are stopped.	Skrip yang berjalan lebih lama akan dihentikan.
 Script engine	Mesin skrip
+Boa · separate worker process	Boa · proses worker terpisah
+Boa · in the app process	Boa · di proses aplikasi
 Registry URL	URL registry
 System proxy	Proxy sistem
 Custom proxy	Proxy kustom
@@ -1088,6 +1090,7 @@ Report an issue	Laporkan masalah
 Settings file	Berkas pengaturan
 Copy path	Salin path
 License	Lisensi
+{} or {}	{} atau {}
 Cookies set by responses are kept here and sent with matching requests.	Cookie dari respons disimpan di sini dan dikirim bersama request yang cocok.
 Domains	Domain
 No domains yet	Belum ada domain
@@ -2056,7 +2059,8 @@ Paste a Set-Cookie value. Hover a row to see its Set-Cookie text.	Tempel nilai S
 Settings are per user and apply to every workspace.	Pengaturan berlaku per pengguna dan untuk setiap workspace.
 Shell	Shell
 The format is detected as you paste. A file dropped anywhere on the window is imported too.	Formatnya dikenali saat Anda menempel. File yang dijatuhkan di mana saja pada jendela juga diimpor.
-Your own modules in packages/, shared by every script in the workspace.	Modul Anda sendiri di packages/, dipakai bersama oleh setiap skrip di workspace.
+Your own modules in {}, shared by every script in the workspace.	Modul Anda sendiri di {}, dipakai bersama oleh setiap skrip di workspace.
+Clear the file to paste content instead.	Hapus file untuk menempel konten.
 Changes	Perubahan
 {} from “{}” to “{}”, 1 conflict: choose a side to include it	{} dari “{}” ke “{}”, 1 konflik: pilih satu sisi untuk menyertakannya
 {} from “{}” to “{}”, {} conflicts: choose a side to include them	{} dari “{}” ke “{}”, {} konflik: pilih satu sisi untuk menyertakannya
