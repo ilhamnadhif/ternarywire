@@ -225,6 +225,16 @@ impl Symbols {
         if unicode { Symbols::UNICODE } else { Symbols::ASCII }
     }
 
+    /// The runner's own log text (`GET url → 200 OK · 8 ms · 75 B`,
+    /// `Undefined variable {{x}} — sent as typed`) with its arrow, dots and
+    /// dashes replaced by ASCII in ASCII mode.
+    pub fn text(&self, line: &str) -> String {
+        if self.unicode {
+            return line.to_string();
+        }
+        line.replace('→', self.arrow).replace(" · ", ", ").replace('—', "-")
+    }
+
     /// `line` with box drawing characters replaced by `+`, `-` and `|` in
     /// ASCII mode.
     pub fn boxed(&self, line: &str) -> String {

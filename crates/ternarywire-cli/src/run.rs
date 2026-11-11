@@ -327,8 +327,8 @@ pub async fn run_once(args: &RunArgs, mode: Mode, cancel: &CancellationToken) ->
                     // Network lines are the runner's own text (`GET url → 200 OK`),
                     // with the URL as sent: mask it like the request block.
                     let message = match network {
-                        true if show_secrets => line.message.replace('→', symbols.arrow),
-                        true => report::redact_urls_in(&line.message).replace('→', symbols.arrow),
+                        true if show_secrets => symbols.text(&line.message),
+                        true => symbols.text(&report::redact_urls_in(&line.message)),
                         false => line.message.clone(),
                     };
                     for (i, l) in message.lines().enumerate() {
