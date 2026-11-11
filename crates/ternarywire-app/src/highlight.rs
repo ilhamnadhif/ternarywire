@@ -14,6 +14,9 @@ pub enum Lang {
     Xml,
     GraphQl,
     Yaml,
+    /// Headings in the key color and list markers as punctuation (the
+    /// descriptions of collections and folders).
+    Markdown,
     Text,
 }
 
@@ -205,6 +208,23 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
     let mut i = 0;
     match lang {
         Lang::Text => push(0, Kind::Text),
+        Lang::Markdown => {
+            let mut line_start = 0;
+            for line in text.split_inclusive('\n') {
+                let trimmed = line.trim_start();
+                let pos = line_start + line.len() - trimmed.len();
+                if trimmed.starts_with('#') {
+                    push(line_start, Kind::Key);
+                } else if ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m)) {
+                    push(line_start, Kind::Text);
+                    push(pos, Kind::Punct);
+                    push(pos + 1, Kind::Text);
+                } else {
+                    push(line_start, Kind::Text);
+                }
+                line_start += line.len();
+            }
+        }
         Lang::Yaml => {
             let mut line_start = 0;
             for line in text.split_inclusive('\n') {
@@ -725,7 +745,8 @@ mod tests {
         ];
         let vars = VarNames::new(["é".to_string()]);
         for text in samples {
-            for lang in [Lang::Xml, Lang::Json, Lang::JavaScript, Lang::GraphQl, Lang::Yaml, Lang::Text] {
+            for lang in [Lang::Xml, Lang::Json, Lang::JavaScript, Lang::GraphQl, Lang::Yaml, Lang::Markdown, Lang::Text]
+            {
                 for search in ["", "é", "★", "a"] {
                     let job = highlight(HlKey {
                         text,
@@ -760,6 +781,7 @@ mod tests {
             ("<a href=\"x\">t</a><!-- c -->", Lang::Xml),
             ("query { me { id } } # c", Lang::GraphQl),
             ("a: 1\n- b: \"x\"\n# c\nkey:\n  nested: true\n", Lang::Yaml),
+            ("# T\n\nText {{ok}}\n- **a**: `b`\n", Lang::Markdown),
         ] {
             let job = highlight(HlKey {
                 text,

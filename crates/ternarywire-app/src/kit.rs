@@ -943,7 +943,7 @@ fn search_field_ex(
     let font = if small { 12.0 } else { 12.5 };
     let edit = egui::TextEdit::singleline(text)
         .id_salt(id)
-        .hint_text(RichText::new(hint_text).color(p.text_faint))
+        .hint_text(RichText::new(hint_text).size(font))
         .font(FontId::proportional(font))
         .desired_width(width)
         .min_size(vec2(0.0, h))
@@ -953,6 +953,9 @@ fn search_field_ex(
     let resp = ui
         .scope(|ui| {
             ui.spacing_mut().interact_size.y = h;
+            // egui paints the placeholder in the weak text color (muted in
+            // the theme); the prototype's placeholders are faint.
+            ui.visuals_mut().weak_text_color = Some(p.text_faint);
             let radius = CornerRadius::same(if small { RADIUS_SM } else { RADIUS });
             ui.visuals_mut().widgets.inactive.corner_radius = radius;
             ui.visuals_mut().widgets.hovered.corner_radius = radius;
@@ -1440,17 +1443,16 @@ pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
     resp
 }
 
-/// A group header in a menu (`REQUESTS`).
+/// A group header in a menu (`REQUESTS`): 10.5 semibold, letter-spaced, on
+/// the prototype's 15 px line with 6 above and 3 below (24 high).
 pub fn menu_header(ui: &mut Ui, text: &str) {
     let p = theme::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
-    ui.painter().text(
-        pos2(rect.left() + 9.0, rect.bottom() - 4.0),
-        Align2::LEFT_BOTTOM,
-        text.to_uppercase(),
-        theme::semibold(10.5),
-        p.text_faint,
-    );
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    let mut f = egui::TextFormat::simple(theme::semibold(10.5), p.text_faint);
+    f.extra_letter_spacing = 0.63;
+    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_uppercase(), f));
+    let y = rect.top() + 6.0 + (15.2 - g.size().y) / 2.0 + 0.5;
+    ui.painter().galley(pos2(rect.left() + 9.0, y), g, p.text_faint);
 }
 
 /// A hairline between menu groups.
