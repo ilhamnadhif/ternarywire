@@ -79,7 +79,7 @@ fn describe(kind: AuthType) -> &'static str {
         AuthType::Digest => tr("Answer the server's challenge with a hashed password."),
         AuthType::Jwt => tr("Sign a JSON Web Token and send it with the request."),
         AuthType::OAuth1 => tr("Sign the request with OAuth 1.0 consumer and token credentials."),
-        AuthType::OAuth2 => tr("Get an access token from an authorization server and send it."),
+        AuthType::OAuth2 => tr("Gets a token from an authorization server and sends it with the request."),
         AuthType::Hawk => tr("Sign the request with Hawk credentials."),
         AuthType::AwsV4 => tr("Sign the request with AWS Signature Version 4."),
         AuthType::Ntlm => tr("Windows NTLM challenge-response authentication."),
@@ -168,8 +168,13 @@ fn var_input(ui: &mut Ui, id: &str, text: &mut String, vars: &VarCtx, width: f32
     let p = theme::pal(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS_SM), p.surface);
-    let mut cell = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)));
-    let r = widgets::var_cell(&mut cell, id, text, vars, "", rect.width());
+    // `.input.sm.mono`: 12 px, 8 px padding (text is cut before the right one).
+    let text_rect = rect.with_max_x(rect.right() - 8.0);
+    let mut cell =
+        ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(Layout::left_to_right(Align::Center)));
+    cell.set_clip_rect(text_rect.intersect(ui.clip_rect()));
+    cell.style_mut().text_styles.insert(egui::TextStyle::Monospace, theme::mono(12.0));
+    let r = widgets::var_cell(&mut cell, id, text, vars, "", text_rect.width());
     if r.has_focus() {
         kit::focus_ring(ui, rect, theme::RADIUS_SM);
     } else {
@@ -324,10 +329,9 @@ fn field_ui(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, vars: &VarCtx, width: f
         kit::field(ui, tr(f.label), "", |ui| {
             let changed = field_control(ui, auth, f, vars, width);
             if !f.help.is_empty() {
-                let p = theme::pal(ui);
                 ui.scope(|ui| {
                     ui.set_max_width(width);
-                    ui.add(egui::Label::new(RichText::new(tr(f.help)).size(11.5).color(p.text_muted)).wrap());
+                    ui.add(egui::Label::new(help_text(ui, tr(f.help))).wrap());
                 });
             }
             changed
@@ -336,13 +340,30 @@ fn field_ui(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, vars: &VarCtx, width: f
     .inner
 }
 
+/// Field help (11.5, muted) with `code` in the mono font.
+fn help_text(ui: &Ui, text: &str) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let muted = theme::pal(ui).text_muted;
+    let plain = TextFormat::simple(egui::FontId::proportional(11.5), muted);
+    let mono = TextFormat { valign: Align::Center, ..TextFormat::simple(theme::mono(12.5), muted) };
+    let mut job = LayoutJob::default();
+    for (i, part) in text.split('`').enumerate() {
+        job.append(part, 0.0, if i % 2 == 1 { mono.clone() } else { plain.clone() });
+    }
+    job
+}
+
 /// An on/off field as a full row: label and help on the left, the switch
 /// on the right.
 fn switch_row(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, width: f32) -> bool {
     let p = theme::pal(ui);
     let mut changed = false;
-    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::left_to_right(Align::Center), |ui| {
+    // The switch centers on the text (its height from the last frame).
+    let h_id = ui.scope_id().with((f.key, "switch-row-h"));
+    let h: f32 = ui.data(|d| d.get_temp(h_id).unwrap_or(13.0 * 1.45));
+    ui.allocate_ui_with_layout(vec2(width, h), Layout::left_to_right(Align::Center), |ui| {
         ui.set_width(width);
+        ui.set_min_height(h);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let mut b = bool_value(auth, f);
             if switch(ui, &mut b, tr(f.label)).changed() {
@@ -350,13 +371,20 @@ fn switch_row(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, width: f32) -> bool {
                 changed = true;
             }
             ui.add_space(8.0);
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(RichText::new(tr(f.label)).font(theme::medium(13.0)).color(p.text));
+            // Lines 1.45 high, as in the prototype.
+            let text = ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let label = RichText::new(tr(f.label)).font(theme::medium(13.0)).color(p.text);
+                ui.label(label.line_height(Some(13.0 * 1.45)));
                 if !f.help.is_empty() {
-                    ui.add(egui::Label::new(RichText::new(tr(f.help)).size(12.0).color(p.text_muted)).wrap());
+                    ui.add(egui::Label::new(kit::hint_block(ui, tr(f.help))).wrap());
                 }
             });
+            let text_h = text.response.rect.height();
+            if (text_h - h).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(h_id, text_h));
+                ui.ctx().request_discard("switch row height");
+            }
         });
     });
     changed
@@ -392,7 +420,12 @@ fn fields_grid(ui: &mut Ui, auth: &mut Auth, fields: &[&FieldSpec], vars: &VarCt
             if is_cell(f) {
                 pending.push(f);
             } else {
+                let after_grid = !pending.is_empty();
                 changed |= flush(ui, auth, &mut pending);
+                // A full row is a block of its own, 14 under the grid.
+                if after_grid {
+                    ui.add_space(2.0);
+                }
                 changed |= field_ui(ui, auth, f, vars, width);
             }
         }
@@ -500,16 +533,26 @@ pub(crate) fn auth_form(ui: &mut Ui, auth: &mut Auth, ctx: &AuthUiCtx<'_>, can_o
             }
         }
     }
-    ui.add(egui::Label::new(kit::hint(ui, describe(auth.kind))).wrap());
+    // Token and username/password forms explain themselves (their field
+    // help says how the value is sent).
+    if !matches!(auth.kind, AuthType::Bearer | AuthType::Basic) {
+        ui.add(egui::Label::new(kit::hint_block(ui, describe(auth.kind))).wrap());
+    }
     if auth.kind == AuthType::OAuth2 {
         token_card(ui, ctx, &mut out.action);
     }
     let fields = ternarywire_auth::fields(auth.kind);
-    let mut basic: Vec<&FieldSpec> = fields.iter().filter(|f| !f.is_advanced()).collect();
+    // OAuth 2.0 keeps the token as sent (a pasted token, its prefix and
+    // name) and the PKCE method with the other rarely changed settings.
+    let tucked = |f: &FieldSpec| {
+        auth.kind == AuthType::OAuth2
+            && matches!(f.key, "accessToken" | "headerPrefix" | "tokenName" | "challengeAlgorithm")
+    };
+    let mut basic: Vec<&FieldSpec> = fields.iter().filter(|f| !f.is_advanced() && !tucked(f)).collect();
     if auth.kind == AuthType::OAuth2 {
         basic = oauth2_fields(auth, basic);
     }
-    let advanced: Vec<&FieldSpec> = fields.iter().filter(|f| f.is_advanced()).collect();
+    let advanced: Vec<&FieldSpec> = fields.iter().filter(|f| f.is_advanced() || tucked(f)).collect();
     if !basic.is_empty() {
         out.changed |= fields_grid(ui, auth, &basic, ctx.vars);
     }
@@ -527,7 +570,7 @@ pub(crate) fn auth_form(ui: &mut Ui, auth: &mut Auth, ctx: &AuthUiCtx<'_>, can_o
 fn advanced_header(ui: &mut Ui, id: egui::Id, count: usize) -> bool {
     let p = theme::pal(ui);
     let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(false));
-    let row = crate::request_tab::hrow(ui, 22.0, |ui| {
+    let row = crate::request_tab::hrow(ui, 20.0, |ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
         ui.add(
@@ -665,10 +708,10 @@ fn token_card(ui: &mut Ui, ctx: &AuthUiCtx<'_>, action: &mut AuthAction) {
                     .fill(p.well)
                     .stroke(Stroke::new(1.0, p.border))
                     .corner_radius(CornerRadius::same(theme::RADIUS))
-                    .inner_margin(egui::Margin { left: 10, right: 4, top: 4, bottom: 4 })
+                    .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
+                        crate::request_tab::hrow(ui, 22.0, |ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             ui.label(RichText::new(kind).font(theme::mono(12.0)).color(p.text_faint));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -687,12 +730,13 @@ fn token_card(ui: &mut Ui, ctx: &AuthUiCtx<'_>, action: &mut AuthAction) {
                         });
                     });
                 ui.add_space(10.0);
-                crate::request_tab::hrow(ui, 18.0, |ui| {
+                // 12 px text with its icon a space before it (`.row.small`).
+                crate::request_tab::hrow(ui, 17.4, |ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
                     let line = |ui: &mut Ui, icon: &str, text: &str| {
                         ui.scope(|ui| {
-                            ui.spacing_mut().item_spacing.x = 5.0;
-                            ui.label(RichText::new(icon).font(theme::icon_font(13.0)).color(p.text_muted));
+                            ui.spacing_mut().item_spacing.x = 3.5;
+                            ui.label(RichText::new(icon).font(theme::icon_font(12.0)).color(p.text_muted));
                             ui.label(RichText::new(text).size(12.0).color(p.text_muted))
                         })
                         .inner
@@ -734,7 +778,7 @@ fn token_card(ui: &mut Ui, ctx: &AuthUiCtx<'_>, action: &mut AuthAction) {
             }
         }
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        crate::request_tab::hrow(ui, 24.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_enabled_ui(!ctx.fetching, |ui| {
                 let opts = ButtonOpts { icon: Some(icons::ARROWS_CLOCKWISE), ..Default::default() };

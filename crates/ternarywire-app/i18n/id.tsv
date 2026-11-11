@@ -120,6 +120,90 @@ Save as example	Simpan sebagai contoh
 Save response to file	Simpan respons ke berkas
 Examples	Contoh
 Inherit auth from parent	Warisi auth dari induk
+Inherit from parent	Warisi dari induk
+No auth	Tanpa auth
+(none)	(tidak ada)
+AWS region	Region AWS
+Access token URL	URL access token
+Add JWT token to	Tambahkan token JWT ke
+Add auth data to URL	Tambahkan data auth ke URL
+Add auth data to request headers	Tambahkan data auth ke header request
+Add empty parameters to signature	Sertakan parameter kosong dalam tanda tangan
+Add to	Tambahkan ke
+Add token to	Tambahkan token ke
+Additional claims	Klaim tambahan
+Adds oauth_body_hash for non-form bodies	Menambahkan oauth_body_hash untuk body selain form
+Algorithm	Algoritme
+At most 3600	Paling lama 3600
+Auth URL	URL auth
+Auto-refresh token	Perbarui token otomatis
+Callback URL	URL callback
+Client authentication	Autentikasi klien
+Client nonce	Nonce klien
+Client secret	Secret klien
+Client token	Token klien
+Code challenge method	Metode code challenge
+Comma separated for several	Pisahkan dengan koma untuk beberapa
+Comma separated header names	Nama header, dipisah koma
+Defaults to the access token URL	Bawaan: URL access token
+Defaults to the issuer	Bawaan: penerbit
+Disable header encoding	Matikan encoding header
+Disable retrying the request	Jangan ulangi request
+Do not answer the server's 401 challenge automatically	Jangan jawab tantangan 401 dari server secara otomatis
+Expiry (seconds)	Kedaluwarsa (detik)
+Extra JSON header fields, e.g. {"kid": "..."}	Field header JSON tambahan, mis. {"kid": "..."}
+Filled from the server challenge	Diisi dari tantangan server
+For HS* algorithms	Untuk algoritme HS*
+Generated when empty	Dibuat otomatis bila kosong
+Grant type	Jenis grant
+Hawk auth ID	ID auth Hawk
+Hawk auth key	Kunci auth Hawk
+Header or query parameter name, e.g. X-API-Key	Nama header atau parameter query, mis. X-API-Key
+Header prefix	Prefiks header
+Headers to sign	Header yang ditandatangani
+Host signed instead of the request URL's	Host yang ditandatangani, bukan host URL request
+Include body hash	Sertakan hash body
+Include payload hash	Sertakan hash payload
+Issuer	Penerbit
+JSON claims	Klaim JSON
+JSON; overrides the claims above	JSON; menimpa klaim di atas
+JWT headers	Header JWT
+Key ID	ID kunci
+Max body size	Ukuran body maks.
+Must start with `<issuer>/`; read from a data URI key when empty	Harus diawali `<issuer>/`; dibaca dari kunci data URI bila kosong
+Nonce count	Hitungan nonce
+Otherwise to the body (form POST) or URL	Jika tidak, ke body (form POST) atau URL
+PEM RSA key for RSA-SHA*	Kunci RSA PEM untuk RSA-SHA*
+PEM key for RS*, PS*, ES* and EdDSA	Kunci PEM untuk RS*, PS*, ES*, dan EdDSA
+PEM, or data:application/pkcs8;kid=...;base64,...	PEM, atau data:application/pkcs8;kid=...;base64,...
+POST body bytes covered by the content hash	Byte body POST yang dicakup hash konten
+Password Credentials grant	Grant Password Credentials
+Paste a token manually, or use Get new access token	Tempel token secara manual, atau pakai Ambil access token baru
+Plain	Polos
+Presigned URL instead of headers	URL presigned sebagai ganti header
+Private key	Kunci privat
+Query param	Param query
+Query param name	Nama param query
+Query params	Param query
+Uses the refresh token before the access token expires.	Memakai refresh token sebelum access token kedaluwarsa.
+Refresh token URL	URL refresh token
+Request URL	URL request
+Request header	Header request
+Request header prefix	Prefiks header request
+Secret Base64 encoded	Secret ter-encode Base64
+Secret key	Kunci rahasia
+Send as Basic Auth header	Kirim sebagai header Basic Auth
+Send client credentials in body	Kirim kredensial klien di body
+Sent as `Authorization: Bearer <token>`.	Dikirim sebagai `Authorization: Bearer <token>`.
+Service name	Nama layanan
+Session token	Token sesi
+Signature method	Metode tanda tangan
+Subject	Subjek
+Timestamp	Stempel waktu
+Token name	Nama token
+Token secret	Secret token
+e.g. 00000001	mis. 00000001
+e.g. s3, execute-api	mis. s3, execute-api
 Get New Access Token	Ambil Access Token Baru
 Refresh token	Segarkan token
 Clear token	Hapus token
@@ -1199,7 +1283,7 @@ Send a username and password in the Authorization header.	Kirim nama pengguna da
 Answer the server's challenge with a hashed password.	Jawab tantangan server dengan kata sandi yang di-hash.
 Sign a JSON Web Token and send it with the request.	Tandatangani JSON Web Token dan kirim bersama permintaan.
 Sign the request with OAuth 1.0 consumer and token credentials.	Tandatangani permintaan dengan kredensial consumer dan token OAuth 1.0.
-Get an access token from an authorization server and send it.	Ambil access token dari server otorisasi lalu kirimkan.
+Gets a token from an authorization server and sends it with the request.	Mengambil token dari server otorisasi dan mengirimnya bersama request.
 Sign the request with Hawk credentials.	Tandatangani permintaan dengan kredensial Hawk.
 Sign the request with AWS Signature Version 4.	Tandatangani permintaan dengan AWS Signature Version 4.
 Windows NTLM challenge-response authentication.	Autentikasi challenge-response NTLM Windows.

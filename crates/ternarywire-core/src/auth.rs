@@ -87,8 +87,8 @@ impl AuthType {
 
     pub fn label(self) -> &'static str {
         match self {
-            AuthType::Inherit => "Inherit auth from parent",
-            AuthType::None => "No Auth",
+            AuthType::Inherit => "Inherit from parent",
+            AuthType::None => "No auth",
             AuthType::ApiKey => "API Key",
             AuthType::Bearer => "Bearer Token",
             AuthType::Basic => "Basic Auth",
@@ -96,9 +96,9 @@ impl AuthType {
             AuthType::Jwt => "JWT Bearer",
             AuthType::OAuth1 => "OAuth 1.0",
             AuthType::OAuth2 => "OAuth 2.0",
-            AuthType::Hawk => "Hawk Authentication",
+            AuthType::Hawk => "Hawk",
             AuthType::AwsV4 => "AWS Signature",
-            AuthType::Ntlm => "NTLM Authentication",
+            AuthType::Ntlm => "NTLM",
             AuthType::EdgeGrid => "Akamai EdgeGrid",
             AuthType::Asap => "ASAP (Atlassian)",
         }

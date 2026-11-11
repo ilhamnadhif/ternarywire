@@ -78,10 +78,10 @@ use FieldKind::{Bool, Multiline, Secret, Select, Text};
 const API_KEY: &[FieldSpec] = &[
     f("key", "Key", Text, "", "Header or query parameter name, e.g. X-API-Key"),
     f("value", "Value", Secret, "", ""),
-    f("in", "Add to", Select(&[("header", "Header"), ("query", "Query Params")]), "header", ""),
+    f("in", "Add to", Select(&[("header", "Header"), ("query", "Query params")]), "header", ""),
 ];
 
-const BEARER: &[FieldSpec] = &[f("token", "Token", Secret, "", "Sent as `Authorization: Bearer <token>`")];
+const BEARER: &[FieldSpec] = &[f("token", "Token", Secret, "", "Sent as `Authorization: Bearer <token>`.")];
 
 const BASIC: &[FieldSpec] = &[f("username", "Username", Text, "", ""), f("password", "Password", Secret, "", "")];
 
@@ -108,8 +108,8 @@ const DIGEST: &[FieldSpec] = &[
     f("nonce", "Nonce", Text, "", "Filled from the server challenge"),
     f("algorithm", "Algorithm", Select(DIGEST_ALGS), "MD5", ""),
     f("qop", "qop", Select(&[("", "(none)"), ("auth", "auth"), ("auth-int", "auth-int")]), "", ""),
-    f("nonceCount", "Nonce Count", Text, "", "e.g. 00000001"),
-    f("clientNonce", "Client Nonce", Text, "", "Generated when empty"),
+    f("nonceCount", "Nonce count", Text, "", "e.g. 00000001"),
+    f("clientNonce", "Client nonce", Text, "", "Generated when empty"),
     f("opaque", "Opaque", Text, "", ""),
 ];
 
@@ -133,14 +133,14 @@ const JWT: &[FieldSpec] = &[
     f(
         "addTokenTo",
         "Add JWT token to",
-        Select(&[("header", "Request Header"), ("queryParam", "Query Param")]),
+        Select(&[("header", "Request header"), ("queryParam", "Query param")]),
         "header",
         "",
     ),
     f("algorithm", "Algorithm", Select(JWT_ALGS), "HS256", ""),
     f("secret", "Secret", Secret, "", "For HS* algorithms"),
     f("isSecretBase64Encoded", "Secret Base64 encoded", Bool, "false", ""),
-    f("privateKey", "Private Key", Multiline, "", "PEM key for RS*, PS*, ES* and EdDSA"),
+    f("privateKey", "Private key", Multiline, "", "PEM key for RS*, PS*, ES* and EdDSA"),
     f("payload", "Payload", Multiline, "{}", "JSON claims"),
     f("headerPrefix", "Request header prefix", Text, "Bearer", ""),
     f("queryParamKey", "Query param name", Text, "token", ""),
@@ -165,12 +165,12 @@ const OAUTH1: &[FieldSpec] = &[
         "true",
         "Otherwise to the body (form POST) or URL",
     ),
-    f("signatureMethod", "Signature Method", Select(OAUTH1_METHODS), "HMAC-SHA1", ""),
-    f("consumerKey", "Consumer Key", Text, "", ""),
-    f("consumerSecret", "Consumer Secret", Secret, "", ""),
-    f("token", "Access Token", Text, "", ""),
-    f("tokenSecret", "Token Secret", Secret, "", ""),
-    f("privateKey", "Private Key", Multiline, "", "PEM RSA key for RSA-SHA*"),
+    f("signatureMethod", "Signature method", Select(OAUTH1_METHODS), "HMAC-SHA1", ""),
+    f("consumerKey", "Consumer key", Text, "", ""),
+    f("consumerSecret", "Consumer secret", Secret, "", ""),
+    f("token", "Access token", Text, "", ""),
+    f("tokenSecret", "Token secret", Secret, "", ""),
+    f("privateKey", "Private key", Multiline, "", "PEM RSA key for RSA-SHA*"),
     f("callback", "Callback URL", Text, "", ""),
     f("verifier", "Verifier", Text, "", ""),
     f("timestamp", "Timestamp", Text, "", "Generated when empty"),
@@ -184,51 +184,51 @@ const OAUTH1: &[FieldSpec] = &[
 
 const OAUTH2_GRANTS: &[(&str, &str)] = &[
     ("authorization_code", "Authorization Code"),
-    ("authorization_code_with_pkce", "Authorization Code (With PKCE)"),
+    ("authorization_code_with_pkce", "Authorization Code (with PKCE)"),
     ("implicit", "Implicit"),
     ("password_credentials", "Password Credentials"),
     ("client_credentials", "Client Credentials"),
 ];
 
 const OAUTH2: &[FieldSpec] = &[
-    f("accessToken", "Access Token", Secret, "", "Paste a token manually, or use Get New Access Token"),
-    f("headerPrefix", "Header Prefix", Text, "Bearer", ""),
+    f("accessToken", "Access token", Secret, "", "Paste a token manually, or use Get new access token"),
+    f("headerPrefix", "Header prefix", Text, "Bearer", ""),
     f(
         "addTokenTo",
         "Add token to",
-        Select(&[("header", "Request Headers"), ("queryParams", "Request URL")]),
+        Select(&[("header", "Request headers"), ("queryParams", "Request URL")]),
         "header",
         "",
     ),
-    f("tokenName", "Token Name", Text, "", ""),
-    f("grant_type", "Grant Type", Select(OAUTH2_GRANTS), "authorization_code", ""),
-    f("redirect_uri", "Callback URL", Text, "http://localhost:5555/callback", "Must be http://localhost:<port>/..."),
+    f("tokenName", "Token name", Text, "", ""),
+    f("grant_type", "Grant type", Select(OAUTH2_GRANTS), "authorization_code", ""),
+    f("redirect_uri", "Callback URL", Text, "http://localhost:5555/callback", ""),
     f("authUrl", "Auth URL", Text, "", ""),
-    f("accessTokenUrl", "Access Token URL", Text, "", ""),
+    f("accessTokenUrl", "Access token URL", Text, "", ""),
     f("clientId", "Client ID", Text, "", ""),
-    f("clientSecret", "Client Secret", Secret, "", ""),
+    f("clientSecret", "Client secret", Secret, "", ""),
     f("username", "Username", Text, "", "Password Credentials grant"),
     f("password", "Password", Secret, "", "Password Credentials grant"),
-    f("challengeAlgorithm", "Code Challenge Method", Select(&[("S256", "SHA-256"), ("plain", "Plain")]), "S256", ""),
-    f("code_verifier", "Code Verifier", Secret, "", "Generated when empty"),
-    f("scope", "Scope", Text, "", "Space separated"),
+    f("challengeAlgorithm", "Code challenge method", Select(&[("S256", "SHA-256"), ("plain", "Plain")]), "S256", ""),
+    f("code_verifier", "Code verifier", Secret, "", "Generated when empty"),
+    f("scope", "Scope", Text, "", ""),
     f("state", "State", Text, "", "Generated when empty"),
     f(
         "client_authentication",
-        "Client Authentication",
+        "Client authentication",
         Select(&[("header", "Send as Basic Auth header"), ("body", "Send client credentials in body")]),
         "header",
         "",
     ),
     f("audience", "Audience", Text, "", ""),
     f("resource", "Resource", Text, "", ""),
-    f("refreshTokenUrl", "Refresh Token URL", Text, "", "Defaults to the Access Token URL"),
-    f("autoRefresh", "Auto-refresh token", Bool, "true", "Refresh expired tokens when a refresh token is available"),
+    f("refreshTokenUrl", "Refresh token URL", Text, "", "Defaults to the access token URL"),
+    f("autoRefresh", "Auto-refresh token", Bool, "true", "Uses the refresh token before the access token expires."),
 ];
 
 const HAWK: &[FieldSpec] = &[
-    f("authId", "Hawk Auth ID", Text, "", ""),
-    f("authKey", "Hawk Auth Key", Secret, "", ""),
+    f("authId", "Hawk auth ID", Text, "", ""),
+    f("authKey", "Hawk auth key", Secret, "", ""),
     f("algorithm", "Algorithm", Select(&[("sha256", "SHA256"), ("sha1", "SHA1")]), "sha256", ""),
     f("user", "User", Text, "", ""),
     f("nonce", "Nonce", Text, "", "Generated when empty"),
@@ -240,11 +240,11 @@ const HAWK: &[FieldSpec] = &[
 ];
 
 const AWSV4: &[FieldSpec] = &[
-    f("accessKey", "AccessKey", Text, "", ""),
-    f("secretKey", "SecretKey", Secret, "", ""),
-    f("region", "AWS Region", Text, "us-east-1", ""),
-    f("service", "Service Name", Text, "", "e.g. s3, execute-api"),
-    f("sessionToken", "Session Token", Secret, "", ""),
+    f("accessKey", "Access key", Text, "", ""),
+    f("secretKey", "Secret key", Secret, "", ""),
+    f("region", "AWS region", Text, "us-east-1", ""),
+    f("service", "Service name", Text, "", "e.g. s3, execute-api"),
+    f("sessionToken", "Session token", Secret, "", ""),
     f("addAuthDataToQuery", "Add auth data to URL", Bool, "false", "Presigned URL instead of headers"),
 ];
 
@@ -257,14 +257,14 @@ const NTLM: &[FieldSpec] = &[
 ];
 
 const EDGEGRID: &[FieldSpec] = &[
-    f("accessToken", "Access Token", Secret, "", ""),
-    f("clientToken", "Client Token", Secret, "", ""),
-    f("clientSecret", "Client Secret", Secret, "", ""),
+    f("accessToken", "Access token", Secret, "", ""),
+    f("clientToken", "Client token", Secret, "", ""),
+    f("clientSecret", "Client secret", Secret, "", ""),
     f("nonce", "Nonce", Text, "", "Generated when empty"),
     f("timestamp", "Timestamp", Text, "", "Generated when empty"),
     f("baseURL", "Base URL", Text, "", "Host signed instead of the request URL's"),
-    f("headersToSign", "Headers to Sign", Text, "", "Comma separated header names"),
-    f("maxBodySize", "Max Body Size", Text, "131072", "POST body bytes covered by the content hash"),
+    f("headersToSign", "Headers to sign", Text, "", "Comma separated header names"),
+    f("maxBodySize", "Max body size", Text, "131072", "POST body bytes covered by the content hash"),
 ];
 
 const ASAP_ALGS: &[(&str, &str)] = &[
@@ -285,7 +285,7 @@ const ASAP: &[FieldSpec] = &[
     f("sub", "Subject", Text, "", "Defaults to the issuer"),
     f("aud", "Audience", Text, "", "Comma separated for several"),
     f("kid", "Key ID", Text, "", "Must start with `<issuer>/`; read from a data URI key when empty"),
-    f("privateKey", "Private Key", Multiline, "", "PEM, or data:application/pkcs8;kid=...;base64,..."),
+    f("privateKey", "Private key", Multiline, "", "PEM, or data:application/pkcs8;kid=...;base64,..."),
     f("claims", "Additional claims", Multiline, "{}", "JSON; overrides the claims above"),
     f("exp", "Expiry (seconds)", Text, "3600", "At most 3600"),
 ];
