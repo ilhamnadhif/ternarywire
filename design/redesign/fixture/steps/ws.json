@@ -24,7 +24,7 @@
     "wait_ms": 3000
   },
   {
-    "auto": "composer:{\"type\":\"subscribe\",\"channel\":\"books\"}"
+    "auto": "composer:{\n  \"type\": \"subscribe\",\n  \"channel\": \"books\",\n  \"token\": \"{{wsToken}}\"\n}"
   },
   {
     "wait_ms": 100
