@@ -57,7 +57,9 @@ pub fn row_ex(
     let p = theme::pal(ui);
     let full = ui.available_rect_before_wrap();
     let rect = Rect::from_min_size(full.min, vec2(full.width(), height));
-    let inner = Rect::from_min_max(pos2(rect.left() + pad.0, rect.top()), pos2(rect.right() - pad.1, rect.bottom()));
+    // The hairline is the row's bottom border: content centers above it.
+    let bottom = if hairline { rect.bottom() - 1.0 } else { rect.bottom() };
+    let inner = Rect::from_min_max(pos2(rect.left() + pad.0, rect.top()), pos2(rect.right() - pad.1, bottom));
     // Drawn in children of the row's rect: they leave the cursor alone.
     let mut r = ui
         .new_child(UiBuilder::new().id_salt("row-right").max_rect(inner).layout(Layout::right_to_left(Align::Center)));
@@ -90,7 +92,13 @@ pub fn error_row(ui: &mut Ui, text: &str, actions: impl FnOnce(&mut Ui)) {
         })
         .response
         .rect;
-    ui.painter().hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.border));
+    bottom_border(ui, r, p.border);
+}
+
+/// A 1 px border under `r` (outside it, like a CSS `border-bottom`).
+fn bottom_border(ui: &mut Ui, r: Rect, color: Color32) {
+    ui.painter().hline(r.x_range(), r.bottom() + 0.5, Stroke::new(1.0, color));
+    ui.add_space(1.0);
 }
 
 /// The 46 px title row: icon tile, name, what the tool does (elided) and a
@@ -207,15 +215,17 @@ pub fn server_bar(ui: &mut Ui, id: Id, b: Bar<'_>, mid: impl FnOnce(&mut Ui), ri
                 Stroke::new(1.0, p.border_strong),
                 StrokeKind::Inside,
             );
+            // Inside the 1 px border: the state (padding 0 10 0 8, a hairline
+            // on its right), the address (padding 0 12), the tail (0 4).
             let mut seg = ui.new_child(
-                UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 0.0))).layout(Layout::left_to_right(Align::Center)),
+                UiBuilder::new().max_rect(rect.shrink2(vec2(9.0, 0.0))).layout(Layout::left_to_right(Align::Center)),
             );
             let pill = server_pill(&mut seg, b.state, b.label);
             let seg_right = pill.rect.right() + 10.0;
-            ui.painter().vline(seg_right - 0.5, rect.y_range().shrink(1.0), Stroke::new(1.0, p.border));
-            let tail_w = if b.addr.is_some() { 30.0 } else { 8.0 };
+            ui.painter().vline(seg_right + 0.5, rect.y_range().shrink(1.0), Stroke::new(1.0, p.border));
+            let tail_w = if b.addr.is_some() { 31.0 } else { 9.0 };
             let text_rect = Rect::from_min_max(
-                pos2(seg_right + 12.0, rect.top()),
+                pos2(seg_right + 1.0 + 12.0, rect.top()),
                 pos2(rect.right() - tail_w - 12.0, rect.bottom()),
             );
             let (text, font, color) = match b.addr {
@@ -229,7 +239,7 @@ pub fn server_bar(ui: &mut Ui, id: Id, b: Bar<'_>, mid: impl FnOnce(&mut Ui), ri
             if let Some(a) = b.addr {
                 let r = r.on_hover_text(a);
                 let _ = r;
-                let tail = Rect::from_min_size(pos2(rect.right() - 26.0, rect.center().y - 11.0), vec2(22.0, 22.0));
+                let tail = Rect::from_min_size(pos2(rect.right() - 27.0, rect.center().y - 11.0), vec2(22.0, 22.0));
                 let mut t = ui.new_child(UiBuilder::new().max_rect(tail).layout(Layout::left_to_right(Align::Center)));
                 if kit::icon_button_sm(&mut t, icons::COPY, tr("Copy address")).clicked() {
                     ui.ctx().copy_text(a.to_string());
@@ -326,9 +336,11 @@ pub fn strip(ui: &mut Ui, id: Id, open: &mut bool, label: &str, summary: &[Part]
     if resp.hovered() {
         painter.rect_filled(rect, 0.0, p.well);
     }
-    let cy = rect.center().y;
+    // Centered above the bottom border.
+    let cy = rect.center().y - 0.5;
     let mut x = rect.left() + 16.0;
-    let ig = painter.layout_no_wrap(icons::SLIDERS_HORIZONTAL.into(), theme::icon_font(14.0), p.text_muted);
+    // The icon takes the strip's 12.5 px text size.
+    let ig = painter.layout_no_wrap(icons::SLIDERS_HORIZONTAL.into(), theme::icon_font(12.5), p.text_muted);
     painter.galley(pos2(x, cy - ig.size().y / 2.0), ig.clone(), p.text_muted);
     x += ig.size().x + 10.0;
     let lg = painter.layout_no_wrap(label.to_string(), theme::medium(12.5), p.text);
@@ -376,7 +388,7 @@ pub fn settings_body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         })
         .response
         .rect;
-    ui.painter().hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.border));
+    bottom_border(ui, r, p.border);
 }
 
 /// One settings group of [`settings_grid`].
@@ -386,7 +398,7 @@ pub type Group<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
 pub fn settings_grid(ui: &mut Ui, groups: Vec<Group<'_>>) {
     let w = ui.available_width();
     let n = (((w + 24.0) / 274.0).floor() as usize).clamp(1, groups.len().max(1));
-    let col_w = ((w - 24.0 * (n as f32 - 1.0)) / n as f32).floor();
+    let col_w = (w - 24.0 * (n as f32 - 1.0)) / n as f32;
     let mut groups = groups.into_iter().peekable();
     let mut first = true;
     while groups.peek().is_some() {
@@ -429,7 +441,7 @@ pub fn group(ui: &mut Ui, title: &str, locked: bool, hint: Option<&str>, add: im
             if locked {
                 let o = ui.opacity();
                 ui.disable();
-                ui.set_opacity(o * 0.55);
+                ui.set_opacity(o * LOCKED_OPACITY);
             }
             add(ui);
         });
@@ -441,6 +453,21 @@ pub fn group(ui: &mut Ui, title: &str, locked: bool, hint: Option<&str>, add: im
             });
         }
     });
+}
+
+/// How opaque the fields of a locked [`group`] are.
+const LOCKED_OPACITY: f32 = 0.55;
+
+/// Content of a locked [`group`] drawn at full opacity but still read-only
+/// (the design fades only the labelled fields, not a segmented control).
+pub fn undimmed<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        if !ui.is_enabled() {
+            ui.set_opacity((ui.opacity() / LOCKED_OPACITY).min(1.0));
+        }
+        add(ui)
+    })
+    .inner
 }
 
 /// A left-to-right row at least `height` high, its content centered
@@ -513,6 +540,8 @@ fn input_ex(ui: &mut Ui, id: Id, text: &mut String, hint: &str, width: f32, mono
     let r = ui
         .scope(|ui| {
             ui.spacing_mut().interact_size.y = 26.0;
+            // egui paints the hint in the weak text color: faint, like a placeholder.
+            ui.visuals_mut().weak_text_color = Some(p.text_faint);
             let radius = CornerRadius::same(theme::RADIUS_SM);
             let w = &mut ui.visuals_mut().widgets;
             w.inactive.corner_radius = radius;
@@ -562,8 +591,9 @@ pub fn check_line(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let p = theme::pal(ui);
     let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(13.0), p.text);
     let wide = 15.0 + 8.0 + g.size().x <= ui.available_width();
-    let size =
-        if wide { vec2(15.0 + 8.0 + g.size().x, 26.0) } else { vec2(ui.available_width(), 26.0 + 8.0 + g.size().y) };
+    // Wrapped: the box, 8 apart, then the label on a 13 × 1.45 line.
+    let line_h = 13.0 * 1.45;
+    let size = if wide { vec2(15.0 + 8.0 + g.size().x, 26.0) } else { vec2(ui.available_width(), 15.0 + 8.0 + line_h) };
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -581,7 +611,7 @@ pub fn check_line(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let pos = if wide {
         pos2(b.right() + 8.0, b.center().y - g.size().y / 2.0)
     } else {
-        pos2(rect.left(), rect.top() + 15.0 + 8.0)
+        pos2(rect.left(), rect.top() + 15.0 + 8.0 + (line_h - g.size().y) / 2.0)
     };
     ui.painter().galley(pos, g, p.text);
     if resp.has_focus() {
@@ -637,6 +667,11 @@ pub enum Col {
     Fr(f32),
 }
 
+/// A row's rect without its 1 px bottom border (CSS `border-bottom`).
+fn above_border(rect: Rect) -> Rect {
+    Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 1.0))
+}
+
 /// Column rects in a list row (12 px side padding, columns 10 apart).
 fn columns(rect: Rect, cols: &[Col]) -> Vec<Rect> {
     let inner_w = rect.width() - 24.0;
@@ -666,7 +701,7 @@ pub fn list_head(ui: &mut Ui, cols: &[Col], labels: &[&str], right: &[usize], ch
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, p.well);
     painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
-    let rects = columns(rect, cols);
+    let rects = columns(above_border(rect), cols);
     let mut clicked = false;
     for (i, (label, r)) in labels.iter().zip(&rects).enumerate() {
         if i == 0
@@ -739,12 +774,12 @@ pub fn list_row(
     let dark = ui.visuals().dark_mode;
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), kit::size::ROW), Sense::click());
     resp.widget_info(|| WidgetInfo::selected(Role::Button, true, selected, name));
-    let rects = columns(rect, cols);
+    let rects = columns(above_border(rect), cols);
     let mut check_box = None;
     if let Some(on) = check
         && let Some(i) = cells.iter().position(|c| matches!(c, Cell::Check))
     {
-        let b = Rect::from_min_size(pos2(rects[i].left(), rect.center().y - 7.5), vec2(15.0, 15.0));
+        let b = Rect::from_min_size(pos2(rects[i].left(), rects[i].center().y - 7.5), vec2(15.0, 15.0));
         let c = ui.interact(b.expand(4.0), resp.id.with("check"), Sense::click());
         let value = *on;
         c.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, value, tr("Select")));
@@ -759,7 +794,7 @@ pub fn list_row(
     let painter = ui.painter();
     if selected {
         painter.rect_filled(rect, 0.0, p.accent_soft);
-        let bar = Rect::from_min_max(pos2(rect.left(), rect.top() + 6.0), pos2(rect.left() + 3.0, rect.bottom() - 6.0));
+        let bar = Rect::from_min_max(pos2(rect.left(), rect.top() + 6.0), pos2(rect.left() + 3.0, rect.bottom() - 7.0));
         painter.rect_filled(bar, CornerRadius { nw: 0, sw: 0, ne: 2, se: 2 }, p.accent);
     } else if ui.rect_contains_pointer(rect) {
         painter.rect_filled(rect, 0.0, p.well);
@@ -794,7 +829,9 @@ pub fn list_row(
                 let pill_w = pill.map_or(0.0, |(t, _)| pill_width(ui, t) + 6.0);
                 let job = path_job(host, path, query, 12.0, &p, (r.width() - pill_w).max(10.0));
                 let g = ui.painter().layout_job(job);
-                let end = r.left() + g.size().x;
+                // An elided path fills its space (the pill ends at the cell's end).
+                let elided = g.elided;
+                let end = if elided { r.right() - pill_w } else { r.left() + g.size().x };
                 clip.galley(pos2(r.left(), cy - g.size().y / 2.0), g, p.text);
                 if let Some((t, tone)) = pill {
                     paint_pill(ui, &clip, pos2(end + 6.0, cy), t, tone);
@@ -877,15 +914,23 @@ fn method_color(m: &str, p: &Palette, dark: bool) -> Color32 {
     if m == "CONNECT" || m.is_empty() { p.text_muted } else { theme::method_color(m, dark) }
 }
 
+/// A method's text: semibold 10.5 with 0.02 em letter spacing.
+fn method_galley(painter: &egui::Painter, m: &str, color: Color32) -> Arc<Galley> {
+    let mut job = LayoutJob::default();
+    let format = TextFormat { extra_letter_spacing: 0.21, ..TextFormat::simple(theme::semibold(10.5), color) };
+    job.append(m, 0.0, format);
+    painter.layout_job(job)
+}
+
 fn method_tag_width(ui: &Ui, m: &str) -> f32 {
-    ui.painter().layout_no_wrap(m.to_string(), theme::semibold(10.5), Color32::PLACEHOLDER).size().x + 12.0
+    method_galley(ui.painter(), m, Color32::PLACEHOLDER).size().x + 12.0
 }
 
 /// A method on a soft fill of its color (`.mp`): 18 high, radius 5. `at` is
 /// the left center.
 fn paint_method_tag(painter: &egui::Painter, at: egui::Pos2, m: &str, p: &Palette, dark: bool) -> f32 {
     let c = method_color(m, p, dark);
-    let g = painter.layout_no_wrap(m.to_string(), theme::semibold(10.5), c);
+    let g = method_galley(painter, m, c);
     let r = Rect::from_min_size(pos2(at.x, at.y - 9.0), vec2(g.size().x + 12.0, 18.0));
     painter.rect_filled(r, CornerRadius::same(5), theme::soft(c, 0.13));
     painter.galley(r.center() - g.size() / 2.0, g, c);
@@ -1002,8 +1047,8 @@ fn g_elided(resp: &Response, full: &str, ui: &Ui) -> bool {
 pub fn metric(ui: &mut Ui, icon: Option<&str>, text: &str, tip: Option<&str>) -> Response {
     let p = theme::pal(ui);
     let ig = icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(13.0), Color32::PLACEHOLDER));
-    let tg = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(12.0), Color32::PLACEHOLDER);
-    let w = 6.0 + ig.as_ref().map_or(0.0, |g| g.size().x + 4.0) + tg.size().x + 6.0;
+    let (tg, text_w) = kit::tabular_text(ui, text, FontId::proportional(12.0));
+    let w = 6.0 + ig.as_ref().map_or(0.0, |g| g.size().x + 4.0) + text_w + 6.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
     resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, text));
     if ui.is_rect_visible(rect) {
@@ -1123,11 +1168,13 @@ pub fn headers_table(ui: &mut Ui, id: Id, rows: &[(&str, &str)]) {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
             let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-            let name_w = (head.width() * 0.36).floor();
+            let name_w = head.width() * 0.36;
             ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.well);
             ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
+            // Cells center their text above their bottom border.
+            let head_cy = head.center().y - 0.5;
             for (x, t) in [(head.left() + 12.0, tr("Name")), (head.left() + name_w + 12.0, tr("Value"))] {
-                ui.painter().text(pos2(x, head.center().y), Align2::LEFT_CENTER, t, theme::medium(11.5), p.text_muted);
+                ui.painter().text(pos2(x, head_cy), Align2::LEFT_CENTER, t, theme::medium(11.5), p.text_muted);
             }
             for (i, (k, v)) in rows.iter().enumerate() {
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
@@ -1140,16 +1187,18 @@ pub fn headers_table(ui: &mut Ui, id: Id, rows: &[(&str, &str)]) {
                     };
                     ui.painter().rect_filled(rect, r, p.well);
                 }
-                if i + 1 < rows.len() {
+                let last = i + 1 == rows.len();
+                if !last {
                     ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
                 }
+                let cy = if last { rect.center().y } else { rect.center().y - 0.5 };
                 let kg = kit::elide(ui, k, theme::mono(12.0), p.text_muted, name_w - 24.0);
-                ui.painter().galley(pos2(rect.left() + 12.0, rect.center().y - kg.size().y / 2.0), kg, p.text_muted);
+                ui.painter().galley(pos2(rect.left() + 12.0, cy - kg.size().y / 2.0), kg, p.text_muted);
                 let vw = rect.width() - name_w - 24.0;
                 let vg = kit::elide(ui, v, theme::mono(12.0), p.text, vw);
                 let cut =
                     vg.size().x + 1.0 < ui.painter().layout_no_wrap(v.to_string(), theme::mono(12.0), p.text).size().x;
-                ui.painter().galley(pos2(rect.left() + name_w + 12.0, rect.center().y - vg.size().y / 2.0), vg, p.text);
+                ui.painter().galley(pos2(rect.left() + name_w + 12.0, cy - vg.size().y / 2.0), vg, p.text);
                 resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{k}: {v}")));
                 let resp = if cut { resp.on_hover_text(*v) } else { resp };
                 resp.context_menu(|ui| {
