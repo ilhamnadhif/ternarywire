@@ -696,6 +696,26 @@ fn example<'a>(c: &'a Collection, request: &str, name: &str) -> Option<&'a Examp
     c.find_request(request)?.examples.iter().find(|e| e.name == name)
 }
 
+/// The no-match message: its first sentence bold, the request in code.
+fn no_match_job(ui: &Ui, text: &str, what: &str) -> egui::text::LayoutJob {
+    let plain = kit::banner_format(ui, egui::FontId::proportional(12.5));
+    let bold = kit::banner_format(ui, theme::semibold(12.5));
+    let code = kit::banner_format(ui, theme::mono(12.5));
+    let mut job = egui::text::LayoutJob::default();
+    let lead = text.find(". ").map_or(0, |i| i + 1);
+    job.append(&text[..lead], 0.0, bold);
+    let rest = &text[lead..];
+    match rest.find(what) {
+        Some(i) => {
+            job.append(&rest[..i], 0.0, plain.clone());
+            job.append(what, 0.0, code);
+            job.append(&rest[i + what.len()..], 0.0, plain);
+        }
+        None => job.append(rest, 0.0, plain),
+    }
+    job
+}
+
 /// The media type an example is served as (`application/json`, without
 /// parameters such as `charset`).
 fn content_type(e: &Example) -> String {
@@ -787,6 +807,10 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                         });
                     });
                     let detail = match example(c, &r.request_id, ex_name) {
+                        _ if l.status == 0 => tr(
+                            "Dropped by failure simulation (Failures › Drop connection) before the example was sent.",
+                        )
+                        .to_string(),
                         Some(e) => {
                             format!("{} · {} · {}", trf("Served example “{}”", &[&e.name]), l.status, content_type(e))
                         }
@@ -808,15 +832,11 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
             }
             None if l.status == 404 => {
                 let what = format!("{} {}", l.method, l.path);
-                kit::banner(
-                    ui,
-                    Tone::Warn,
-                    icons::WARNING,
-                    &trf(
-                        "No match. No request in “{}” has a saved example for {}, so the server answered 404.",
-                        &[&c.name, &what],
-                    ),
+                let text = trf(
+                    "No match. No request in “{}” has a saved example for {}, so the server answered 404.",
+                    &[&c.name, &what],
                 );
+                kit::banner_job(ui, Tone::Warn, icons::WARNING, no_match_job(ui, &text, &what));
             }
             None => {
                 kit::banner(

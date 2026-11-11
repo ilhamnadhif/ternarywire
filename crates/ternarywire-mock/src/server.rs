@@ -38,7 +38,8 @@ pub struct MockLogEntry {
     pub headers: Vec<(String, String)>,
     /// Request body (lossy UTF-8), truncated to 16 KiB.
     pub body: String,
-    /// `request name / example name` when an example matched.
+    /// `request name / example name` when an example matched (for a
+    /// dropped request: the one it would have been served).
     pub matched: Option<String>,
     /// Status sent; 0 when a simulated failure dropped the connection.
     pub status: u16,
@@ -358,6 +359,12 @@ fn unreadable_body(status: StatusCode) -> Response {
     json_response(status, serde_json::json!({"error": {"name": name, "message": message}}))
 }
 
+/// The example a request matches, for the log of a dropped request.
+fn would_match(shared: &Shared, incoming: &IncomingRequest) -> Option<String> {
+    let collection = shared.collection.read().clone();
+    find_match(&collection, &shared.config.variables, incoming).map(|m| m.label())
+}
+
 async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
     let started = Instant::now();
     let timestamp_ms = chrono::Utc::now().timestamp_millis();
@@ -403,11 +410,13 @@ async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
             }
             Some(FailureKind::Drop) => {
                 dropped = true;
+                matched = would_match(&shared, &incoming);
                 dropped_connection()
             }
             Some(FailureKind::Timeout) => {
                 tokio::time::sleep(Duration::from_secs(300)).await;
                 dropped = true;
+                matched = would_match(&shared, &incoming);
                 dropped_connection()
             }
             None => {

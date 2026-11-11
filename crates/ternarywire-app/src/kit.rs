@@ -1140,6 +1140,34 @@ pub fn banner_with(ui: &mut Ui, tone: Tone, icon: &str, text: &str, actions: imp
         .response
 }
 
+/// [`banner`] with styled text (bold lead, code), laid out by the caller
+/// with [`banner_format`].
+pub fn banner_job(ui: &mut Ui, tone: Tone, icon: &str, mut job: egui::text::LayoutJob) -> Response {
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(tone);
+    egui::Frame::new()
+        .fill(bg)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(fg));
+                job.wrap.max_width = ui.available_width();
+                ui.add(egui::Label::new(job).wrap());
+            });
+        })
+        .response
+}
+
+/// The text format of a [`banner_job`] part: 12.5 px (code 12.5 mono) on
+/// the 1.45 line height.
+pub fn banner_format(ui: &Ui, font: FontId) -> egui::TextFormat {
+    let p = theme::pal(ui);
+    egui::TextFormat { line_height: Some(12.5 * 1.45), ..egui::TextFormat::simple(font, p.text) }
+}
+
 /// An icon on a soft rounded square (radius = side / 4).
 pub fn icon_tile(ui: &mut Ui, icon: &str, color: Color32, side: f32) -> Response {
     let p = theme::pal(ui);
