@@ -2,6 +2,37 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.0 — 2026-11-11
+
+A new design for the whole app: request on the left, response on the right, and every screen redrawn
+on one set of colors, sizes and components.
+
+### Changed
+- **Request left, response right.** The method, URL and Send sit at the top of the left pane; the
+  response status, time, size and test results at the top of the right pane, so both panes' rows line
+  up across the window. Side by side is now the default (narrow windows still stack the response
+  under the request; the status bar switches between the two).
+- **The window**: an integrated title bar (on macOS under the traffic lights) with the workspace,
+  New, Import, a search that also runs commands, the environment and its quick look, cookies and the
+  vault; the tabs and the open view sit on one card; the status bar shows the console, saving, updates,
+  the workspace folder and the layout.
+- **Every screen redrawn**: HTTP and GraphQL requests and responses (with Compare, the JSONPath
+  filter and folded JSON), WebSocket, Socket.IO, MQTT, gRPC, MCP and AI in the same left/right layout,
+  collection and environment settings, Spec Hub, Flows, the Collection Runner, the mock server,
+  webhook listener and capture proxy, Settings, the Vault, cookies, import, code snippets and every
+  other dialog, the console and the start page.
+- Sidebars use one row style; collections and folders have hover actions (add, more) and a menu of
+  every action.
+
+### Added
+- **Local servers** in the sidebar: mock servers, webhook listeners and capture proxies, with their
+  address and whether they run.
+- Performance runs export to HTML (with the chart), CSV or JSON.
+- New › GraphQL request and New › API spec.
+- A request opened from History says so, with the time and status it had.
+- Filters for webhook requests and for the languages of code snippets.
+- Markdown preview of a request's documentation.
+
 ## 0.2.3 — 2026-11-02
 
 A release of fixes from a review of the whole code base.
