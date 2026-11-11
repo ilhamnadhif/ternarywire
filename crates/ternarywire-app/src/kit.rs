@@ -44,6 +44,9 @@ pub enum Size {
     Sm,
     Md,
     Lg,
+    /// The prototype's `.btn.lg`: 34 high, 16 px padding (Cancel in place
+    /// of Send).
+    Tall,
 }
 
 /// Everything a button can show.
@@ -75,6 +78,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
         Size::Sm => (24.0, 12.0, 13.0, (8.0, 8.0), 5.0, RADIUS_SM),
         Size::Md => (30.0, 12.5, 15.0, (12.0, 12.0), 6.0, RADIUS),
         Size::Lg => (38.0, 13.0, 15.0, (14.0, 16.0), 6.0, 9),
+        Size::Tall => (34.0, 13.0, 15.0, (16.0, 16.0), 6.0, RADIUS),
     };
     let enabled = ui.is_enabled();
     let text_color = match kind {
@@ -328,10 +332,15 @@ pub fn tabs_with<T: PartialEq + Copy>(
     controls.spacing_mut().item_spacing.x = 8.0;
     right(&mut controls);
     let used = controls.min_rect();
-    let tabs_right = if used.width() > 0.5 { used.left() - 8.0 } else { inner.right() };
-    let tabs_rect = inner.with_max_x(tabs_right.max(inner.left()));
+    // Without controls the tabs run to the pane's edge (the prototype's
+    // `.tabs` scrolls inside its padding): a tab that doesn't fit is cut there.
+    let (tabs_rect, side_pad) = if used.width() > 0.5 {
+        (inner.with_max_x((used.left() - 8.0).max(inner.left())), 0.0)
+    } else {
+        (Rect::from_min_max(rect.left_top(), inner.right_bottom()).with_max_x(rect.right()), size::PAD)
+    };
     let mut tabs_ui = ui.new_child(UiBuilder::new().max_rect(tabs_rect).layout(Layout::left_to_right(Align::Center)));
-    let changed = tab_row(&mut tabs_ui, current, items, false);
+    let changed = tab_row(&mut tabs_ui, current, items, side_pad);
     ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
     ui.advance_cursor_after_rect(rect);
     changed
@@ -352,8 +361,9 @@ pub fn tabs_width<T: PartialEq + Copy>(ui: &Ui, items: &[Tab<'_, T>]) -> f32 {
         + 2.0 * items.len().saturating_sub(1) as f32
 }
 
-/// Paints the tabs at the cursor (35 high, the underline on its bottom edge).
-fn tab_row<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[Tab<'_, T>], _compat: bool) -> bool {
+/// Paints the tabs at the cursor (35 high, the underline on its bottom edge),
+/// `side_pad` in from both ends of the (scrolling) row.
+fn tab_row<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[Tab<'_, T>], side_pad: f32) -> bool {
     let p = theme::pal(ui);
     const PAD: f32 = 9.0;
     let h = size::TABS - 1.0;
@@ -377,13 +387,15 @@ fn tab_row<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[Tab<'_, T
             (selected, g, c, ig, w)
         })
         .collect();
-    let total: f32 = measured.iter().map(|m| m.4).sum::<f32>() + 2.0 * items.len().saturating_sub(1) as f32;
+    let total: f32 =
+        measured.iter().map(|m| m.4).sum::<f32>() + 2.0 * items.len().saturating_sub(1) as f32 + 2.0 * side_pad;
     let mut changed = false;
     let mut draw = |ui: &mut Ui| {
         // Exactly the tabs' height (`ui.horizontal` would center them in an
         // interact-size row and push them down).
         ui.allocate_ui_with_layout(vec2(ui.available_width(), h), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            ui.add_space(side_pad);
             for (t, (selected, g, c, ig, w)) in items.iter().zip(&measured) {
                 let (rect, resp) = ui.allocate_exact_size(vec2(*w, h), Sense::click());
                 let name = match &t.count {
@@ -435,27 +447,21 @@ fn tab_row<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[Tab<'_, T
                     );
                 }
             }
+            if side_pad > 0.0 {
+                ui.add_space(side_pad - 2.0);
+            }
         });
     };
     if total <= ui.available_width() + 0.5 {
         draw(ui);
     } else {
+        // Tabs that don't fit scroll (wheel or trackpad) and are cut at the edge.
         let id = ui.next_auto_id().with("tab-strip");
-        let out = egui::ScrollArea::horizontal()
+        egui::ScrollArea::horizontal()
             .id_salt(id)
             .auto_shrink([false, true])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| draw(ui));
-        let (view, offset) = (out.inner_rect, out.state.clamped_offset().x);
-        let hidden_right = out.content_size.x - view.width() - offset;
-        let fill = ui.visuals().panel_fill;
-        if offset > 0.5 {
-            fade(ui.painter(), Rect::from_min_size(view.left_top(), vec2(28.0, view.height() - 1.0)), fill, false);
-        }
-        if hidden_right > 0.5 {
-            let edge = Rect::from_min_size(pos2(view.right() - 28.0, view.top()), vec2(28.0, view.height() - 1.0));
-            fade(ui.painter(), edge, fill, true);
-        }
     }
     changed
 }
@@ -818,6 +824,31 @@ pub fn hint(ui: &Ui, text: &str) -> RichText {
     RichText::new(text).color(theme::pal(ui).text_muted).size(12.0)
 }
 
+/// [`hint`] as a block of the prototype's line height (1.45): a paragraph
+/// that other blocks sit a gap away from.
+pub fn hint_block(ui: &Ui, text: &str) -> RichText {
+    hint(ui, text).line_height(Some(12.0 * 1.45))
+}
+
+/// [`hint`] with code in it: each `{}` of `text` becomes the next of `code`
+/// in the mono font (`Write <span class=mono>:name</span> in the URL…`).
+pub fn hint_code(ui: &Ui, text: &str, code: &[&str]) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let muted = theme::pal(ui).text_muted;
+    let plain = TextFormat::simple(egui::FontId::proportional(12.0), muted);
+    let mono = TextFormat { valign: Align::Center, ..TextFormat::simple(theme::mono(12.5), muted) };
+    let mut job = LayoutJob::default();
+    let mut parts = text.split("{}");
+    if let Some(first) = parts.next() {
+        job.append(first, 0.0, plain.clone());
+    }
+    for (i, part) in parts.enumerate() {
+        job.append(code.get(i).copied().unwrap_or_default(), 0.0, mono.clone());
+        job.append(part, 0.0, plain.clone());
+    }
+    job
+}
+
 // ---------------------------------------------------------------------------
 // Inputs
 // ---------------------------------------------------------------------------
@@ -1176,11 +1207,12 @@ pub fn banner_with(ui: &mut Ui, tone: Tone, icon: &str, text: &str, actions: imp
                 let aw: f32 = ui.data(|d| d.get_temp(wid).unwrap_or(0.0));
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - aw - if aw > 0.0 { 10.0 } else { 0.0 }).max(80.0));
-                    // 12.5 px on the body's 1.45 line height, like the prototype.
-                    ui.add(
-                        egui::Label::new(RichText::new(text).size(12.5).line_height(Some(12.5 * 1.45)).color(p.text))
-                            .wrap(),
-                    );
+                    // The prototype's warn, err and ok banners take their tone's
+                    // text color (`.warn`, `.err`, `.ok`); info and neutral stay
+                    // plain. Lines are 1.45 high.
+                    let color = if matches!(tone, Tone::Warn | Tone::Err | Tone::Ok) { fg } else { p.text };
+                    let text = RichText::new(text).size(12.5).color(color).line_height(Some(12.5 * 1.45));
+                    ui.add(egui::Label::new(text).wrap());
                 });
                 let before = ui.cursor().left();
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -1403,7 +1435,9 @@ pub fn bar_ex<R>(ui: &mut Ui, height: f32, pad: f32, hairline: bool, add: impl F
     let p = theme::pal(ui);
     let full = ui.available_rect_before_wrap();
     let rect = Rect::from_min_size(full.min, vec2(full.width(), height));
-    let inner = rect.shrink2(vec2(pad, 0.0));
+    // The hairline is part of the height (`border-bottom` in a border box):
+    // the content centers above it.
+    let inner = rect.with_max_y(rect.bottom() - if hairline { 1.0 } else { 0.0 }).shrink2(vec2(pad, 0.0));
     let r = ui.scope_builder(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)), |ui| {
         ui.set_min_size(inner.size());
         ui.spacing_mut().item_spacing.x = 8.0;
@@ -1547,6 +1581,8 @@ pub fn menu_item(ui: &mut Ui, icon: Option<&str>, label: &str, shortcut: Option<
 
 pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
     let p = theme::pal(ui);
+    // Menu rows touch (the prototype's `.mi`): no item spacing under them.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let width = ui.available_width().max(ui.spacing().menu_width - 10.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
     let enabled = ui.is_enabled();
@@ -1631,6 +1667,7 @@ pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
 /// the prototype's 15 px line with 6 above and 3 below (24 high).
 pub fn menu_header(ui: &mut Ui, text: &str) {
     let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.y = 0.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let mut f = egui::TextFormat::simple(theme::semibold(10.5), p.text_faint);
     f.extra_letter_spacing = 0.63;
@@ -1642,6 +1679,7 @@ pub fn menu_header(ui: &mut Ui, text: &str) {
 /// A hairline between menu groups.
 pub fn menu_sep(ui: &mut Ui) {
     let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.y = 0.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
     ui.painter().hline(rect.x_range().shrink(2.0), rect.center().y, Stroke::new(1.0, p.border));
 }
@@ -1674,6 +1712,8 @@ pub struct TreeRow<'a> {
     /// Muted text on the right, hidden while hover actions show.
     pub meta: Option<&'a str>,
     pub meta_color: Option<Color32>,
+    /// The meta in the mono font (status codes).
+    pub meta_mono: bool,
     /// An accent dot after the label (unsaved).
     pub unsaved: bool,
     pub selected: bool,
@@ -1699,7 +1739,8 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
         let painter = ui.painter();
         // Guides of the levels above.
         for d in 0..row.depth {
-            let x = rect.left() + 4.0 + d as f32 * 14.0 + 8.0;
+            // The pixel column 7 px into the level's padding (`--gx`).
+            let x = rect.left() + 4.0 + d as f32 * 14.0 + 7.5;
             painter.vline(x, rect.y_range(), Stroke::new(1.0, p.border));
         }
         if row.selected {
@@ -1710,7 +1751,10 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
                 color: Color32::from_black_alpha(if ui.visuals().dark_mode { 0 } else { 10 }),
             };
             painter.add(shadow.as_shape(rect, CornerRadius::same(6)));
-            painter.rect(rect, CornerRadius::same(6), p.surface, Stroke::new(1.0, p.border), StrokeKind::Inside);
+            // The ring sits outside the row (`box-shadow: 0 0 0 1px`); the
+            // dark prototype has none (its shadow list is invalid there).
+            let ring = if ui.visuals().dark_mode { Stroke::NONE } else { Stroke::new(1.0, p.border) };
+            painter.rect(rect, CornerRadius::same(6), p.surface, ring, StrokeKind::Outside);
             painter.rect_filled(
                 Rect::from_min_size(pos2(rect.left() - 2.0, rect.top() + 7.0), vec2(3.0, rect.height() - 14.0)),
                 CornerRadius::same(2),
@@ -1764,11 +1808,8 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
             actions = Some(Rect::from_min_max(pos2(right - row.actions_width, rect.top()), pos2(right, rect.bottom())));
             right -= row.actions_width + 4.0;
         } else if let Some(meta) = row.meta {
-            let g = painter.layout_no_wrap(
-                meta.to_string(),
-                FontId::proportional(11.0),
-                row.meta_color.unwrap_or(p.text_faint),
-            );
+            let font = if row.meta_mono { theme::mono(11.0) } else { FontId::proportional(11.0) };
+            let g = painter.layout_no_wrap(meta.to_string(), font, row.meta_color.unwrap_or(p.text_faint));
             painter.galley(pos2(right - g.size().x, cy - g.size().y / 2.0), g.clone(), Color32::PLACEHOLDER);
             right -= g.size().x + 8.0;
         }
@@ -1815,14 +1856,17 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
 /// A group header in a sidebar list (`TODAY`, `ENVIRONMENTS`).
 pub fn sidebar_group(ui: &mut Ui, text: &str) {
     let p = theme::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-    ui.painter().text(
-        pos2(rect.left() + 8.0, rect.bottom() - 6.0),
-        Align2::LEFT_BOTTOM,
-        text.to_uppercase(),
-        theme::semibold(10.5),
-        p.text_faint,
-    );
+    // `.grp`: 12 px above a 10.5 px line (1.45 high), 4 below, 0.06 em apart.
+    let line = 10.5 * 1.45;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0 + line + 4.0), Sense::hover());
+    let mut job = egui::text::LayoutJob::default();
+    let format = egui::text::TextFormat {
+        extra_letter_spacing: 0.06 * 10.5,
+        ..egui::text::TextFormat::simple(theme::semibold(10.5), p.text_faint)
+    };
+    job.append(&text.to_uppercase(), 0.0, format);
+    let g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(rect.left() + 8.0, rect.top() + 12.0 + (line - g.size().y) / 2.0), g, p.text_faint);
 }
 
 /// `ScrollArea::show_rows` for rows of exactly `row_h` laid out edge to edge.

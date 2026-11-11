@@ -118,7 +118,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui) {
         ui.label(RichText::new(title).font(crate::theme::semibold(13.0)).color(p.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(2.0);
-            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.spacing_mut().item_spacing.x = 4.0;
             match app.sidebar_tab {
                 SidebarTab::Collections => {
                     let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
@@ -180,8 +180,18 @@ fn sidebar_search(ui: &mut Ui, id: &str, text: &mut String, hint: &str) -> egui:
 
 /// Height [`sidebar_footer`] takes for `text` in a sidebar `width` wide.
 pub fn sidebar_footer_height(ui: &Ui, text: &str, width: f32) -> f32 {
-    let g = ui.painter().layout(text.to_string(), FontId::proportional(11.5), Color32::PLACEHOLDER, width - 12.0);
-    9.0 + g.size().y
+    9.0 + footer_galley(ui, text, width, Color32::PLACEHOLDER).size().y
+}
+
+/// The footer text: faint 11.5 in lines 1.45 high, 6 px in from each side.
+fn footer_galley(ui: &Ui, text: &str, width: f32, color: Color32) -> std::sync::Arc<egui::Galley> {
+    let format = egui::text::TextFormat {
+        line_height: Some(11.5 * 1.45),
+        ..egui::text::TextFormat::simple(FontId::proportional(11.5), color)
+    };
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), format);
+    job.wrap.max_width = width - 12.0;
+    ui.painter().layout_job(job)
 }
 
 /// The hint at the bottom of a sidebar (the prototype's `.sb-foot`): a
@@ -191,7 +201,7 @@ pub fn sidebar_footer(ui: &mut Ui, text: &str) {
     let rect = ui.available_rect_before_wrap();
     let h = sidebar_footer_height(ui, text, rect.width());
     let top = (rect.bottom() - h).max(rect.top());
-    let g = ui.painter().layout(text.to_string(), FontId::proportional(11.5), p.text_faint, rect.width() - 12.0);
+    let g = footer_galley(ui, text, rect.width(), p.text_faint);
     ui.painter().hline(rect.x_range(), top + 0.5, Stroke::new(1.0, p.border));
     ui.painter().galley(pos2(rect.left() + 6.0, top + 9.0), g, p.text_faint);
     ui.allocate_rect(Rect::from_min_max(pos2(rect.left(), rect.top()), rect.max), Sense::hover());
@@ -1070,6 +1080,7 @@ fn history(app: &mut TernaryWireApp, ui: &mut Ui) {
                     mono: true,
                     meta: Some(&status),
                     meta_color: Some(color),
+                    meta_mono: true,
                     selected: selected.as_deref() == Some(h.id.as_str()),
                     actions_width: 22.0,
                     ..Default::default()

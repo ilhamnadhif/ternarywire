@@ -65,7 +65,7 @@ Enter a URL and press Send	Masukkan URL lalu tekan Kirim
 Sending request…	Mengirim request…
 Could not send request	Request tidak dapat dikirim
 This request does not have a body	Request ini tidak memiliki body
-Untitled Request	Request Tanpa Judul
+Untitled request	Request tanpa judul
 Open workspace…	Buka workspace…
 New workspace…	Workspace baru…
 Recent workspaces	Workspace terakhir
@@ -120,6 +120,90 @@ Save as example	Simpan sebagai contoh
 Save response to file	Simpan respons ke berkas
 Examples	Contoh
 Inherit auth from parent	Warisi auth dari induk
+Inherit from parent	Warisi dari induk
+No auth	Tanpa auth
+(none)	(tidak ada)
+AWS region	Region AWS
+Access token URL	URL access token
+Add JWT token to	Tambahkan token JWT ke
+Add auth data to URL	Tambahkan data auth ke URL
+Add auth data to request headers	Tambahkan data auth ke header request
+Add empty parameters to signature	Sertakan parameter kosong dalam tanda tangan
+Add to	Tambahkan ke
+Add token to	Tambahkan token ke
+Additional claims	Klaim tambahan
+Adds oauth_body_hash for non-form bodies	Menambahkan oauth_body_hash untuk body selain form
+Algorithm	Algoritme
+At most 3600	Paling lama 3600
+Auth URL	URL auth
+Auto-refresh token	Perbarui token otomatis
+Callback URL	URL callback
+Client authentication	Autentikasi klien
+Client nonce	Nonce klien
+Client secret	Secret klien
+Client token	Token klien
+Code challenge method	Metode code challenge
+Comma separated for several	Pisahkan dengan koma untuk beberapa
+Comma separated header names	Nama header, dipisah koma
+Defaults to the access token URL	Bawaan: URL access token
+Defaults to the issuer	Bawaan: penerbit
+Disable header encoding	Matikan encoding header
+Disable retrying the request	Jangan ulangi request
+Do not answer the server's 401 challenge automatically	Jangan jawab tantangan 401 dari server secara otomatis
+Expiry (seconds)	Kedaluwarsa (detik)
+Extra JSON header fields, e.g. {"kid": "..."}	Field header JSON tambahan, mis. {"kid": "..."}
+Filled from the server challenge	Diisi dari tantangan server
+For HS* algorithms	Untuk algoritme HS*
+Generated when empty	Dibuat otomatis bila kosong
+Grant type	Jenis grant
+Hawk auth ID	ID auth Hawk
+Hawk auth key	Kunci auth Hawk
+Header or query parameter name, e.g. X-API-Key	Nama header atau parameter query, mis. X-API-Key
+Header prefix	Prefiks header
+Headers to sign	Header yang ditandatangani
+Host signed instead of the request URL's	Host yang ditandatangani, bukan host URL request
+Include body hash	Sertakan hash body
+Include payload hash	Sertakan hash payload
+Issuer	Penerbit
+JSON claims	Klaim JSON
+JSON; overrides the claims above	JSON; menimpa klaim di atas
+JWT headers	Header JWT
+Key ID	ID kunci
+Max body size	Ukuran body maks.
+Must start with `<issuer>/`; read from a data URI key when empty	Harus diawali `<issuer>/`; dibaca dari kunci data URI bila kosong
+Nonce count	Hitungan nonce
+Otherwise to the body (form POST) or URL	Jika tidak, ke body (form POST) atau URL
+PEM RSA key for RSA-SHA*	Kunci RSA PEM untuk RSA-SHA*
+PEM key for RS*, PS*, ES* and EdDSA	Kunci PEM untuk RS*, PS*, ES*, dan EdDSA
+PEM, or data:application/pkcs8;kid=...;base64,...	PEM, atau data:application/pkcs8;kid=...;base64,...
+POST body bytes covered by the content hash	Byte body POST yang dicakup hash konten
+Password Credentials grant	Grant Password Credentials
+Paste a token manually, or use Get new access token	Tempel token secara manual, atau pakai Ambil access token baru
+Plain	Polos
+Presigned URL instead of headers	URL presigned sebagai ganti header
+Private key	Kunci privat
+Query param	Param query
+Query param name	Nama param query
+Query params	Param query
+Uses the refresh token before the access token expires.	Memakai refresh token sebelum access token kedaluwarsa.
+Refresh token URL	URL refresh token
+Request URL	URL request
+Request header	Header request
+Request header prefix	Prefiks header request
+Secret Base64 encoded	Secret ter-encode Base64
+Secret key	Kunci rahasia
+Send as Basic Auth header	Kirim sebagai header Basic Auth
+Send client credentials in body	Kirim kredensial klien di body
+Sent as `Authorization: Bearer <token>`.	Dikirim sebagai `Authorization: Bearer <token>`.
+Service name	Nama layanan
+Session token	Token sesi
+Signature method	Metode tanda tangan
+Subject	Subjek
+Timestamp	Stempel waktu
+Token name	Nama token
+Token secret	Secret token
+e.g. 00000001	mis. 00000001
+e.g. s3, execute-api	mis. s3, execute-api
 Get New Access Token	Ambil Access Token Baru
 Refresh token	Segarkan token
 Clear token	Hapus token
@@ -335,7 +419,7 @@ Invalid JSON	JSON tidak valid
 JavaScript	JavaScript
 JavaScript modules in packages/ (CommonJS or ESM), loaded with pm.require('@team/name') or pm.require('name'). They are part of the workspace and can be committed.	Modul JavaScript di packages/ (CommonJS atau ESM), dimuat dengan pm.require('@team/name') atau pm.require('name'). Modul ini bagian dari workspace dan dapat di-commit.
 JavaScript with pm.request, pm.response and pm.message	JavaScript dengan pm.request, pm.response, dan pm.message
-JavaScript with the Postman-compatible pm API	JavaScript dengan API pm yang kompatibel dengan Postman
+JavaScript with the Postman-compatible {} API · type {} for completions	JavaScript dengan API {} yang kompatibel dengan Postman · ketik {} untuk saran
 Jitter (ms)	Jitter (md)
 KV mount	Mount KV
 KV version	Versi KV
@@ -375,6 +459,9 @@ Mock server: {}	Server mock: {}
 Mode	Mode
 Model	Model
 More actions	Aksi lainnya
+Copy as text	Salin sebagai teks
+Remove disabled rows	Hapus baris nonaktif
+Remove all rows	Hapus semua baris
 Namespace	Namespace
 Never decrypt	Jangan pernah dekripsi
 New OpenAPI 3 spec in specs/	Spesifikasi OpenAPI 3 baru di specs/
@@ -401,7 +488,7 @@ No traffic captured yet.	Belum ada lalu lintas yang tertangkap.
 No variables	Tidak ada variabel
 Not trusted yet: HTTPS clients will reject the proxy	Belum dipercaya: klien HTTPS akan menolak proxy
 OAuth 2.0: {}	OAuth 2.0: {}
-One entry per line as key:value. Prefix with // to disable.	Satu entri per baris sebagai key:value. Awali dengan // untuk menonaktifkan.
+One entry per line as {}. Prefix with {} to disable.	Satu entri per baris sebagai {}. Awali dengan {} untuk menonaktifkan.
 Only hosts	Hanya host
 Only show incoming events listed here	Hanya tampilkan event masuk yang tercantum di sini
 Open	Buka
@@ -1199,7 +1286,7 @@ Send a username and password in the Authorization header.	Kirim nama pengguna da
 Answer the server's challenge with a hashed password.	Jawab tantangan server dengan kata sandi yang di-hash.
 Sign a JSON Web Token and send it with the request.	Tandatangani JSON Web Token dan kirim bersama permintaan.
 Sign the request with OAuth 1.0 consumer and token credentials.	Tandatangani permintaan dengan kredensial consumer dan token OAuth 1.0.
-Get an access token from an authorization server and send it.	Ambil access token dari server otorisasi lalu kirimkan.
+Gets a token from an authorization server and sends it with the request.	Mengambil token dari server otorisasi dan mengirimnya bersama request.
 Sign the request with Hawk credentials.	Tandatangani permintaan dengan kredensial Hawk.
 Sign the request with AWS Signature Version 4.	Tandatangani permintaan dengan AWS Signature Version 4.
 Windows NTLM challenge-response authentication.	Autentikasi challenge-response NTLM Windows.
@@ -1994,7 +2081,7 @@ Auth	Auth
 Enter a URL or paste a cURL command	Masukkan URL atau tempel perintah cURL
 Custom…	Kustom…
 Custom method	Method kustom
-Write :name in the URL path to add one; its value is filled in here.	Tulis :nama di path URL untuk menambahkannya; nilainya diisi di sini.
+Write {} in the URL path to add one; its value is filled in here.	Tulis {} di path URL untuk menambahkannya; nilainya diisi di sini.
 From Settings › Requests	Dari Pengaturan › Request
 calculated	dihitung
 calculated when sent	dihitung saat dikirim
@@ -2007,7 +2094,6 @@ File path	Path berkas
 Completions from the schema	Saran dari skema
 Close schema	Tutup skema
 Load the schema for completions and to insert operations.	Muat skema untuk saran dan untuk menyisipkan operasi.
-type pm. for completions	ketik pm. untuk saran
 pm API reference	Referensi API pm
 These apply to this request only and override the app settings.	Ini hanya berlaku untuk request ini dan menimpa pengaturan aplikasi.
 Describe what the request does…	Jelaskan apa yang dilakukan request ini…
@@ -2018,6 +2104,10 @@ TTFB	TTFB
 Waiting for the first byte from {}	Menunggu byte pertama dari {}
 Last sent from History	Terakhir dikirim dari Riwayat
 Using a proxy? Check Settings › Proxy.	Memakai proxy? Periksa Pengaturan › Proxy.
+Nothing is listening on {} — the connection was refused.	Tidak ada yang mendengarkan di {} — koneksi ditolak.
+Is the server running? Start it, or check the port in {}.	Apakah server berjalan? Jalankan, atau periksa port di {}.
+Is the server running? Start it, or check the port in the URL.	Apakah server berjalan? Jalankan, atau periksa port di URL.
+Switch environment with {} if this should go to another server.	Ganti environment dengan {} jika ini seharusnya ke server lain.
 Switch environment with ⌘E if this should go to another server.	Ganti environment dengan ⌘E bila ini seharusnya ke server lain.
 Undefined variables are sent as typed; Details lists them.	Variabel yang belum didefinisikan dikirim apa adanya; Detail mendaftarnya.
 Open console	Buka konsol

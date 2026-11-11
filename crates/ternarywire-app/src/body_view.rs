@@ -1105,9 +1105,9 @@ fn inside<R>(ui: &mut Ui, builder: UiBuilder, add: impl FnOnce(&mut Ui) -> R) ->
 }
 
 /// Width of the gutter: 12 px, the line numbers, 4 px, the 10 px column of
-/// fold carets, 8 px.
+/// fold carets, 8 px and its 1 px border.
 fn gutter_width(lines: usize, char_w: f32) -> f32 {
-    12.0 + lines.max(1).to_string().len() as f32 * char_w + 4.0 + 10.0 + 8.0
+    12.0 + lines.max(1).to_string().len() as f32 * char_w + 4.0 + 10.0 + 8.0 + 1.0
 }
 
 /// What the current view offers.
@@ -1227,7 +1227,9 @@ fn toolbar(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, caps: &Caps)
     ];
     let labels: Vec<&str> = views.iter().map(|v| v.1).collect();
     // Room right of the view switch for search and the icon buttons.
-    let room = ui.available_width() - 2.0 * kit::size::PAD - segmented_sm_width(ui, &labels) - GAP;
+    // The prototype's toolbar puts a spacer between the views and the search
+    // field, so they are 2 gaps apart at the least.
+    let room = ui.available_width() - 2.0 * kit::size::PAD - segmented_sm_width(ui, &labels) - 2.0 * GAP;
     let icons_w = |n: usize| n as f32 * (ICON + GAP);
     let next_w = if state.search.is_empty() { 0.0 } else { ICON + GAP };
     let full = usize::from(caps.filter) + usize::from(caps.fold) + usize::from(caps.wrap) + 2;
@@ -1541,7 +1543,9 @@ fn code_frame(ui: &Ui) -> egui::Frame {
         .fill(p.surface)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(1))
+        // egui counts the stroke in the frame's size: the content starts
+        // right inside the 1 px border.
+        .inner_margin(egui::Margin::ZERO)
 }
 
 /// The Preview of a text body: the viewer box with a note on what to use instead.
@@ -1842,7 +1846,7 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
                 let hovered = hover_y.is_some_and(|y| y >= v.first.top() && y < v.last.bottom());
                 let y = v.first.center().y;
                 painter.text(
-                    pos2(gutter.right() - 22.0, y),
+                    pos2(gutter.right() - 23.0, y),
                     Align2::RIGHT_CENTER,
                     (orig + 1).to_string(),
                     font.clone(),
@@ -1851,7 +1855,7 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
                 if let Some((r, folded)) = region {
                     let caret = if folded { icons::CARET_RIGHT } else { icons::CARET_DOWN };
                     painter.text(
-                        pos2(gutter.right() - 13.0, y),
+                        pos2(gutter.right() - 14.0, y),
                         Align2::CENTER_CENTER,
                         caret,
                         theme::icon_font(9.0),
@@ -2054,7 +2058,7 @@ fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &Arc<
             painter.vline(gutter.right() - 0.5, gutter.y_range(), Stroke::new(1.0, pal.border));
             for (row, rect) in placed {
                 painter.text(
-                    pos2(gutter.right() - 22.0, rect.center().y),
+                    pos2(gutter.right() - 23.0, rect.center().y),
                     Align2::RIGHT_CENTER,
                     (row + 1).to_string(),
                     font.clone(),

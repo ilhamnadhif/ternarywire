@@ -1,44 +1,18 @@
 [
-  {
-    "window": [
-      "@W",
-      "@H"
-    ]
-  },
-  {
-    "theme": "@THEME"
-  },
-  {
-    "expand": "Bookstore API"
-  },
-  {
-    "expand": "Realtime & AI"
-  },
-  {
-    "open": "Search catalog"
-  },
-  {
-    "section": "body"
-  },
-  {
-    "resp_panel": "fetch_schema"
-  },
-  {
-    "wait_ms": 800
-  },
-  {
-    "send": true
-  },
-  {
-    "wait_idle": true
-  },
-  {
-    "wait_ms": 800
-  },
-  {
-    "screenshot": "@OUT"
-  },
-  {
-    "quit": true
-  }
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"collapse": "Bookstore API/Orders"},
+  {"open": "Search catalog"},
+  {"section": "body"},
+  {"resp_panel": "fetch_schema"},
+  {"wait_ms": 800},
+  {"send": true},
+  {"wait_idle": true},
+  {"send": true},
+  {"wait_idle": true},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
 ]

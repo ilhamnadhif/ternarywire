@@ -43,6 +43,8 @@ pub struct ResultView {
     pub body: BodyState,
     /// When the response arrived (shown when comparing).
     pub at: chrono::DateTime<chrono::Local>,
+    /// How long the send took (shown when it failed).
+    pub took: Option<std::time::Duration>,
 }
 
 /// How much of the tab the response panel takes.
@@ -304,7 +306,7 @@ impl RequestTab {
             return;
         }
         // Only a send ends the send in progress (re-running tests is not one).
-        self.running = None;
+        let took = self.running.take().map(|r| r.started.elapsed());
         let had_tests = !exec.tests.is_empty();
         // The new body keeps how the last one was viewed (view, wrap, filter).
         let mut body = BodyState::default();
@@ -323,7 +325,7 @@ impl RequestTab {
             self.prev = Some(Box::new(crate::response_diff::Snapshot { resp, at: old.at }));
         }
         self.compare.reset();
-        self.result = Some(Box::new(ResultView { exec, body, at: chrono::Local::now() }));
+        self.result = Some(Box::new(ResultView { exec, body, at: chrono::Local::now(), took }));
         if self.resp_section == RespSection::Tests && !had_tests {
             self.resp_section = RespSection::Body;
         }
@@ -841,9 +843,10 @@ fn panes(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditC
         // gutter comes out of the response), as in the prototype.
         let area = ui.available_rect_before_wrap();
         let len = if side { area.width() } else { area.height() };
-        // Stacked, the divider's line is where the response's top border is.
-        let request = if side { tab.split * len } else { tab.split * len - size::GUTTER / 2.0 };
-        let default = (request / (len - size::GUTTER).max(1.0)).clamp(0.15, 0.85);
+        // Stacked, the divider is the response's 1 px top border.
+        let request = tab.split * len;
+        let divider = if side { size::GUTTER } else { 1.0 };
+        let default = (request / (len - divider).max(1.0)).clamp(0.15, 0.85);
         // Both panes edit the tab; they are drawn one after the other.
         let cell = RefCell::new((tab, item, actions, Rect::NOTHING));
         kit::panes(
@@ -880,15 +883,17 @@ fn panes(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditC
             )
         }
         (false, mode) => {
+            // The response's 1 px top border is the divider (dragged in a
+            // 9 px band around it).
             let a = if mode == PanelMode::Maximized {
                 size::ACTION_ROW + size::TABS
             } else {
-                (area.height() - size::ACTION_ROW - g).max(0.0)
+                (area.height() - size::ACTION_ROW - 1.0).max(0.0)
             };
             (
                 Some(Rect::from_min_size(area.min, vec2(area.width(), a))),
-                Some(Rect::from_min_size(pos2(area.left(), area.top() + a), vec2(area.width(), g))),
-                Rect::from_min_max(pos2(area.left(), area.top() + a + g), area.max),
+                Some(Rect::from_center_size(pos2(area.center().x, area.top() + a + 0.5), vec2(area.width(), g))),
+                Rect::from_min_max(pos2(area.left(), area.top() + a + 1.0), area.max),
             )
         }
     };
@@ -1167,7 +1172,8 @@ fn url_row(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &Edi
     kit::bar(ui, size::ACTION_ROW, true, |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if running {
-                let r = kit::action_button(ui, Kind::Secondary, icons::STOP, tr("Cancel"));
+                let opts = ButtonOpts { icon: Some(icons::STOP), ..Default::default() };
+                let r = kit::button(ui, Kind::Secondary, Size::Tall, tr("Cancel"), opts);
                 if r.on_hover_text(format!("{} (⌘↩)", tr("Cancel"))).clicked() {
                     actions.cancel = true;
                 }
@@ -1231,7 +1237,7 @@ fn url_bar(
             .layout(Layout::left_to_right(Align::Center)),
     );
     field.set_clip_rect(urect.intersect(ui.clip_rect()));
-    let r = widgets::var_cell(
+    let r = widgets::url_cell(
         &mut field,
         "url",
         &mut url,
@@ -1255,7 +1261,8 @@ fn url_bar(
         kit::fade(ui.painter(), fade, p.surface, true);
     }
     if focused {
-        kit::focus_ring(ui, rect, 9);
+        // `.urlbar.focus`: an accent border, no halo.
+        ui.painter().rect_stroke(rect, CornerRadius::same(9), Stroke::new(1.0, p.accent), StrokeKind::Inside);
     } else {
         ui.painter().rect_stroke(rect, CornerRadius::same(9), Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
     }
@@ -1316,12 +1323,15 @@ fn params_section(ui: &mut Ui, http: &mut HttpRequest, ectx: &EditCtx) {
             http.params = params;
             http.sync_url_from_params();
         }
-        ui.add_space(20.0);
-        let help = tr("Write :name in the URL path to add one; its value is filled in here.");
+        // 14 + 6 px under the table, and 8 under the title; 2 and 1 more for
+        // the prototype's line height (1.45) that egui's labels don't have.
+        ui.add_space(22.0);
+        let help =
+            kit::hint_code(ui, tr("Write {} in the URL path to add one; its value is filled in here."), &[":name"]);
         if http.path_vars.is_empty() {
             ui.label(kit::section_title(tr("Path variables")));
-            ui.add_space(8.0);
-            ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+            ui.add_space(9.0);
+            ui.add(egui::Label::new(help).wrap());
             return;
         }
         let mut vars = http.path_vars.clone();
@@ -1341,7 +1351,7 @@ fn params_section(ui: &mut Ui, http: &mut HttpRequest, ectx: &EditCtx) {
             http.path_vars = vars;
         }
         ui.add_space(8.0);
-        ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+        ui.add(egui::Label::new(help).wrap());
     });
 }
 
@@ -2510,17 +2520,8 @@ fn scripts_section(
     kit::bar_ex(ui, 24.0, 14.0, false, |ui| {
         let p = theme::pal(ui);
         ui.label(RichText::new(icons::INFO).font(theme::icon_font(13.0)).color(p.text_faint));
-        ui.add(
-            egui::Label::new(kit::hint(
-                ui,
-                &format!(
-                    "{} · {}",
-                    tr("JavaScript with the Postman-compatible pm API"),
-                    tr("type pm. for completions")
-                ),
-            ))
-            .truncate(),
-        );
+        let text = tr("JavaScript with the Postman-compatible {} API · type {} for completions");
+        ui.add(egui::Label::new(kit::hint_code(ui, text, &["pm", "pm."])).truncate());
     });
 }
 
@@ -3224,6 +3225,10 @@ fn status_row(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &mut A
                 Tone::Err,
                 PillOpts { large: true, icon: Some(icons::WARNING_CIRCLE), ..Default::default() },
             );
+            // How long it took to fail.
+            if let Some(took) = tab.result.as_ref().and_then(|r| r.took) {
+                kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(took.as_secs_f64() * 1000.0));
+            }
         } else if exec.is_some_and(|e| e.skipped) {
             kit::pill_ex(ui, tr("Skipped"), Tone::Neutral, PillOpts { large: true, ..Default::default() });
         } else {
@@ -3448,7 +3453,7 @@ fn response_content(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: 
         }
         RespSection::Body | RespSection::Headers | RespSection::Cookies if exec.response.is_none() => {
             if let Some(err) = &exec.error {
-                error_state(ui, err, actions);
+                error_state(ui, err, exec, actions);
             } else if exec.skipped {
                 center_v(ui, ui.make_persistent_id("resp-skipped"), |ui| {
                     empty_block(
@@ -3513,10 +3518,12 @@ fn center_v<R>(ui: &mut Ui, id: egui::Id, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
-/// An empty state (`.empty`): an icon in a 52 px soft square, a title, a
-/// line of explanation and actions, centered horizontally.
+/// An empty state (`.empty`): 24 px padding, an icon in a 52 px soft
+/// square, 14, a title, 6, a line of explanation, 16, actions, 24 px
+/// padding; text on 1.45 lines, centered horizontally.
 fn empty_block(ui: &mut Ui, icon: &str, spinning: bool, title: &str, body: &str, actions: impl FnOnce(&mut Ui)) {
     let p = theme::pal(ui);
+    ui.add_space(24.0);
     let (rect, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
     ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
     if spinning {
@@ -3525,30 +3532,36 @@ fn empty_block(ui: &mut Ui, icon: &str, spinning: bool, title: &str, body: &str,
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(24.0), p.text_muted);
     }
     ui.add_space(14.0);
-    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text).line_height(Some(14.0 * 1.45)));
     if !body.is_empty() {
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(320.0);
-            ui.add(egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap());
+            let text = RichText::new(body).size(12.5).color(p.text_muted).line_height(Some(12.5 * 1.45));
+            ui.add(egui::Label::new(text).halign(Align::Center).wrap());
         });
     }
-    // Actions are centered by measuring them on the previous frame.
+    // Actions are centered (and their 16 px gap kept only when there are
+    // some) by measuring them on the previous frame.
     let id = ui.make_persistent_id(("empty-actions", title));
-    let w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
-    ui.add_space(16.0);
+    let (w, h): (f32, f32) = ui.data(|d| d.get_temp(id).unwrap_or((0.0, 0.0)));
+    if h > 0.0 {
+        ui.add_space(16.0);
+    }
     let r = ui
-        .allocate_ui_with_layout(vec2(w.max(1.0), 30.0), Layout::left_to_right(Align::Center), |ui| {
+        .allocate_ui_with_layout(vec2(w.max(1.0), h), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            let start = ui.cursor().left();
+            let start = ui.min_rect().left_top();
             actions(ui);
-            ui.min_rect().right() - start
+            let used = ui.min_rect();
+            (used.right() - start.x, used.bottom() - start.y)
         })
         .inner;
-    if (r - w).abs() > 0.5 {
-        ui.data_mut(|d| d.insert_temp(id, r.max(0.0)));
+    if (r.0 - w).abs() > 0.5 || (r.1 - h).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, (r.0.max(0.0), r.1.max(0.0))));
         ui.ctx().request_repaint();
     }
+    ui.add_space(24.0);
 }
 
 /// Nothing sent yet: the shortcut and the last requests from History.
@@ -3572,12 +3585,12 @@ fn empty_response(ui: &mut Ui, ectx: &EditCtx, actions: &mut Actions) {
         if ectx.recent.is_empty() {
             return;
         }
-        // The empty state's 24 px padding, then 18.
-        ui.add_space(42.0);
+        // The column's 8 px gap, then 18.
+        ui.add_space(26.0);
         let w = (ui.available_width() * 0.8).min(360.0);
         ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.set_width(w);
-            ui.label(kit::eyebrow(ui, tr("Last sent from History")));
+            ui.label(kit::eyebrow(ui, tr("Last sent from History")).line_height(Some(10.5 * 1.45)));
             ui.add_space(6.0);
             for r in &ectx.recent {
                 let (row, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
@@ -3682,7 +3695,90 @@ fn error_kind_look(kind: ternarywire_http::error::HttpErrorKind) -> (&'static st
 
 /// The request could not be sent: a card with the cause, a checklist and
 /// the next steps.
-fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &mut Actions) {
+/// A piece of a line of the error card: text, code, a `{{variable}}` chip
+/// or a key cap.
+enum Seg<'a> {
+    Text(&'a str),
+    Mono(String),
+    Chip(String),
+    Kbd(&'a str),
+}
+
+/// `template` with `mid` in place of its `{}`.
+fn fill<'a>(template: &'a str, mid: Seg<'a>) -> Vec<Seg<'a>> {
+    let (before, after) = template.split_once("{}").unwrap_or((template, ""));
+    vec![Seg::Text(before), mid, Seg::Text(after)]
+}
+
+/// Lays `segs` out on 1.45 lines, `width` wide, and paints the chips and
+/// key caps behind their text.
+fn seg_line(ui: &mut Ui, segs: &[Seg<'_>], size: f32, color: Color32, width: f32) {
+    use egui::text::{LayoutJob, TextFormat};
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    let line = size * 1.45;
+    let fmt =
+        |font: egui::FontId, color: Color32| TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) };
+    let mut job = LayoutJob::default();
+    // (char range, None for a chip or the keys of a key cap) to paint after
+    // the layout.
+    let mut marks: Vec<(std::ops::Range<usize>, Option<&str>)> = Vec::new();
+    let mut at = 0usize;
+    let mut lead = 0.0;
+    for seg in segs {
+        let (text, format, mark, shift) = match seg {
+            Seg::Text(t) => (t.to_string(), fmt(egui::FontId::proportional(size), color), None, 0.0),
+            Seg::Mono(t) => (t.clone(), fmt(theme::mono(size), color), None, 0.0),
+            Seg::Chip(t) => {
+                (t.clone(), fmt(egui::FontId::proportional(size), theme::var_defined(dark)), Some(None), 2.0)
+            }
+            Seg::Kbd(t) => {
+                (t.to_string(), fmt(egui::FontId::proportional(10.5), Color32::TRANSPARENT), Some(Some(*t)), 6.0)
+            }
+        };
+        let n = text.chars().count();
+        job.append(&text, lead + shift, format);
+        if let Some(chip) = mark {
+            marks.push((at..at + n, chip));
+        }
+        lead = shift;
+        at += n;
+    }
+    job.wrap.max_width = width;
+    let galley = ui.painter().layout_job(job);
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let r = ui.add(egui::Label::new(galley.clone()).selectable(false));
+    let mut shapes = Vec::new();
+    for (range, keys) in marks {
+        let a = galley.pos_from_cursor(egui::text::CCursor::new(range.start)).translate(r.rect.min.to_vec2());
+        let b = galley.pos_from_cursor(egui::text::CCursor::new(range.end)).translate(r.rect.min.to_vec2());
+        if let Some(keys) = keys {
+            let right = if range.end < at { b.left() - 6.0 } else { b.left() };
+            let rect = Rect::from_x_y_ranges(a.left() - 6.0..=right + 6.0, a.center().y - 9.0..=a.center().y + 9.0);
+            kit::paint_kbd(ui, rect, keys);
+        } else {
+            let right = if range.end < at { b.left() - 2.0 } else { b.left() };
+            let rect = Rect::from_x_y_ranges(a.left() - 3.0..=right + 3.0, a.top()..=a.top() + line);
+            shapes.push(egui::Shape::rect_filled(rect, CornerRadius::same(4), p.var_ok_bg));
+        }
+    }
+    ui.painter().set(slot, egui::Shape::Vec(shapes));
+}
+
+/// The design's lines for a refused connection: where nothing listens,
+/// the URL's first variable to check, and the environment switch.
+fn refused_lines(exec: &Execution) -> Option<(String, Option<String>)> {
+    let prepared = exec.prepared.as_ref()?;
+    let url = url::Url::parse(&prepared.url).ok()?;
+    let host = format!("{}:{}", url.host_str()?, url.port_or_known_default()?);
+    let var = exec.request.as_ref().and_then(|r| {
+        let rest = r.url.strip_prefix("{{")?;
+        rest.find("}}").map(|i| format!("{{{{{}}}}}", &rest[..i]))
+    });
+    Some((host, var))
+}
+
+fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, exec: &Execution, actions: &mut Actions) {
     let p = theme::pal(ui);
     let detail_id = ui.make_persistent_id("err-detail");
     let mut show_detail: bool = ui.data(|d| d.get_temp(detail_id).unwrap_or(false));
@@ -3696,6 +3792,11 @@ fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let (icon, category) = error_kind_look(err.kind);
+                    let refused = if err.kind == ternarywire_http::error::HttpErrorKind::ConnectionRefused {
+                        refused_lines(exec)
+                    } else {
+                        None
+                    };
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
                         let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
@@ -3707,24 +3808,68 @@ fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &
                                 ui.label(
                                     RichText::new(tr("Could not send request"))
                                         .font(theme::semibold(14.0))
-                                        .color(p.text),
+                                        .color(p.text)
+                                        .line_height(Some(14.0 * 1.45)),
                                 );
                                 kit::tone_pill(ui, category, Tone::Err);
                             });
-                            ui.add(egui::Label::new(RichText::new(&err.message).size(13.0).color(p.text_muted)).wrap());
+                            let w = ui.available_width();
+                            match &refused {
+                                Some((host, _)) => {
+                                    let segs = fill(
+                                        tr("Nothing is listening on {} — the connection was refused."),
+                                        Seg::Mono(host.clone()),
+                                    );
+                                    seg_line(ui, &segs, 13.0, p.text_muted, w);
+                                }
+                                None => {
+                                    let text = RichText::new(&err.message)
+                                        .size(13.0)
+                                        .color(p.text_muted)
+                                        .line_height(Some(13.0 * 1.45));
+                                    ui.add(egui::Label::new(text).wrap());
+                                }
+                            }
                         });
                     });
-                    let lines = error_checklist(err.kind);
+                    // The checklist: 12.5 px lines, a faint check 8 px before each.
+                    let mut lines: Vec<Vec<Seg<'_>>> =
+                        error_checklist(err.kind).into_iter().map(|l| vec![Seg::Text(l)]).collect();
+                    if let Some((_, var)) = &refused {
+                        let check = match var {
+                            Some(v) => fill(
+                                tr("Is the server running? Start it, or check the port in {}."),
+                                Seg::Chip(v.clone()),
+                            ),
+                            None => {
+                                vec![Seg::Text(tr("Is the server running? Start it, or check the port in the URL."))]
+                            }
+                        };
+                        lines = vec![
+                            check,
+                            vec![Seg::Text(tr("Using a proxy? Check Settings › Proxy."))],
+                            fill(tr("Switch environment with {} if this should go to another server."), Seg::Kbd("⌘E")),
+                        ];
+                    }
                     if !lines.is_empty() {
                         ui.add_space(14.0);
                         for (i, line) in lines.iter().enumerate() {
                             if i > 0 {
                                 ui.add_space(6.0);
                             }
-                            ui.horizontal_top(|ui| {
+                            // The check centers on its item (`.row`).
+                            ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.label(RichText::new(icons::CHECK).font(theme::icon_font(13.0)).color(p.text_faint));
-                                ui.add(egui::Label::new(RichText::new(*line).size(12.5).color(p.text)).wrap());
+                                let (r, _) = ui.allocate_exact_size(vec2(12.5, 12.5 * 1.45), Sense::hover());
+                                ui.painter().text(
+                                    r.center(),
+                                    Align2::CENTER_CENTER,
+                                    icons::CHECK,
+                                    theme::icon_font(12.5),
+                                    p.text_faint,
+                                );
+                                let w = ui.available_width();
+                                seg_line(ui, line, 12.5, p.text, w);
                             });
                         }
                     }
@@ -4027,7 +4172,7 @@ fn tests_view(
             let pass = format!("{} {passed}", tr("Passed"));
             let fail = format!("{} {failed}", tr("Failed"));
             let skip = format!("{} {skipped}", tr("Skipped"));
-            ui.horizontal(|ui| {
+            hrow(ui, 26.0, |ui| {
                 kit::segmented_sm(
                     ui,
                     filter,
@@ -4102,11 +4247,12 @@ fn test_list_ex(ui: &mut Ui, tests: &[&TestResult], add_row: bool) -> bool {
             if resp.hovered() {
                 ui.painter().rect_filled(rect.shrink(1.0), CornerRadius::same(8), p.well);
             }
+            // Icon 13, 8 before the hint (12): the prototype's `.row`.
             ui.painter().text(
-                pos2(rect.left() + 12.0 + 7.0, rect.center().y),
+                pos2(rect.left() + 12.0 + 6.5, rect.center().y),
                 Align2::CENTER_CENTER,
                 icons::PLUS,
-                theme::icon_font(14.0),
+                theme::icon_font(13.0),
                 p.text_faint,
             );
             let g = elide(
@@ -4114,9 +4260,9 @@ fn test_list_ex(ui: &mut Ui, tests: &[&TestResult], add_row: bool) -> bool {
                 tr("Add tests in Scripts › Post-response, or right-click a value in the body."),
                 egui::FontId::proportional(12.0),
                 p.text_muted,
-                width - 50.0,
+                width - 33.0 - 12.0,
             );
-            ui.painter().galley(pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+            ui.painter().galley(pos2(rect.left() + 33.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
             clicked = resp.clicked();
         }
     });
@@ -4137,9 +4283,10 @@ fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
         (icons::X_CIRCLE, Tone::Err, tr("FAIL"))
     };
     let (color, _) = p.tone(tone);
-    let text_x = 12.0 + 16.0 + 8.0;
+    // Icon 13, 8 before the name (13), as the prototype's test row.
+    let text_x = 12.0 + 13.0 + 8.0;
     let text_w = (width - text_x - 70.0).max(60.0);
-    let name = ui.painter().layout(t.name.clone(), egui::FontId::proportional(12.5), p.text, text_w);
+    let name = ui.painter().layout(t.name.clone(), egui::FontId::proportional(13.0), p.text, text_w);
     let err = t
         .error
         .as_ref()
@@ -4154,10 +4301,10 @@ fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
     let first_line = if err.is_none() { rect.center().y } else { rect.top() + pad + name.size().y / 2.0 };
     let name_top = if err.is_none() { rect.center().y - name.size().y / 2.0 } else { rect.top() + pad };
     ui.painter().text(
-        pos2(rect.left() + 12.0 + 8.0, first_line),
+        pos2(rect.left() + 12.0 + 6.5, first_line),
         Align2::CENTER_CENTER,
         icon,
-        theme::icon_font(16.0),
+        theme::icon_font(13.0),
         color,
     );
     ui.painter().galley(pos2(rect.left() + text_x, name_top), name.clone(), p.text);
@@ -4183,13 +4330,7 @@ fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
 
 /// Milliseconds with a precision that fits their size.
 pub(crate) fn fmt_ms(ms: f64) -> String {
-    if ms < 1.0 {
-        format!("{ms:.2} ms")
-    } else if ms < 10.0 {
-        format!("{ms:.1} ms")
-    } else {
-        ternarywire_core::util::human_ms(ms)
-    }
+    if ms < 10.0 { format!("{ms:.1} ms") } else { ternarywire_core::util::human_ms(ms) }
 }
 
 /// A label/value line of a details card (min 28 high, label 120 wide).
@@ -4218,6 +4359,66 @@ fn titled_card(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui), add: impl 
     });
 }
 
+/// The warning that variables were sent as typed: a warn banner with the
+/// names as red `{{variable}}` chips (the prototype's `.var.bad`).
+fn undefined_vars_banner(ui: &mut Ui, names: &[String]) {
+    use egui::text::{LayoutJob, TextFormat};
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(Tone::Warn);
+    let template = if names.len() == 1 {
+        tr("Undefined variable {} was sent as typed. Define it in Local or the collection.")
+    } else {
+        tr("Undefined variables {} were sent as typed. Define them in Local or the collection.")
+    };
+    let (before, after) = template.split_once("{}").unwrap_or((template, ""));
+    let line = 12.5 * 1.45;
+    let text = TextFormat { line_height: Some(line), ..TextFormat::simple(egui::FontId::proportional(12.5), fg) };
+    let chip = TextFormat { color: theme::var_undefined(ui.visuals().dark_mode), ..text.clone() };
+    egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 9)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(icons::WARNING).font(theme::icon_font(16.0)).color(fg));
+                // The chips' 3 px padding less their -1 px margin moves the text.
+                let mut job = LayoutJob::default();
+                let mut chars = Vec::new();
+                job.append(before, 0.0, text.clone());
+                let mut at = before.chars().count();
+                for (i, n) in names.iter().enumerate() {
+                    if i > 0 {
+                        job.append(", ", 2.0, text.clone());
+                        at += 2;
+                    }
+                    let name = format!("{{{{{n}}}}}");
+                    let len = name.chars().count();
+                    job.append(&name, 2.0, chip.clone());
+                    chars.push(at..at + len);
+                    at += len;
+                }
+                job.append(after, 2.0, text.clone());
+                job.wrap.max_width = ui.available_width();
+                let galley = ui.painter().layout_job(job);
+                let slot = ui.painter().add(egui::Shape::Noop);
+                let r = ui.add(egui::Label::new(galley.clone()).selectable(false));
+                let chips = chars
+                    .iter()
+                    .map(|c| {
+                        let a = galley.pos_from_cursor(egui::text::CCursor::new(c.start));
+                        let b = galley.pos_from_cursor(egui::text::CCursor::new(c.end));
+                        let right = if c.end < at { b.left() - 2.0 } else { b.left() };
+                        let rect = Rect::from_x_y_ranges(a.left() - 3.0..=right + 3.0, a.top()..=a.top() + line)
+                            .translate(r.rect.min.to_vec2());
+                        egui::Shape::rect_filled(rect, CornerRadius::same(4), p.var_bad_bg)
+                    })
+                    .collect();
+                ui.painter().set(slot, egui::Shape::Vec(chips));
+            });
+        },
+    );
+}
+
 fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
@@ -4225,13 +4426,7 @@ fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
         ui.spacing_mut().item_spacing.y = 12.0;
         ui.add_space(4.0);
         if !exec.unresolved.is_empty() {
-            let names = exec.unresolved.iter().map(|n| format!("{{{{{n}}}}}")).collect::<Vec<_>>().join(", ");
-            let text = if exec.unresolved.len() == 1 {
-                trf("Undefined variable {} was sent as typed. Define it in Local or the collection.", &[&names])
-            } else {
-                trf("Undefined variables {} were sent as typed. Define them in Local or the collection.", &[&names])
-            };
-            kit::banner(ui, Tone::Warn, icons::WARNING, &text);
+            undefined_vars_banner(ui, &exec.unresolved);
         }
         if let Some(resp) = &exec.response {
             let total = resp.timings.total_ms.max(resp.timings.ttfb_ms);
@@ -4239,7 +4434,8 @@ fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
                 ui,
                 tr("Timing"),
                 |ui| {
-                    ui.label(RichText::new(fmt_ms(total)).font(theme::semibold(12.5)).color(p.text));
+                    // `.mono.semi`: the mono font (it has no bold).
+                    ui.label(RichText::new(fmt_ms(total)).font(theme::mono(12.5)).color(p.text));
                 },
                 |ui| {
                     ui.add_space(12.0);

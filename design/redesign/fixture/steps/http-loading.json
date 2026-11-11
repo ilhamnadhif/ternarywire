@@ -4,6 +4,7 @@
   {"theme": "@THEME"},
   {"expand": "Bookstore API"},
   {"expand": "Realtime & AI"},
+  {"collapse": "Bookstore API/Orders"},
   {"open": "List books"},
   {"send": true},
   {"wait_ms": 900},

@@ -45,7 +45,7 @@ impl Lang {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Text,
     Key,
@@ -178,6 +178,23 @@ const JS_KEYWORDS: &[&str] = &[
     "with",
     "yield",
 ];
+/// A GraphQL word as the prototype colors it: `$variables` and names
+/// called with `(` as keys, keywords (unless an argument or field named
+/// like one, followed by `:`), capitalized type names as tags, the rest
+/// plain. `rest` is the text after the word.
+fn gql_word(word: &str, rest: &str) -> Kind {
+    let next = rest.trim_start().chars().next();
+    if word.starts_with('$') || next == Some('(') {
+        Kind::Key
+    } else if GQL_KEYWORDS.contains(&word) && next != Some(':') {
+        Kind::Keyword
+    } else if word.starts_with(|c: char| c.is_ascii_uppercase()) {
+        Kind::Tag
+    } else {
+        Kind::Text
+    }
+}
+
 const GQL_KEYWORDS: &[&str] = &[
     "query",
     "mutation",
@@ -390,13 +407,17 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                         i += 1;
                     }
                     let word = &text[start..i];
+                    if lang == Lang::GraphQl {
+                        push(start, gql_word(word, &text[i..]));
+                        continue;
+                    }
                     let kw = match lang {
                         Lang::Json => matches!(word, "true" | "false" | "null"),
                         Lang::JavaScript => JS_KEYWORDS.contains(&word),
-                        Lang::GraphQl => GQL_KEYWORDS.contains(&word) || word.starts_with('$'),
                         _ => false,
                     };
-                    let is_pm = lang == Lang::JavaScript && word == "pm";
+                    // The script globals read as keys, like the prototype's editor.
+                    let is_pm = lang == Lang::JavaScript && matches!(word, "pm" | "tw" | "console" | "JSON");
                     push(
                         start,
                         if kw {
@@ -830,6 +851,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn graphql_words_as_the_prototype_colors_them() {
+        assert_eq!(gql_word("query", " Search($q: String!)"), Kind::Keyword);
+        assert_eq!(gql_word("Search", "($q: String!)"), Kind::Key);
+        assert_eq!(gql_word("$q", ": String!"), Kind::Key);
+        assert_eq!(gql_word("String", "!, $first: Int"), Kind::Tag);
+        assert_eq!(gql_word("search", "(query: $q)"), Kind::Key);
+        assert_eq!(gql_word("query", ": $q, first: $first"), Kind::Text);
+        assert_eq!(gql_word("totalCount", "\n"), Kind::Text);
     }
 
     #[test]
