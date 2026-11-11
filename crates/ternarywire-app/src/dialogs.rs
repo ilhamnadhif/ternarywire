@@ -75,9 +75,10 @@ pub fn tab_title(tab: &Tab, ws: &WsState) -> (String, Option<String>, bool) {
             (ws.data.collection(&r.collection).map(|c| c.name.clone()).unwrap_or_default(), None, false)
         }
         TabKind::Spec(t) => (t.title(), None, t.dirty()),
-        TabKind::Capture(c) => (format!("{}{}", tr("Capture"), if c.is_running() { " ●" } else { "" }), None, false),
+        // The prototype's tab names; whether they run shows in the sidebar and rail.
+        TabKind::Capture(_) => (tr("Capture traffic").to_string(), None, false),
         TabKind::Flow(f) => (f.flow.name.clone(), None, f.dirty()),
-        TabKind::Webhook(w) => (format!("Webhook{}", if w.is_running() { " ●" } else { "" }), None, false),
+        TabKind::Webhook(_) => (tr("Webhook listener").to_string(), None, false),
         other @ (TabKind::Mqtt(_) | TabKind::Grpc(_) | TabKind::SocketIo(_) | TabKind::Mcp(_) | TabKind::Ai(_)) => {
             match (other.location(), other.scratch()) {
                 (Some(r), _) => lookup(r).map(|(n, b)| (n, Some(b), false)).unwrap_or_else(deleted),

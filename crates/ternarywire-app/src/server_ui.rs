@@ -589,11 +589,19 @@ pub fn num_input(
 /// is too narrow (like the wrapping row of the design).
 pub fn check_line(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let p = theme::pal(ui);
-    let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(13.0), p.text);
+    let mut g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(13.0), p.text);
     let wide = 15.0 + 8.0 + g.size().x <= ui.available_width();
-    // Wrapped: the box, 8 apart, then the label on a 13 × 1.45 line.
+    // Wrapped: the box, 8 apart, then the label on 13 × 1.45 lines.
     let line_h = 13.0 * 1.45;
-    let size = if wide { vec2(15.0 + 8.0 + g.size().x, 26.0) } else { vec2(ui.available_width(), 15.0 + 8.0 + line_h) };
+    if !wide {
+        let format =
+            egui::TextFormat { line_height: Some(line_h), ..TextFormat::simple(FontId::proportional(13.0), p.text) };
+        let mut job = LayoutJob::single_section(label.to_string(), format);
+        job.wrap.max_width = ui.available_width();
+        g = ui.painter().layout_job(job);
+    }
+    let size =
+        if wide { vec2(15.0 + 8.0 + g.size().x, 26.0) } else { vec2(ui.available_width(), 15.0 + 8.0 + g.size().y) };
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -611,7 +619,7 @@ pub fn check_line(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let pos = if wide {
         pos2(b.right() + 8.0, b.center().y - g.size().y / 2.0)
     } else {
-        pos2(rect.left(), rect.top() + 15.0 + 8.0 + (line_h - g.size().y) / 2.0)
+        pos2(rect.left(), rect.top() + 15.0 + 8.0)
     };
     ui.painter().galley(pos, g, p.text);
     if resp.has_focus() {
@@ -707,7 +715,8 @@ pub fn list_head(ui: &mut Ui, cols: &[Col], labels: &[&str], right: &[usize], ch
         if i == 0
             && let Some((on, mixed)) = check
         {
-            let b = Rect::from_min_size(pos2(r.left(), r.center().y - 7.5), vec2(15.0, 15.0));
+            // The prototype's inline checkbox sits on the text baseline: 7.75 from the top.
+            let b = Rect::from_min_size(pos2(r.left(), rect.top() + 7.75), vec2(15.0, 15.0));
             let c =
                 ui.interact(b.expand(4.0), ui.make_persistent_id(("head-check", rect.top() as i32)), Sense::click());
             c.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, on, tr("Select all")));
@@ -779,7 +788,8 @@ pub fn list_row(
     if let Some(on) = check
         && let Some(i) = cells.iter().position(|c| matches!(c, Cell::Check))
     {
-        let b = Rect::from_min_size(pos2(rects[i].left(), rects[i].center().y - 7.5), vec2(15.0, 15.0));
+        // The prototype's inline checkbox sits on the text baseline: 6.5 from the top.
+        let b = Rect::from_min_size(pos2(rects[i].left(), rect.top() + 6.5), vec2(15.0, 15.0));
         let c = ui.interact(b.expand(4.0), resp.id.with("check"), Sense::click());
         let value = *on;
         c.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, value, tr("Select")));
@@ -986,10 +996,11 @@ pub fn list_scroll(
 pub fn panes(ui: &mut Ui, id: Id, left_share: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
     let (w, h) = (ui.available_width(), ui.available_height());
     let side = w >= 760.0;
-    let g = kit::size::GUTTER;
+    // A 9 px gutter side by side, a 1 px border stacked.
+    let g = if side { kit::size::GUTTER } else { 1.0 };
     // The design sizes the list as a share of the whole width.
     let default = if side { left_share * w / (w - g).max(1.0) } else { 0.44 * h / (h - g).max(1.0) };
-    kit::panes(ui, id, side, default.clamp(0.15, 0.85), left, right);
+    kit::panes_ex(ui, id, side, default.clamp(0.15, 0.85), true, left, right);
 }
 
 /// The 36 px title of a list pane: name, count pill, actions on the right
@@ -1072,9 +1083,13 @@ pub fn metric(ui: &mut Ui, icon: Option<&str>, text: &str, tip: Option<&str>) ->
 
 /// Metrics 4 apart.
 pub fn metrics(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        add(ui);
+    ui.scope(|ui| {
+        // As high as a metric, so it centers with its neighbours in any row.
+        ui.spacing_mut().interact_size.y = 22.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            add(ui);
+        });
     });
 }
 

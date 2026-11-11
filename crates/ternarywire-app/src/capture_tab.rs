@@ -90,7 +90,8 @@ pub struct CaptureTab {
     /// Automation: start on the next frame.
     pub auto_start: bool,
     /// Automation: `start`, `stop`, `settings`, `cert`, `select[:n]` (the
-    /// newest request, or the n-th row from the top).
+    /// newest request, or the n-th row from the top), `tick:<n>,<n>…` (tick
+    /// those rows for Save to collection).
     pub auto: Option<String>,
 }
 
@@ -240,6 +241,14 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Captur
             tab.options_open[i] = !tab.options_open[i];
         }
         Some("cert") => tab.show_ca = !tab.show_ca,
+        Some(a) if a.starts_with("tick:") => {
+            let entries = tab.proxy.as_ref().map(|p| p.entries()).unwrap_or_default();
+            for n in a[5..].split(',').filter_map(|n| n.trim().parse::<usize>().ok()) {
+                if let Some(e) = entries.get(n) {
+                    tab.checked.insert(e.id);
+                }
+            }
+        }
         Some(a) if a.starts_with("select") => {
             let entries = tab.proxy.as_ref().map(|p| p.entries()).unwrap_or_default();
             match a.strip_prefix("select:").and_then(|n| n.parse::<usize>().ok()) {
@@ -592,7 +601,9 @@ fn ca_panel(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Captur
         })
         .response
         .rect;
-    ui.painter().hline(r.x_range(), r.bottom() - 0.5, egui::Stroke::new(1.0, p.border));
+    // The panel's bottom border, under its padding.
+    ui.painter().hline(r.x_range(), r.bottom() + 0.5, egui::Stroke::new(1.0, p.border));
+    ui.add_space(1.0);
     if close {
         tab.show_ca = false;
     }
@@ -645,7 +656,7 @@ fn cert_facts(ui: &mut Ui, ca: &CertificateAuthority) {
         let fp = ca.fingerprint_sha256();
         sv::hrow(ui, 22.0, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            cert_label(ui, "SHA-256");
+            cert_label(ui, "SHA-256", 22.0);
             ui.spacing_mut().item_spacing.x = 4.0;
             let g = kit::elide(ui, &fp, theme::mono(11.5), p.text, ui.available_width() - 26.0);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(g.size().x, 22.0), egui::Sense::hover());
@@ -655,9 +666,10 @@ fn cert_facts(ui: &mut Ui, ca: &CertificateAuthority) {
                 ui.ctx().copy_text(fp.clone());
             }
         });
-        sv::hrow(ui, 18.0, |ui| {
+        // 12.5 px text on the body's 1.45 line height.
+        sv::hrow(ui, 12.5 * 1.45, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            cert_label(ui, tr("Valid until"));
+            cert_label(ui, tr("Valid until"), 12.5 * 1.45);
             let date = ca.not_after().format("%-d %b %Y").to_string();
             ui.label(RichText::new(date).size(12.5).color(p.text));
         });
@@ -667,19 +679,29 @@ fn cert_facts(ui: &mut Ui, ca: &CertificateAuthority) {
 /// Save certificate…, Check again and the hints. Returns (save, check again).
 fn cert_actions(ui: &mut Ui) -> (bool, bool) {
     let p = theme::pal(ui);
+    let hint = tr("Saving also copies the steps to trust it to the clipboard.");
+    let hint_w = ui.painter().layout_no_wrap(hint.into(), egui::FontId::proportional(12.0), p.text_muted).size().x;
+    let mut wrap = false;
     let clicked = sv::hrow(ui, 24.0, |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let label = format!("{}…", tr("Save certificate"));
         let save = kit::button_ex(ui, kit::Kind::Secondary, Some(icons::DOWNLOAD_SIMPLE), &label, true).clicked();
         let check = kit::ghost(ui, Some(icons::ARROWS_CLOCKWISE), tr("Check again")).clicked();
-        ui.add(
-            egui::Label::new(kit::hint(ui, tr("Saving also copies the steps to trust it to the clipboard.")))
-                .truncate(),
-        );
+        // Like the prototype's wrapping row: the hint moves under the buttons.
+        wrap = hint_w > ui.available_width();
+        if !wrap {
+            ui.label(kit::hint(ui, hint));
+        }
         (save, check)
     });
+    if wrap {
+        ui.add_space(-2.0);
+        sv::hrow(ui, 12.0 * 1.45, |ui| {
+            ui.add(egui::Label::new(kit::hint(ui, hint)).truncate());
+        });
+    }
     let text = tr("Devices on the network can also download it from http://ternarywire.proxy/ through the proxy.");
-    sv::hrow(ui, 18.0, |ui| {
+    sv::hrow(ui, 12.0 * 1.45, |ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new(icons::INFO).font(theme::icon_font(12.0)).color(p.text_faint));
         ui.add(egui::Label::new(code_in_text(text, "http://ternarywire.proxy/", &p)).wrap());
@@ -687,10 +709,11 @@ fn cert_actions(ui: &mut Ui) -> (bool, bool) {
     clicked
 }
 
-/// A muted label in the 96 px first column of the certificate card.
-fn cert_label(ui: &mut Ui, text: &str) {
+/// A muted label in the 96 px first column of the certificate card (and
+/// the 12 px gap after it), `height` high.
+fn cert_label(ui: &mut Ui, text: &str, height: f32) {
     let p = theme::pal(ui);
-    ui.allocate_ui_with_layout(egui::vec2(108.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
+    ui.allocate_ui_with_layout(egui::vec2(108.0, height), Layout::left_to_right(Align::Center), |ui| {
         ui.set_width(108.0);
         ui.label(RichText::new(text).size(12.5).color(p.text_muted));
     });

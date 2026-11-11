@@ -51,7 +51,8 @@ pub struct MockTab {
     selected_route: usize,
     settings_open: bool,
     /// Automation: `start`, `stop`, `routes`, `logs`, `settings`, `port:<n>`,
-    /// `select[:n]` (n-th row from the top), `hit:<METHOD> <path> [body]`.
+    /// `select[:n]` (n-th row from the top), `route:<request name>`,
+    /// `hit:<METHOD> <path> [body]`.
     pub auto: Option<String>,
 }
 
@@ -227,6 +228,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
     let mut do_stop = false;
     let mut clear_logs = false;
     let mut select_row: Option<usize> = None;
+    let mut select_route: Option<String> = None;
     match tab.auto.take().as_deref() {
         Some("start") => do_start = true,
         Some("stop") => do_stop = true,
@@ -238,6 +240,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
                 tab.port = p;
             }
         }
+        Some(a) if a.starts_with("route:") => select_route = Some(a[6..].to_string()),
         Some(a) if a.starts_with("select") => {
             select_row = Some(a.strip_prefix("select:").and_then(|n| n.parse().ok()).unwrap_or(0));
         }
@@ -326,6 +329,12 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
         None => ternarywire_mock::routes(&collection),
     };
     let logs = tab.server.as_ref().map(|s| s.logs()).unwrap_or_default();
+    if let Some(name) = select_route
+        && let Some(i) = routes.iter().position(|r| r.request_name == name)
+    {
+        tab.selected_route = i;
+        tab.sub = Sub::Routes;
+    }
     if let Some(n) = select_row {
         // Rows are newest first.
         if let Some(i) = logs.len().checked_sub(n + 1) {
