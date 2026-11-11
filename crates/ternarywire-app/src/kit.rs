@@ -142,12 +142,21 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
                 StrokeKind::Outside,
             );
         }
-        let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+        // A disabled button fades as one image (`opacity: .45`): egui fades
+        // its fill and border, while the label is mixed with what is behind
+        // the button instead of drawn see-through over the faded fill, which
+        // would wash it out.
+        let mut label_painter = painter.clone();
+        let alpha = ui.visuals().disabled_alpha();
+        if !enabled {
+            label_painter.set_opacity((painter.opacity() / alpha.max(0.01)).min(1.0));
+        }
+        let fade = |c: Color32| if enabled { c } else { p.surface.lerp_to_gamma(c, alpha) };
         // Icons and the caret take the color of the label (`.btn .i`).
         let icon_color = text_color;
         let mut x = rect.center().x - content_w / 2.0 + (pad_l - pad_r) / 2.0;
         let put = |g: std::sync::Arc<egui::Galley>, color: Color32, x: &mut f32| {
-            painter.galley(pos2(*x, rect.center().y - g.size().y / 2.0), g.clone(), fade(color));
+            label_painter.galley(pos2(*x, rect.center().y - g.size().y / 2.0), g.clone(), fade(color));
             *x += g.size().x + gap;
         };
         if let Some(g) = icon_galley {
@@ -984,7 +993,7 @@ fn search_field_ex(
     let font = if small { 12.0 } else { 12.5 };
     let edit = egui::TextEdit::singleline(text)
         .id_salt(id)
-        .hint_text(RichText::new(hint_text).color(p.text_faint))
+        .hint_text(RichText::new(hint_text).size(font))
         .font(FontId::proportional(font))
         .desired_width(width)
         .min_size(vec2(0.0, h))
@@ -1200,24 +1209,48 @@ impl GroupRows {
         let p = theme::pal(ui);
         self.separator(ui);
         ui.add_space(11.0);
-        let out = ui
-            .horizontal(|ui| {
-                let w = ui.available_width();
-                let label_w = (w * 0.55).max(120.0);
-                ui.allocate_ui_with_layout(vec2(label_w, 0.0), Layout::top_down(Align::Min), |ui| {
-                    ui.set_width(label_w);
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(
-                        RichText::new(label).font(theme::medium(13.0)).color(p.text).line_height(Some(13.0 * 1.45)),
-                    );
-                    if !help.is_empty() {
-                        let help = RichText::new(help).size(12.0).color(p.text_muted).line_height(Some(12.0 * 1.45));
-                        ui.add(egui::Label::new(help).wrap());
-                    }
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| add(ui)).inner
+        // Label and control center on each other (`.frow`: align-items
+        // center) in a row as tall as the taller one: both heights are
+        // measured on the previous frame. (A row as tall as egui's
+        // interact size would push a shorter label column down.)
+        let id = ui.scope_id().with(("kit-group-row", label));
+        let (label_h, control_h): (f32, f32) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        let interact = ui.spacing().interact_size.y;
+        let (out, heights) = ui
+            .scope(|ui| {
+                ui.spacing_mut().interact_size.y = label_h.max(control_h);
+                ui.horizontal(|ui| {
+                    let w = ui.available_width();
+                    let label_w = (w * 0.55).max(120.0);
+                    let col = ui.allocate_ui_with_layout(vec2(label_w, label_h), Layout::top_down(Align::Min), |ui| {
+                        ui.set_width(label_w);
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        // Line boxes of 1.45 as in the prototype.
+                        ui.label(
+                            RichText::new(label).font(theme::medium(13.0)).color(p.text).line_height(Some(13.0 * 1.45)),
+                        );
+                        if !help.is_empty() {
+                            let help =
+                                RichText::new(help).size(12.0).color(p.text_muted).line_height(Some(12.0 * 1.45));
+                            ui.add(egui::Label::new(help).wrap());
+                        }
+                        ui.min_rect().height()
+                    });
+                    let control = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().interact_size.y = interact;
+                        let r = add(ui);
+                        (r, ui.min_rect().height())
+                    });
+                    let (r, h) = control.inner;
+                    (r, (col.inner, h))
+                })
+                .inner
             })
             .inner;
+        if heights != (label_h, control_h) {
+            ui.data_mut(|d| d.insert_temp(id, heights));
+            ui.ctx().request_discard("kit::group row height");
+        }
         ui.add_space(11.0);
         out
     }

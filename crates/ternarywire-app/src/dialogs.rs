@@ -141,6 +141,7 @@ pub struct Modal {
     icon: Option<&'static str>,
     sticky: bool,
     center: bool,
+    mono_subtitle: bool,
 }
 
 /// Where the open dialog's content may go: its top and the lowest point
@@ -156,7 +157,7 @@ fn geometry_id() -> egui::Id {
 
 impl Modal {
     pub fn new(id: &'static str, width: f32) -> Modal {
-        Modal { id, width, title: None, subtitle: None, icon: None, sticky: false, center: false }
+        Modal { id, width, title: None, subtitle: None, icon: None, sticky: false, center: false, mono_subtitle: false }
     }
 
     /// Title row with a close button. Dialogs without one draw their own top.
@@ -168,6 +169,12 @@ impl Modal {
     /// Muted line under the title.
     pub fn subtitle(mut self, subtitle: impl Into<String>) -> Modal {
         self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// The subtitle is code (a JSON path): mono 12.5.
+    pub fn mono_subtitle(mut self) -> Modal {
+        self.mono_subtitle = true;
         self
     }
 
@@ -228,7 +235,8 @@ impl Modal {
                 let top = ui.cursor().top();
                 ui.data_mut(|d| d.insert_temp(geometry_id(), Geometry { bottom: top + max_h - 2.0 }));
                 if let Some(title) = &self.title {
-                    close = header(ui, title, self.subtitle.as_deref(), self.icon);
+                    let sub_font = if self.mono_subtitle { theme::mono(12.5) } else { FontId::proportional(12.0) };
+                    close = header(ui, title, self.subtitle.as_deref().map(|s| (s, sub_font)), self.icon);
                 }
                 add(ui)
             });
@@ -287,11 +295,11 @@ pub(crate) fn code_text(ui: &Ui, template: &str, code: &[&str], size: f32, color
 
 /// Title row: a 30 px icon tile, the title (15 semibold) with its muted
 /// subtitle, and the close button. Returns true when it was pressed.
-fn header(ui: &mut Ui, title: &str, subtitle: Option<&str>, icon: Option<&str>) -> bool {
+fn header(ui: &mut Ui, title: &str, subtitle: Option<(&str, FontId)>, icon: Option<&str>) -> bool {
     let p = theme::pal(ui);
     let w = ui.available_width();
     let (title_h, sub_h) = ((15.0f32 * 1.45).round(), (12.0f32 * 1.45).round());
-    let text_h = title_h + subtitle.map_or(0.0, |_| 2.0 + sub_h);
+    let text_h = title_h + subtitle.as_ref().map_or(0.0, |_| 2.0 + sub_h);
     let (rect, _) = ui.allocate_exact_size(vec2(w, 16.0 + text_h.max(30.0) + 12.0), Sense::hover());
     let inner = Rect::from_min_max(rect.min + vec2(PAD, 16.0), rect.max - vec2(PAD, 12.0));
     let cy = inner.center().y;
@@ -307,8 +315,8 @@ fn header(ui: &mut Ui, title: &str, subtitle: Option<&str>, icon: Option<&str>) 
     let top = cy - text_h / 2.0;
     let tg = text_box(ui, title, theme::semibold(15.0), p.text, text_w, false);
     ui.painter().galley(pos2(x, top), tg, p.text);
-    if let Some(s) = subtitle {
-        let sg = text_box(ui, s, FontId::proportional(12.0), p.text_muted, text_w, false);
+    if let Some((s, font)) = subtitle {
+        let sg = text_box(ui, s, font, p.text_muted, text_w, false);
         ui.painter().galley(pos2(x, top + title_h + 2.0), sg, p.text_muted);
     }
     let name = format!("{} (Esc)", tr("Close"));
@@ -529,6 +537,8 @@ pub(crate) fn add_input(ui: &mut Ui, edit: egui::TextEdit<'_>, small: bool) -> R
             w.inactive.corner_radius = cr;
             w.hovered.corner_radius = cr;
             w.active.corner_radius = cr;
+            // egui paints placeholders in the weak text color.
+            ui.visuals_mut().weak_text_color = Some(theme::pal(ui).text_faint);
             ui.spacing_mut().interact_size.y = if small { 26.0 } else { 30.0 };
             ui.add(edit)
         })
@@ -980,7 +990,7 @@ fn console_row(ui: &mut Ui, l: &ternarywire_runner::ConsoleLine, wide: bool) {
     if !ui.is_rect_visible(rect) {
         return;
     }
-    // Network lines end with `→ 404 Not Found (…)`: the icon takes the status color.
+    // Network lines end with `→ 404 Not Found · …`: the icon takes the status color.
     let status = l
         .message
         .rsplit_once(" → ")
@@ -1802,9 +1812,25 @@ pub fn open_named(app: &mut TernaryWireApp, name: &str) -> bool {
             let Some((item, collection)) = found else { return false };
             Dialog::codegen(app, &item, collection.as_deref())
         }
+        // `save:<collection>/<folder>`: with that target picked.
         "save" => {
             let Some(tab) = app.tabs.get(app.active) else { return false };
-            Dialog::save_as(tab.id, &app.ws)
+            let mut dialog = Dialog::save_as(tab.id, &app.ws);
+            let (coll, folder) = arg.split_once('/').unwrap_or((arg, ""));
+            if let Dialog::SaveAs { collection, folder: target, .. } = &mut dialog
+                && let Some(c) = app.ws.data.collections.iter().find(|c| c.name == coll)
+            {
+                *collection = Some(c.id.clone());
+                fn find(items: &[Item], name: &str) -> Option<Id> {
+                    items.iter().find_map(|i| match i {
+                        Item::Folder(f) if f.name == name => Some(f.id.clone()),
+                        Item::Folder(f) => find(&f.items, name),
+                        _ => None,
+                    })
+                }
+                *target = find(&c.items, folder);
+            }
+            dialog
         }
         // `new-ws:<name>|<folder>`, both optional.
         "new-ws" => {
@@ -3998,6 +4024,8 @@ fn code_box(
     kit::well(ui)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // egui paints placeholders in the weak text color.
+            ui.visuals_mut().weak_text_color = Some(p.text_faint);
             let h = height - 2.0;
             egui::ScrollArea::vertical()
                 .id_salt(id)
@@ -4096,7 +4124,8 @@ fn import(
                 // "or paste" divider
                 let label = tr("or paste the content");
                 let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(11.5), p.text_faint);
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
+                // As tall as the prototype's line box (11.5 × 1.45).
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
                 let (gw, mid) = (g.size().x, r.center());
                 ui.painter().hline(r.left()..=mid.x - gw / 2.0 - 10.0, mid.y, Stroke::new(1.0, p.border));
                 ui.painter().hline(mid.x + gw / 2.0 + 10.0..=r.right(), mid.y, Stroke::new(1.0, p.border));
@@ -4111,10 +4140,15 @@ fn import(
                 } else {
                     crate::highlight::Lang::Text
                 };
-                let hint = tr("A Postman or OpenAPI file, a HAR export or a cURL command…");
-                let height = if source.is_empty() { 150.0 } else { 96.0 };
-                let r = code_box(ui, "import-text", text, lang, hint, height);
-                if r.changed() || (preview.is_none() && error.is_none() && !text.trim().is_empty()) {
+                let changed = if source.is_empty() {
+                    let hint = tr("A Postman or OpenAPI file, a HAR export or a cURL command…");
+                    code_box(ui, "import-text", text, lang, hint, 150.0).changed()
+                } else {
+                    // The file's text is not shown: clearing the file frees the box.
+                    note_box(ui, tr("Clear the file to paste content instead."), 96.0);
+                    false
+                };
+                if changed || (preview.is_none() && error.is_none() && !text.trim().is_empty()) {
                     match ternarywire_convert::import_auto(text) {
                         Ok(pr) => {
                             *preview = Some(pr);
@@ -4138,10 +4172,10 @@ fn import(
                 match preview {
                     Some(pr) => import_summary(ui, text, pr),
                     None if error.is_none() => {
-                        ui.label(kit::hint(
-                            ui,
-                            tr("The format is detected as you paste. A file dropped anywhere on the window is imported too."),
-                        ));
+                        let hint = tr(
+                            "The format is detected as you paste. A file dropped anywhere on the window is imported too.",
+                        );
+                        ui.add(egui::Label::new(kit::hint(ui, hint).line_height(Some(12.0 * 1.45))).wrap());
                     }
                     None => {}
                 }
@@ -4226,28 +4260,51 @@ fn file_chip(ui: &mut Ui, source: &str) -> bool {
     let mut clear = false;
     let path = std::path::Path::new(source);
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| source.to_string());
-    let dir = path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+    let dir = path.parent().map(home_relative).unwrap_or_default();
     kit::well(ui).corner_radius(CornerRadius::same(theme::RADIUS_CARD)).inner_margin(Margin::symmetric(12, 10)).show(
         ui,
         |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                tile(ui, icons::FILE_TEXT, true);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(RichText::new(name).font(theme::medium(13.0)).color(p.text));
-                    ui.add(egui::Label::new(RichText::new(dir).font(theme::mono(11.0)).color(p.text_faint)).truncate());
-                });
-                trailing(ui, |ui| {
-                    if kit::icon_button_sm(ui, icons::X, tr("Clear")).clicked() {
-                        clear = true;
-                    }
-                });
-            });
+            // Name and folder in CSS line boxes (13 × 1.45 over 11 × 1.45).
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 35.0), Sense::hover());
+            let tile_rect = Rect::from_min_size(pos2(row.left(), row.center().y - 14.0), Vec2::splat(28.0));
+            in_rect(ui, tile_rect, Layout::left_to_right(Align::Center), |ui| tile(ui, icons::FILE_TEXT, true));
+            let close = Rect::from_center_size(pos2(row.right() - 11.0, row.center().y), Vec2::splat(22.0));
+            if place(ui, close, |ui: &mut Ui| kit::icon_button_sm(ui, icons::X, tr("Clear"))).clicked() {
+                clear = true;
+            }
+            let x = tile_rect.right() + 8.0;
+            let w = close.left() - 8.0 - x;
+            let ng = text_box(ui, &name, theme::medium(13.0), p.text, w, false);
+            let dg = text_box(ui, &dir, theme::mono(11.0), p.text_faint, w, false);
+            let top = row.center().y - (ng.size().y + dg.size().y) / 2.0;
+            let name_h = ng.size().y;
+            ui.painter().galley(pos2(x, top), ng, p.text);
+            ui.painter().galley(pos2(x, top + name_h), dg, p.text_faint);
         },
     );
     clear
+}
+
+/// A folder for display: `~/…` inside the home folder.
+fn home_relative(dir: &std::path::Path) -> String {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    match home.as_deref().and_then(|h| dir.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => dir.display().to_string(),
+    }
+}
+
+/// A recessed box (`.dl-codebox`) holding one faint mono line instead of
+/// an editor.
+fn note_box(ui: &mut Ui, note: &str, height: f32) {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(8), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    let g = line_galley(ui, note, theme::mono(12.5), rect.width() - 30.0);
+    // `.code .src`: padding 8 14 on 20 px lines.
+    ui.painter().galley(pos2(rect.left() + 15.0, rect.top() + 9.0 + (20.0 - g.size().y) / 2.0), g, p.text_faint);
 }
 
 /// "Ready to import" card: detected format, what will be added, warnings.
@@ -4272,6 +4329,8 @@ fn import_summary(ui: &mut Ui, text: &str, pr: &ternarywire_convert::Imported) {
                 }
             });
             ui.add_space(6.0);
+            // The lines under it are 12 px text in 17 px line boxes.
+            ui.spacing_mut().interact_size.y = 17.0;
             let reqs: usize = pr.collections.iter().map(|c| c.request_count()).sum();
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
@@ -4334,6 +4393,8 @@ fn language_family(lang: Language) -> &'static str {
 /// lines, wrapped (anywhere) or scrolling sideways. The text can be selected.
 fn code_view(ui: &mut Ui, id: &str, code: &str, lang: crate::highlight::Lang, wrap: bool) {
     let p = theme::pal(ui);
+    // A final line break starts no numbered line.
+    let code = code.strip_suffix('\n').unwrap_or(code);
     let dark = ui.visuals().dark_mode;
     let rect = ui.available_rect_before_wrap();
     let lines = code.split('\n').count().max(1);
@@ -4465,6 +4526,7 @@ fn codegen(
                     });
                     let hl = match current.syntax() {
                         "http" => crate::highlight::Lang::Text,
+                        "bash" => crate::highlight::Lang::Shell,
                         _ => crate::highlight::Lang::JavaScript,
                     };
                     code_view(ui, &format!("codegen-{}", current.id()), code, hl, wrap);
@@ -4781,13 +4843,11 @@ fn close_unsaved(app: &mut TernaryWireApp, ctx: &egui::Context, tab: u64) -> Out
                     kit::button(ui, kit::Kind::Secondary, kit::Size::Md, tr("Cancel"), o).on_hover_text(tr("Esc"));
                 widgets::a11y_name(&cancel, &trf("Cancel closing \"{}\"", &[&name]));
                 widgets::a11y_shortcut(&cancel, "Escape");
-                // Save… is the default button: focused unless another one is (Tab
-                // moves between them, Enter/Space presses the focused one).
+                // Save… is the default button: Enter presses it unless Tab
+                // moved the focus to another button (then Enter/Space presses
+                // that one). Its ↩ hint marks it, not a focus ring.
                 let focus = ui.memory(|m| m.focused());
                 let other = focus.is_some_and(|f| f == discard.id || f == cancel.id);
-                if !other && focus != Some(save.id) {
-                    save.request_focus();
-                }
                 if save.clicked() || (!other && ui.input(|i| i.key_pressed(Key::Enter))) {
                     choice = Some(CloseChoice::Save);
                 }
@@ -4893,6 +4953,9 @@ fn new_workspace(
                 kit::field(ui, tr("Name"), "", |ui| {
                     let r = add_input(ui, line_edit(ui, name, "", false, false).desired_width(f32::INFINITY), false);
                     widgets::a11y_name(&r, tr("Name"));
+                    if ui.memory(|m| m.focused().is_none()) {
+                        r.request_focus();
+                    }
                 });
                 kit::field(ui, tr("Location"), "", |ui| {
                     ui.allocate_ui_with_layout(
@@ -4922,10 +4985,9 @@ fn new_workspace(
                 if existing {
                     banner(ui, Tone::Info, tr("This folder already holds a workspace; it will be opened as it is."));
                 } else {
-                    ui.label(kit::hint(
-                        ui,
-                        tr("A workspace is a folder of plain JSON files; put it in a Git repository to share it."),
-                    ));
+                    let hint =
+                        tr("A workspace is a folder of plain JSON files; put it in a Git repository to share it.");
+                    ui.add(egui::Label::new(kit::hint(ui, hint).line_height(Some(12.0 * 1.45))).wrap());
                 }
             });
             footer(ui, |ui| {

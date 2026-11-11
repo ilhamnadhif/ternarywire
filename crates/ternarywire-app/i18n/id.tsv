@@ -1973,6 +1973,7 @@ Settings are per user and apply to every workspace.	Pengaturan berlaku per pengg
 Shell	Shell
 The format is detected as you paste. A file dropped anywhere on the window is imported too.	Formatnya dikenali saat Anda menempel. File yang dijatuhkan di mana saja pada jendela juga diimpor.
 Your own modules in {}, shared by every script in the workspace.	Modul Anda sendiri di {}, dipakai bersama oleh setiap skrip di workspace.
+Clear the file to paste content instead.	Hapus file untuk menempel konten.
 Changes	Perubahan
 {} from “{}” to “{}”, 1 conflict: choose a side to include it	{} dari “{}” ke “{}”, 1 konflik: pilih satu sisi untuk menyertakannya
 {} from “{}” to “{}”, {} conflicts: choose a side to include them	{} dari “{}” ke “{}”, {} konflik: pilih satu sisi untuk menyertakannya

@@ -9,7 +9,7 @@
   {"send": true},
   {"wait_idle": true},
   {"wait_ms": 300},
-  {"wait_ms": 1500},
+  {"dialog": "update"},
   {"wait_ms": 800},
   {"screenshot": "@OUT"},
   {"quit": true}

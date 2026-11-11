@@ -10,6 +10,7 @@
   {"wait_ms": 300},
   {"resp_panel": "set_var:$.data[0].title"},
   {"wait_ms": 300},
+  {"resp_panel": "set_var_draft:{\"name\": \"firstTitle\", \"also_script\": true}"},
   {"wait_ms": 800},
   {"screenshot": "@OUT"},
   {"quit": true}

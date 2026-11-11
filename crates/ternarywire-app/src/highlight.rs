@@ -14,6 +14,9 @@ pub enum Lang {
     Xml,
     GraphQl,
     Yaml,
+    /// A shell command (cURL, HTTPie, Wget snippets): the command name,
+    /// `--flags`, quoted strings and `#` comments.
+    Shell,
     Text,
 }
 
@@ -243,6 +246,59 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                     push(pos, Kind::Text);
                 }
                 line_start += line.len();
+            }
+        }
+        Lang::Shell => {
+            // The first word of a command (not of a `\` continuation line).
+            let mut command = true;
+            while i < b.len() {
+                let c = b[i];
+                if c == b'\n' {
+                    let continued = text[..i].trim_end_matches([' ', '\t']).ends_with('\\');
+                    command = !continued;
+                    push(i, Kind::Text);
+                    i += 1;
+                    continue;
+                }
+                if c == b' ' || c == b'\t' {
+                    push(i, Kind::Text);
+                    i += 1;
+                    continue;
+                }
+                if c == b'#' {
+                    push(i, Kind::Comment);
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == b'\'' || c == b'"' {
+                    push(i, Kind::Str);
+                    i += 1;
+                    while i < b.len() && b[i] != c {
+                        if c == b'"' && b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i = (i + 1).min(b.len());
+                    continue;
+                }
+                // A word runs to the next space or quote.
+                let start = i;
+                while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\'' | b'"') {
+                    i += 1;
+                }
+                let word = &text[start..i];
+                let kind = if command && word != "\\" {
+                    Kind::Keyword
+                } else if word.starts_with('-') {
+                    Kind::Key
+                } else {
+                    Kind::Text
+                };
+                command = false;
+                push(start, kind);
             }
         }
         Lang::Json | Lang::JavaScript | Lang::GraphQl => {
@@ -725,7 +781,7 @@ mod tests {
         ];
         let vars = VarNames::new(["é".to_string()]);
         for text in samples {
-            for lang in [Lang::Xml, Lang::Json, Lang::JavaScript, Lang::GraphQl, Lang::Yaml, Lang::Text] {
+            for lang in [Lang::Xml, Lang::Json, Lang::JavaScript, Lang::GraphQl, Lang::Yaml, Lang::Shell, Lang::Text] {
                 for search in ["", "é", "★", "a"] {
                     let job = highlight(HlKey {
                         text,
