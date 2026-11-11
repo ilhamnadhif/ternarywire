@@ -315,7 +315,8 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                         Lang::GraphQl => GQL_KEYWORDS.contains(&word) || word.starts_with('$'),
                         _ => false,
                     };
-                    let is_pm = lang == Lang::JavaScript && word == "pm";
+                    // The script globals read as keys, like the prototype's editor.
+                    let is_pm = lang == Lang::JavaScript && matches!(word, "pm" | "tw" | "console" | "JSON");
                     push(
                         start,
                         if kw {

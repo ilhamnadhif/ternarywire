@@ -419,7 +419,7 @@ Invalid JSON	JSON tidak valid
 JavaScript	JavaScript
 JavaScript modules in packages/ (CommonJS or ESM), loaded with pm.require('@team/name') or pm.require('name'). They are part of the workspace and can be committed.	Modul JavaScript di packages/ (CommonJS atau ESM), dimuat dengan pm.require('@team/name') atau pm.require('name'). Modul ini bagian dari workspace dan dapat di-commit.
 JavaScript with pm.request, pm.response and pm.message	JavaScript dengan pm.request, pm.response, dan pm.message
-JavaScript with the Postman-compatible pm API	JavaScript dengan API pm yang kompatibel dengan Postman
+JavaScript with the Postman-compatible {} API · type {} for completions	JavaScript dengan API {} yang kompatibel dengan Postman · ketik {} untuk saran
 Jitter (ms)	Jitter (md)
 KV mount	Mount KV
 KV version	Versi KV
@@ -2090,7 +2090,6 @@ File path	Path berkas
 Completions from the schema	Saran dari skema
 Close schema	Tutup skema
 Load the schema for completions and to insert operations.	Muat skema untuk saran dan untuk menyisipkan operasi.
-type pm. for completions	ketik pm. untuk saran
 pm API reference	Referensi API pm
 These apply to this request only and override the app settings.	Ini hanya berlaku untuk request ini dan menimpa pengaturan aplikasi.
 Describe what the request does…	Jelaskan apa yang dilakukan request ini…

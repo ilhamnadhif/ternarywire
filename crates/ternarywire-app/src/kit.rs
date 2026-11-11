@@ -1096,7 +1096,12 @@ pub fn banner_with(ui: &mut Ui, tone: Tone, icon: &str, text: &str, actions: imp
                 let aw: f32 = ui.data(|d| d.get_temp(wid).unwrap_or(0.0));
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - aw - if aw > 0.0 { 10.0 } else { 0.0 }).max(80.0));
-                    ui.add(egui::Label::new(RichText::new(text).size(12.5).color(p.text)).wrap());
+                    // The prototype's warn, err and ok banners take their tone's
+                    // text color (`.warn`, `.err`, `.ok`); info and neutral stay
+                    // plain. Lines are 1.45 high.
+                    let color = if matches!(tone, Tone::Warn | Tone::Err | Tone::Ok) { fg } else { p.text };
+                    let text = RichText::new(text).size(12.5).color(color).line_height(Some(12.5 * 1.45));
+                    ui.add(egui::Label::new(text).wrap());
                 });
                 let before = ui.cursor().left();
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {

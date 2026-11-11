@@ -2493,17 +2493,8 @@ fn scripts_section(
     kit::bar_ex(ui, 24.0, 14.0, false, |ui| {
         let p = theme::pal(ui);
         ui.label(RichText::new(icons::INFO).font(theme::icon_font(13.0)).color(p.text_faint));
-        ui.add(
-            egui::Label::new(kit::hint(
-                ui,
-                &format!(
-                    "{} · {}",
-                    tr("JavaScript with the Postman-compatible pm API"),
-                    tr("type pm. for completions")
-                ),
-            ))
-            .truncate(),
-        );
+        let text = tr("JavaScript with the Postman-compatible {} API · type {} for completions");
+        ui.add(egui::Label::new(kit::hint_code(ui, text, &["pm", "pm."])).truncate());
     });
 }
 
@@ -4168,13 +4159,7 @@ fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
 
 /// Milliseconds with a precision that fits their size.
 pub(crate) fn fmt_ms(ms: f64) -> String {
-    if ms < 1.0 {
-        format!("{ms:.2} ms")
-    } else if ms < 10.0 {
-        format!("{ms:.1} ms")
-    } else {
-        ternarywire_core::util::human_ms(ms)
-    }
+    if ms < 10.0 { format!("{ms:.1} ms") } else { ternarywire_core::util::human_ms(ms) }
 }
 
 /// A label/value line of a details card (min 28 high, label 120 wide).
@@ -4203,6 +4188,66 @@ fn titled_card(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui), add: impl 
     });
 }
 
+/// The warning that variables were sent as typed: a warn banner with the
+/// names as red `{{variable}}` chips (the prototype's `.var.bad`).
+fn undefined_vars_banner(ui: &mut Ui, names: &[String]) {
+    use egui::text::{LayoutJob, TextFormat};
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(Tone::Warn);
+    let template = if names.len() == 1 {
+        tr("Undefined variable {} was sent as typed. Define it in Local or the collection.")
+    } else {
+        tr("Undefined variables {} were sent as typed. Define them in Local or the collection.")
+    };
+    let (before, after) = template.split_once("{}").unwrap_or((template, ""));
+    let line = 12.5 * 1.45;
+    let text = TextFormat { line_height: Some(line), ..TextFormat::simple(egui::FontId::proportional(12.5), fg) };
+    let chip = TextFormat { color: theme::var_undefined(ui.visuals().dark_mode), ..text.clone() };
+    egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 9)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(icons::WARNING).font(theme::icon_font(16.0)).color(fg));
+                // The chips' 3 px padding less their -1 px margin moves the text.
+                let mut job = LayoutJob::default();
+                let mut chars = Vec::new();
+                job.append(before, 0.0, text.clone());
+                let mut at = before.chars().count();
+                for (i, n) in names.iter().enumerate() {
+                    if i > 0 {
+                        job.append(", ", 2.0, text.clone());
+                        at += 2;
+                    }
+                    let name = format!("{{{{{n}}}}}");
+                    let len = name.chars().count();
+                    job.append(&name, 2.0, chip.clone());
+                    chars.push(at..at + len);
+                    at += len;
+                }
+                job.append(after, 2.0, text.clone());
+                job.wrap.max_width = ui.available_width();
+                let galley = ui.painter().layout_job(job);
+                let slot = ui.painter().add(egui::Shape::Noop);
+                let r = ui.add(egui::Label::new(galley.clone()).selectable(false));
+                let chips = chars
+                    .iter()
+                    .map(|c| {
+                        let a = galley.pos_from_cursor(egui::text::CCursor::new(c.start));
+                        let b = galley.pos_from_cursor(egui::text::CCursor::new(c.end));
+                        let right = if c.end < at { b.left() - 2.0 } else { b.left() };
+                        let rect = Rect::from_x_y_ranges(a.left() - 3.0..=right + 3.0, a.top()..=a.top() + line)
+                            .translate(r.rect.min.to_vec2());
+                        egui::Shape::rect_filled(rect, CornerRadius::same(4), p.var_bad_bg)
+                    })
+                    .collect();
+                ui.painter().set(slot, egui::Shape::Vec(chips));
+            });
+        },
+    );
+}
+
 fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
@@ -4210,13 +4255,7 @@ fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
         ui.spacing_mut().item_spacing.y = 12.0;
         ui.add_space(4.0);
         if !exec.unresolved.is_empty() {
-            let names = exec.unresolved.iter().map(|n| format!("{{{{{n}}}}}")).collect::<Vec<_>>().join(", ");
-            let text = if exec.unresolved.len() == 1 {
-                trf("Undefined variable {} was sent as typed. Define it in Local or the collection.", &[&names])
-            } else {
-                trf("Undefined variables {} were sent as typed. Define them in Local or the collection.", &[&names])
-            };
-            kit::banner(ui, Tone::Warn, icons::WARNING, &text);
+            undefined_vars_banner(ui, &exec.unresolved);
         }
         if let Some(resp) = &exec.response {
             let total = resp.timings.total_ms.max(resp.timings.ttfb_ms);
@@ -4224,7 +4263,8 @@ fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
                 ui,
                 tr("Timing"),
                 |ui| {
-                    ui.label(RichText::new(fmt_ms(total)).font(theme::semibold(12.5)).color(p.text));
+                    // `.mono.semi`: the mono font (it has no bold).
+                    ui.label(RichText::new(fmt_ms(total)).font(theme::mono(12.5)).color(p.text));
                 },
                 |ui| {
                     ui.add_space(12.0);
