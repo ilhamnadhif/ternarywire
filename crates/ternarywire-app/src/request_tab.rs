@@ -591,8 +591,12 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Reques
     ui.spacing_mut().item_spacing.y = 0.0;
     let whole = ui.available_rect_before_wrap();
     title_row(ui, tab, &mut item, &ectx, &mut actions);
+    // The time and size of the answer, from the History entry.
+    let meta = tab.from_history.and_then(|(at, _)| {
+        app.ws.history.iter().find(|h| h.timestamp == at && h.status.is_some()).map(|h| (h.elapsed_ms, h.size))
+    });
     if let Some((at, status)) = tab.from_history
-        && history_notice(ui, at, status, &mut actions)
+        && history_notice(ui, at, status, meta, &mut actions)
     {
         tab.from_history = None;
     }
@@ -1025,19 +1029,25 @@ fn request_menu(ui: &mut Ui, item: &RequestItem, ectx: &EditCtx, actions: &mut A
     }
 }
 
-/// "Opened from History" under the title row (36 high, info fill). Returns
-/// true when it was dismissed.
-fn history_notice(ui: &mut Ui, at_ms: i64, status: Option<u16>, actions: &mut Actions) -> bool {
+/// "Opened from History" under the title row (36 high, info fill, 16 px
+/// side padding): when it was sent, the last status and (`meta`) its time
+/// and size. Returns true when it was dismissed.
+fn history_notice(
+    ui: &mut Ui,
+    at_ms: i64,
+    status: Option<u16>,
+    meta: Option<(f64, u64)>,
+    actions: &mut Actions,
+) -> bool {
     let p = theme::pal(ui);
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(Rect::from_min_size(full.min, vec2(full.width(), 36.0)), 0.0, p.info_soft);
     let mut dismiss = false;
-    kit::bar(ui, 36.0, true, |ui| {
-        ui.add_space(4.0);
+    kit::bar_ex(ui, 36.0, 16.0, true, |ui| {
         let text = |ui: &mut Ui, s: &str, color: Color32| {
             ui.add(egui::Label::new(RichText::new(s).size(12.5).color(color)).selectable(false));
         };
-        ui.label(RichText::new(icons::CLOCK_COUNTER_CLOCKWISE).font(theme::icon_font(14.0)).color(p.info));
+        ui.label(RichText::new(icons::CLOCK_COUNTER_CLOCKWISE).font(theme::icon_font(12.5)).color(p.info));
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             text(ui, &format!("{} ·", tr("Opened from History")), p.text);
@@ -1056,6 +1066,11 @@ fn history_notice(ui: &mut Ui, at_ms: i64, status: Option<u16>, actions: &mut Ac
             None => {
                 kit::tone_pill(ui, tr("Failed"), Tone::Err);
             }
+        }
+        if let Some((ms, bytes)) = meta {
+            let s =
+                format!("{} · {}", ternarywire_core::util::human_ms(ms), ternarywire_core::util::human_bytes(bytes));
+            ui.add(egui::Label::new(RichText::new(s).font(theme::mono(11.5)).color(p.text_muted)).selectable(false));
         }
         text(ui, "·", p.text_faint);
         text(ui, tr("Save to keep it"), p.text_muted);
