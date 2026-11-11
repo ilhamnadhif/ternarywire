@@ -352,7 +352,8 @@ fn settings(ui: &mut Ui, id: egui::Id, tab: &mut WebhookTab) {
                 tab.status = v as u16;
                 let apply_w = if running {
                     let g = ui.painter().layout_no_wrap(tr("Apply").into(), theme::medium(12.0), p.text);
-                    8.0 + 13.0 + 5.0 + g.size().x + 8.0 + 8.0
+                    // The ghost button (padding 8, its 1 px borders) and the 8 before it.
+                    1.0 + 8.0 + 13.0 + 5.0 + g.size().x + 8.0 + 1.0 + 8.0
                 } else {
                     0.0
                 };
