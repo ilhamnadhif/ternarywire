@@ -86,8 +86,9 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
         .then(|| ui.painter().layout_no_wrap(text.to_string(), theme::medium(font_size), Color32::PLACEHOLDER));
     let icon_galley =
         o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(icon_size), Color32::PLACEHOLDER));
+    // The caret is an icon like the others (the prototype's `.btn .i`).
     let caret_galley = o.caret.then(|| {
-        ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(12.0), Color32::PLACEHOLDER)
+        ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(icon_size), Color32::PLACEHOLDER)
     });
     let kbd_w = o.kbd.map(|k| kbd_size(ui, k).x + gap).unwrap_or(0.0);
     let parts = [
@@ -97,7 +98,9 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     ];
     let n = parts.iter().flatten().count();
     let content_w = parts.iter().flatten().sum::<f32>() + gap * n.saturating_sub(1) as f32 + kbd_w;
-    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad * 2.0 };
+    // Padding plus the 1 px border every prototype `.btn` has (transparent
+    // on ghost and primary buttons).
+    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad * 2.0 + 2.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(width.max(height).max(o.min_width), height), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, text));
     if ui.is_rect_visible(rect) {
@@ -162,8 +165,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
             x += s.x + gap;
         }
         if let Some(g) = caret_galley {
-            let c = if kind == Kind::Primary { text_color } else { p.text_faint };
-            put(g, c, &mut x);
+            put(g, text_color, &mut x);
         }
     }
     resp
@@ -471,9 +473,9 @@ pub fn segmented_ex<T: PartialEq + Copy>(
         .iter()
         .map(|(_, icon, label)| {
             let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(font), Color32::PLACEHOLDER);
-            let ig = icon.map(|i| {
-                ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font + 1.0), Color32::PLACEHOLDER)
-            });
+            // Icons in the segment's font size (the prototype's `.seg button .i`).
+            let ig =
+                icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font), Color32::PLACEHOLDER));
             let w = g.size().x + ig.as_ref().map_or(0.0, |g| g.size().x + 5.0) + pad * 2.0;
             (g, ig, w)
         })

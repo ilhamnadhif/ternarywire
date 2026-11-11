@@ -232,8 +232,11 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                 let indent = line.len() - trimmed.len();
                 let mut pos = line_start + indent;
                 let mut rest = trimmed;
+                // Like the prototype: the list dash in the text color, keys,
+                // then scalar values (and lines without a key) as strings,
+                // numbers and versions (`3.0.3`) as numbers.
                 if let Some(r) = rest.strip_prefix("- ") {
-                    push(pos, Kind::Punct);
+                    push(line_start, Kind::Text);
                     pos += 2;
                     rest = r;
                 }
@@ -247,18 +250,20 @@ fn lex(text: &str, lang: Lang) -> Vec<(usize, Kind)> {
                     let value = rest[colon + 1..].trim_start();
                     let vpos = pos + colon + 1 + (rest[colon + 1..].len() - value.len());
                     let v = value.trim_end();
-                    let kind = if v.starts_with('"') || v.starts_with('\'') {
-                        Kind::Str
-                    } else if v.starts_with('#') {
+                    let number = !v.is_empty()
+                        && v.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+                    let kind = if v.starts_with('#') {
                         Kind::Comment
                     } else if matches!(v, "true" | "false" | "null" | "~") {
                         Kind::Keyword
-                    } else if v.parse::<f64>().is_ok() {
+                    } else if number || v.parse::<f64>().is_ok() {
                         Kind::Num
                     } else {
-                        Kind::Text
+                        Kind::Str
                     };
                     push(vpos, kind);
+                } else if !rest.trim().is_empty() {
+                    push(pos, Kind::Str);
                 } else {
                     push(pos, Kind::Text);
                 }

@@ -306,7 +306,7 @@ pub fn code_editor_with(
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
 ) -> egui::Response {
-    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, false)
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, false, true)
 }
 
 /// The code editor of the redesign: frameless (put it in a `kit::well` or a
@@ -323,7 +323,23 @@ pub fn code_editor_gutter(
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
 ) -> egui::Response {
-    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, true)
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, true, true)
+}
+
+/// [`code_editor_gutter`] whose lines do not wrap (the prototype's spec
+/// editor): the text scrolls sideways next to the line numbers.
+#[allow(clippy::too_many_arguments)]
+pub fn code_editor_gutter_nowrap(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+    vars: Option<&VarCtx>,
+    min_rows: usize,
+    readonly: bool,
+    completions: Option<CompletionFn<'_>>,
+) -> egui::Response {
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, true, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,6 +353,7 @@ fn code_editor_impl(
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
     gutter: bool,
+    wrap: bool,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
@@ -367,7 +384,7 @@ fn code_editor_impl(
             ui.ctx(),
             HlKey { text: buf.as_str(), lang, dark, search: "", vars: names, font_size, wrap: true },
         );
-        job.wrap.max_width = wrap_width;
+        job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
         if gutter {
             // Long tokens (URLs, base64) wrap anywhere, like the prototype's editors.
             job.wrap.break_anywhere = true;
@@ -378,6 +395,7 @@ fn code_editor_impl(
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let lines = text.split('\n').count().max(1);
+    let longest = if wrap { 0 } else { text.split('\n').map(|l| l.chars().count()).max().unwrap_or(0) };
     let mut edit = TextEdit::multiline(text)
         .id(id)
         .code_editor()
@@ -402,7 +420,22 @@ fn code_editor_impl(
             egui::pos2(start.x + gutter_w, start.y),
             egui::pos2(start.x + full_w, ui.max_rect().bottom().max(start.y + 40.0)),
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+        if wrap {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+        } else {
+            // As wide as the longest line, scrolling sideways in its column.
+            let char_w = ui.fonts_mut(|f| f.glyph_width(&theme::mono(font_size), 'M'));
+            let width = (longest as f32 * char_w + 28.0 + char_w).max(rect.width());
+            edit = edit.desired_width(width);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt(id.with("sideways"))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| edit.show(ui))
+                    .inner
+            })
+            .inner
+        }
     } else {
         edit.show(ui)
     };

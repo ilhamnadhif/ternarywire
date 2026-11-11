@@ -1103,7 +1103,7 @@ fn help_cards(app: &mut TernaryWireApp, ui: &mut Ui) {
     let mut vault = |ui: &mut Ui| {
         let avail = ui.available_width();
         let label = tr("Open vault");
-        let btn_w = ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 16.0;
+        let btn_w = ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 18.0;
         let text_w = (avail - btn_w - 10.0).max(80.0);
         let col = ui
             .allocate_ui_with_layout(vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
