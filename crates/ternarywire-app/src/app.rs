@@ -1679,7 +1679,7 @@ impl TernaryWireApp {
             let name = self.ws.data.name.clone();
             let name_g = ui.painter().layout_no_wrap(name.clone(), theme::semibold(13.0), p.text);
             let (rect, ws) = ui.allocate_exact_size(
-                egui::vec2(6.0 + 20.0 + 8.0 + name_g.size().x + 8.0 + 12.0 + 8.0, 30.0),
+                egui::vec2(6.0 + 20.0 + 8.0 + name_g.size().x + 8.0 + 13.0 + 8.0, 30.0),
                 egui::Sense::click(),
             );
             if ws.hovered() {
@@ -1698,10 +1698,10 @@ impl TernaryWireApp {
                 p.text,
             );
             ui.painter().text(
-                egui::pos2(rect.right() - 14.0, rect.center().y),
+                egui::pos2(rect.right() - 14.5, rect.center().y),
                 egui::Align2::CENTER_CENTER,
                 icons::CARET_DOWN,
-                theme::icon_font(12.0),
+                theme::icon_font(13.0),
                 p.text_faint,
             );
             let root = self.ws.root().to_path_buf();
@@ -1748,7 +1748,7 @@ impl TernaryWireApp {
                     crate::update::check(self, true);
                 }
             });
-            kit::vdivider(ui, 18.0);
+            title_divider(ui);
             let new = kit::button(
                 ui,
                 kit::Kind::Ghost,
@@ -1770,15 +1770,16 @@ impl TernaryWireApp {
                 if kit::icon_button(ui, icons::COOKIE, tr("Cookies")).clicked() {
                     self.dialog = Some(Dialog::cookies());
                 }
-                ui.add_space(2.0);
-                kit::vdivider(ui, 18.0);
-                ui.add_space(2.0);
+                ui.add_space(4.0);
+                title_divider(ui);
+                ui.add_space(4.0);
                 crate::env_tab::environment_selector(self, ui);
-                // Search, centered in the space that is left.
-                let free = ui.available_width();
-                let w = (free - 16.0).min(460.0);
+                // Search, centered in the space that is left (8 from its
+                // neighbors at least).
+                let free = ui.available_width() - 6.0;
+                let w = free.min(460.0);
                 if w >= 150.0 {
-                    ui.add_space(((free - w) / 2.0).max(8.0));
+                    ui.add_space(6.0 + (free - w) / 2.0);
                     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 30.0), egui::Sense::click());
                     let r =
                         r.on_hover_text(format!("{} (⌘K) · {} (⇧⌘P)", tr("Search requests"), tr("Command palette")));
@@ -1938,10 +1939,10 @@ impl TernaryWireApp {
             section(ui, self, SidebarTab::History, icons::CLOCK_COUNTER_CLOCKWISE, tr("History"), None);
             section(ui, self, SidebarTab::Apis, icons::BRACKETS_CURLY, tr("APIs"), None);
             section(ui, self, SidebarTab::Flows, icons::FLOW_ARROW, tr("Flows"), None);
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             let (sep, _) = ui.allocate_exact_size(egui::vec2(22.0, 1.0), egui::Sense::hover());
             ui.painter().rect_filled(sep, 0.0, p.border);
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             section(ui, self, SidebarTab::Servers, icons::BROADCAST, tr("Local servers"), running.then_some(p.ok));
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(10.0);
@@ -2007,7 +2008,7 @@ impl TernaryWireApp {
                                     let lead = match &badge {
                                         Some(b) => (
                                             crate::widgets::method_short(b).to_string(),
-                                            theme::semibold(10.0),
+                                            theme::semibold(10.5),
                                             theme::method_color(b, dark),
                                         ),
                                         None => (
@@ -2019,7 +2020,9 @@ impl TernaryWireApp {
                                     let lead_g = ui.painter().layout_no_wrap(lead.0, lead.1, lead.2);
                                     let font =
                                         if selected { theme::medium(12.5) } else { egui::FontId::proportional(12.5) };
-                                    let full_w = 11.0
+                                    // 1 px border, 11 px padding, lead, 7, title, 7, close 18, 8 px padding, border.
+                                    let full_w = 1.0
+                                        + 11.0
                                         + lead_g.size().x
                                         + 7.0
                                         + ui.painter()
@@ -2028,16 +2031,20 @@ impl TernaryWireApp {
                                             .x
                                         + 7.0
                                         + 18.0
-                                        + 8.0;
+                                        + 8.0
+                                        + 1.0;
                                     let w = full_w.clamp(110.0, 220.0);
-                                    let title_w = w - 11.0 - lead_g.size().x - 7.0 - 7.0 - 18.0 - 8.0;
+                                    let title_w = w - 2.0 - 11.0 - lead_g.size().x - 7.0 - 7.0 - 18.0 - 8.0;
                                     let title_g = kit::elide(ui, &title, font, egui::Color32::PLACEHOLDER, title_w);
                                     let (slot, r) =
                                         ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
+                                    // The tab stands on the strip's bottom hairline.
                                     let rect = egui::Rect::from_min_max(
-                                        egui::pos2(slot.left(), slot.bottom() - TAB_H),
-                                        slot.max,
+                                        egui::pos2(slot.left(), slot.bottom() - 1.0 - TAB_H),
+                                        egui::pos2(slot.right(), slot.bottom() - 1.0),
                                     );
+                                    // Its content box: below the top border.
+                                    let cy = rect.top() + 1.0 + (TAB_H - 1.0) / 2.0;
                                     if selected && scroll_to == Some(tab.id) {
                                         r.scroll_to_me(None);
                                     }
@@ -2045,6 +2052,8 @@ impl TernaryWireApp {
                                     let painter = ui.painter();
                                     let radius = egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 };
                                     if selected {
+                                        // Raised onto the canvas: borders on three sides, and
+                                        // the strip's bottom line hidden under it.
                                         let body = rect.with_max_y(rect.bottom() + 1.0);
                                         painter.rect_filled(body, radius, p.canvas);
                                         painter.rect_stroke(
@@ -2053,16 +2062,18 @@ impl TernaryWireApp {
                                             egui::Stroke::new(1.0, p.border),
                                             egui::StrokeKind::Inside,
                                         );
-                                        // Hide the strip's bottom line under the selected tab.
-                                        painter.hline(
-                                            rect.x_range().shrink(1.0),
-                                            rect.bottom() - 0.5,
-                                            egui::Stroke::new(1.5, p.canvas),
+                                        painter.rect_filled(
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(rect.left() + 1.0, rect.bottom()),
+                                                egui::pos2(rect.right() - 1.0, rect.bottom() + 1.0),
+                                            ),
+                                            0.0,
+                                            p.canvas,
                                         );
                                         painter.rect_filled(
                                             egui::Rect::from_min_max(
-                                                egui::pos2(rect.left() + 10.0, rect.top() - 1.0),
-                                                egui::pos2(rect.right() - 10.0, rect.top() + 1.0),
+                                                egui::pos2(rect.left() + 11.0, rect.top()),
+                                                egui::pos2(rect.right() - 11.0, rect.top() + 2.0),
                                             ),
                                             egui::CornerRadius::same(1),
                                             p.accent,
@@ -2070,22 +2081,14 @@ impl TernaryWireApp {
                                     } else if hovered {
                                         painter.rect_filled(rect, radius, p.hover);
                                     }
-                                    let mut x = rect.left() + 11.0;
-                                    painter.galley(
-                                        egui::pos2(x, rect.center().y - lead_g.size().y / 2.0),
-                                        lead_g.clone(),
-                                        lead.2,
-                                    );
+                                    let mut x = rect.left() + 12.0;
+                                    painter.galley(egui::pos2(x, cy - lead_g.size().y / 2.0), lead_g.clone(), lead.2);
                                     x += lead_g.size().x + 7.0;
                                     let text_color = if selected || hovered { p.text } else { p.text_muted };
-                                    painter.galley(
-                                        egui::pos2(x, rect.center().y - title_g.size().y / 2.0),
-                                        title_g,
-                                        text_color,
-                                    );
+                                    painter.galley(egui::pos2(x, cy - title_g.size().y / 2.0), title_g, text_color);
                                     // Close button (or the unsaved dot until hovered).
                                     let x_rect = egui::Rect::from_center_size(
-                                        egui::pos2(rect.right() - 8.0 - 9.0, rect.center().y),
+                                        egui::pos2(rect.right() - 1.0 - 8.0 - 9.0, cy),
                                         egui::vec2(18.0, 18.0),
                                     );
                                     let x_resp = ui.interact(
@@ -2144,18 +2147,31 @@ impl TernaryWireApp {
                             },
                         );
                     });
-                ui.allocate_ui_with_layout(
-                    egui::vec2(30.0, h),
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        if kit::icon_button_ex(ui, icons::PLUS, &format!("{} (⌘T)", tr("New Request")), false, 30.0)
-                            .clicked()
-                        {
-                            activate = Some(TabBarAct::New);
-                        }
-                    },
+                // New tab: 30 x 32, centered on the strip above its hairline.
+                let (slot, _) = ui.allocate_exact_size(egui::vec2(30.0, h), egui::Sense::hover());
+                let plus = egui::Rect::from_center_size(
+                    egui::pos2(slot.center().x, slot.top() + (h - 1.0) / 2.0),
+                    egui::vec2(30.0, 32.0),
                 );
+                let tip = format!("{} (⌘T)", tr("New Request"));
+                let r = ui.interact(plus, ui.scope_id().with("tab-new"), egui::Sense::click()).on_hover_text(&tip);
+                crate::widgets::a11y_button(&r, &tip);
+                if r.hovered() {
+                    ui.painter().rect_filled(plus, egui::CornerRadius::same(7), p.hover);
+                }
+                ui.painter().text(
+                    plus.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::PLUS,
+                    theme::icon_font(13.0),
+                    if r.hovered() { p.text } else { p.text_muted },
+                );
+                if r.clicked() {
+                    activate = Some(TabBarAct::New);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Centered above the strip's bottom hairline.
+                    ui.set_max_height(h - 1.0);
                     let r = kit::icon_button_sm(ui, icons::CARET_DOWN, tr("All open tabs"));
                     egui::Popup::menu(&r).show(|ui| {
                         ui.set_min_width(240.0);
@@ -2234,18 +2250,8 @@ impl TernaryWireApp {
                 self.settings.ui.sidebar_visible = !self.settings.ui.sidebar_visible;
             }
             let errors = self.console.iter().filter(|l| l.kind == ternarywire_runner::ConsoleKind::Error).count();
-            let r = status_button(ui, Some(icons::TERMINAL_WINDOW), tr("Console"), None, "⌥⌘C");
-            if errors > 0 {
-                let rect = egui::Rect::from_min_size(
-                    egui::pos2(r.rect.right() - 4.0, r.rect.center().y - 8.0),
-                    egui::vec2(0.0, 16.0),
-                );
-                let g = ui.painter().layout_no_wrap(errors.to_string(), theme::medium(10.5), p.err);
-                let pill = egui::Rect::from_min_size(rect.min, egui::vec2(g.size().x + 10.0, 16.0));
-                ui.allocate_exact_size(egui::vec2(pill.width() - 4.0, 16.0), egui::Sense::hover());
-                ui.painter().rect_filled(pill, egui::CornerRadius::same(8), p.err_soft);
-                ui.painter().galley(pill.center() - g.size() / 2.0, g, p.err);
-            }
+            let count = (errors > 0).then(|| errors.to_string());
+            let r = status_button_ex(ui, Some(icons::TERMINAL_WINDOW), tr("Console"), None, "⌥⌘C", count.as_deref());
             if r.clicked() {
                 self.console_open = !self.console_open;
             }
@@ -2255,8 +2261,6 @@ impl TernaryWireApp {
             } else if self.ws.has_pending() {
                 status_button(ui, Some(icons::CIRCLE_NOTCH), tr("Saving…"), None, "");
             } else {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(0.0, 22.0), egui::Sense::hover());
-                let _ = rect;
                 status_label(ui, icons::CHECK, p.ok, tr("All changes saved"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2276,8 +2280,8 @@ impl TernaryWireApp {
                         ternarywire_core::settings::ResponseLayout::Side
                     };
                 }
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 14.0), egui::Sense::hover());
-                ui.painter().vline(rect.center().x, rect.y_range(), egui::Stroke::new(1.0, p.border));
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 0.0, p.border);
                 let root = self.ws.root().to_path_buf();
                 let path = tilde_path(&root);
                 // At most a third of the bar, cut from the left so the folder name stays.
@@ -2671,28 +2675,34 @@ impl eframe::App for TernaryWireApp {
         let p = crate::theme::pal(ui);
         let chrome = |m: egui::Margin| egui::Frame::new().fill(p.chrome).inner_margin(m);
         use crate::theme::size;
+        // No separator lines: the workbench card's border is the only edge
+        // between the chrome and the content (as in the prototype).
         egui::Panel::top("top")
             .exact_size(size::TITLE_BAR)
+            .show_separator_line(false)
             .frame(chrome(egui::Margin { left: 14, right: 10, top: 0, bottom: 0 }))
             .show(ui, |ui| {
                 self.top_bar(ui);
             });
         egui::Panel::bottom("status")
             .exact_size(size::STATUS_BAR)
+            .show_separator_line(false)
             .frame(chrome(egui::Margin { left: 8, right: 10, top: 0, bottom: 0 }))
             .show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("rail")
             .exact_size(size::RAIL)
             .resizable(false)
+            .show_separator_line(false)
             .frame(chrome(egui::Margin::ZERO))
             .show(ui, |ui| self.rail(ui));
         let mut sidebar_visible = self.settings.ui.sidebar_visible;
         // About a fifth of the window, so small windows keep room for the editor.
         let width = ui.available_width() + size::RAIL;
-        let sidebar_default = (width * 0.21).clamp(224.0, 276.0);
+        let sidebar_default = (width * 0.21).clamp(224.0, 276.0).round();
         let sidebar_max = (width * 0.28).clamp(240.0, 520.0);
         egui::Panel::left("sidebar")
             .resizable(true)
+            .show_separator_line(false)
             .default_size(sidebar_default)
             .size_range(200.0..=sidebar_max)
             .frame(chrome(egui::Margin { left: 2, right: 8, top: 2, bottom: 8 }))
@@ -2883,6 +2893,12 @@ pub fn tilde_path(path: &std::path::Path) -> String {
 
 /// A 38 px rail button: on = raised surface with an accent icon; `dot` marks
 /// state (a running server, console errors).
+/// The 1 px divider between groups of the title bar (18 high).
+fn title_divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, crate::theme::pal(ui).border);
+}
+
 fn rail_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool, dot: Option<egui::Color32>) -> egui::Response {
     let p = crate::theme::pal(ui);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(38.0, 38.0), egui::Sense::click());
@@ -2896,7 +2912,8 @@ fn rail_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool, dot: Option
                 egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: egui::Color32::from_black_alpha(10) };
             painter.add(shadow.as_shape(rect, radius));
         }
-        painter.rect(rect, radius, p.surface, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+        // The ring sits outside the 38 px button (`box-shadow: 0 0 0 1px`).
+        painter.rect(rect, radius, p.surface, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Outside);
     } else if r.hovered() {
         painter.rect_filled(rect, radius, p.hover);
     }
@@ -2925,7 +2942,21 @@ fn status_button(
     color: Option<egui::Color32>,
     tip: &str,
 ) -> egui::Response {
+    status_button_ex(ui, icon, text, color, tip, None)
+}
+
+/// [`status_button`] with a red count pill after the text (console errors).
+fn status_button_ex(
+    ui: &mut egui::Ui,
+    icon: Option<&str>,
+    text: &str,
+    color: Option<egui::Color32>,
+    tip: &str,
+    count: Option<&str>,
+) -> egui::Response {
     let p = crate::theme::pal(ui);
+    let cg = count.map(|c| ui.painter().layout_no_wrap(c.to_string(), crate::theme::medium(10.5), p.err));
+    let count_w = cg.as_ref().map_or(0.0, |g| 6.0 + g.size().x + 10.0);
     let ig = icon
         .map(|i| ui.painter().layout_no_wrap(i.to_string(), crate::theme::icon_font(13.0), egui::Color32::PLACEHOLDER));
     let tg = (!text.is_empty()).then(|| {
@@ -2934,7 +2965,8 @@ fn status_button(
     let w = 14.0
         + ig.as_ref().map_or(0.0, |g| g.size().x)
         + tg.as_ref().map_or(0.0, |g| g.size().x)
-        + if ig.is_some() && tg.is_some() { 6.0 } else { 0.0 };
+        + if ig.is_some() && tg.is_some() { 6.0 } else { 0.0 }
+        + count_w;
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::click());
     let r = if tip.is_empty() { r } else { r.on_hover_text(tip) };
     crate::widgets::a11y_button(&r, if text.is_empty() { tip } else { text });
@@ -2948,7 +2980,13 @@ fn status_button(
         x += g.size().x + 6.0;
     }
     if let Some(g) = tg {
-        ui.painter().galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, c);
+        x += g.size().x + 6.0;
+        ui.painter().galley(egui::pos2(x - g.size().x - 6.0, rect.center().y - g.size().y / 2.0), g, c);
+    }
+    if let Some(g) = cg {
+        let pill = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - 8.0), egui::vec2(g.size().x + 10.0, 16.0));
+        ui.painter().rect_filled(pill, egui::CornerRadius::same(8), p.err_soft);
+        ui.painter().galley(pill.center() - g.size() / 2.0, g, egui::Color32::PLACEHOLDER);
     }
     r
 }

@@ -118,7 +118,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui) {
         ui.label(RichText::new(title).font(crate::theme::semibold(13.0)).color(p.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(2.0);
-            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.spacing_mut().item_spacing.x = 4.0;
             match app.sidebar_tab {
                 SidebarTab::Collections => {
                     let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
