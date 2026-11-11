@@ -221,6 +221,20 @@ fn pretty(v: Value) -> String {
     serde_json::to_string_pretty(&v).unwrap()
 }
 
+/// A JSON example response (served by the mock server).
+fn example(id: &str, name: &str, status: u16, status_text: &str, body: Option<Value>) -> Example {
+    Example {
+        id: id.into(),
+        name: name.into(),
+        request: None,
+        status,
+        status_text: status_text.into(),
+        headers: vec![kv("Content-Type", "application/json; charset=utf-8")],
+        body: body.map(pretty).unwrap_or_default(),
+        language: Some("json".into()),
+    }
+}
+
 fn json_headers() -> Vec<KeyValue> {
     vec![kv("Content-Type", "application/json")]
 }
@@ -392,6 +406,36 @@ fn bookstore() -> Collection {
         h.headers = json_headers();
         h.body = Body::raw_json(pretty(json!({"status": "shipped"})));
     }
+
+    // The mock server's routes (mock-routes): one example per request, two on Get book.
+    login.examples = vec![example(
+        "ex-login-200",
+        "Signed in",
+        200,
+        "OK",
+        Some(json!({"token": "eyJhbGciOiJIUzI1NiJ9.mock", "expiresIn": 3600})),
+    )];
+    me.examples = vec![example(
+        "ex-me-200",
+        "Profile",
+        200,
+        "OK",
+        Some(json!({"id": "u_192", "name": "Ilham", "email": "ilham@example.com"})),
+    )];
+    get.examples = vec![
+        example("ex-get-200", "One book", 200, "OK", Some(json!({"id": 2, "title": "Clean Code", "price": 42.5}))),
+        example("ex-get-404", "Missing book", 404, "Not Found", Some(json!({"error": "not_found"}))),
+    ];
+    create.examples = vec![example(
+        "ex-create-201",
+        "Created",
+        201,
+        "Created",
+        Some(json!({"id": 6, "title": "Bumi Manusia", "price": 15.5})),
+    )];
+    update.examples =
+        vec![example("ex-update-200", "Updated", 200, "OK", Some(json!({"id": 2, "price": 52, "inStock": true})))];
+    delete.examples = vec![example("ex-delete-204", "Deleted", 204, "No Content", None)];
 
     let mut c = Collection::new("Bookstore API");
     c.id = C_BOOK.into();

@@ -248,7 +248,12 @@ pub fn icon_button_ex(ui: &mut Ui, icon: &str, tooltip: &str, on: bool, side: f3
             23..=30 => 16.0,
             _ => (side * 0.5).round(),
         };
-        painter.text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(icon_size), color);
+        // Like the prototype's `<button>`: its 6 px side padding leaves a
+        // 22 px button 10 px for the 13 px icon, which then starts at the
+        // padding instead of centering (1.5 px right of the middle).
+        let x =
+            if side <= 22.0 && icon_size > side - 12.0 { rect.left() + 6.0 + icon_size / 2.0 } else { rect.center().x };
+        painter.text(pos2(x, rect.center().y), Align2::CENTER_CENTER, icon, theme::icon_font(icon_size), color);
     }
     resp
 }
@@ -686,6 +691,46 @@ pub fn metric_colored(ui: &mut Ui, icon: &str, text: &str, color: Option<Color32
     resp
 }
 
+/// `text` laid out like CSS `font-variant-numeric: tabular-nums` with Inter
+/// (`.rmeta` metrics): digits and `-+×` take one fixed width, `.,:` and
+/// spaces another, so numbers that change keep their place. Returns the
+/// galley (paint it with a color; it is laid out with the placeholder color)
+/// and its advance width.
+pub fn tabular_text(ui: &Ui, text: &str, font: FontId) -> (std::sync::Arc<egui::Galley>, f32) {
+    let plain = egui::TextFormat::simple(font.clone(), Color32::PLACEHOLDER);
+    let mut job = egui::text::LayoutJob::default();
+    // Each tabular glyph is centered in its fixed width: half of the
+    // difference goes before it, half before whatever follows.
+    let mut carry = 0.0;
+    let mut run = String::new();
+    for c in text.chars() {
+        // Advance widths (em) of Inter's `tnum` glyphs.
+        let em = match c {
+            '0'..='9' | '-' | '+' | '×' => 0.6484,
+            '.' | ',' | ':' | ' ' => 0.2686,
+            '(' | ')' => 0.3906,
+            _ => {
+                run.push(c);
+                continue;
+            }
+        };
+        if !run.is_empty() {
+            job.append(&std::mem::take(&mut run), carry, plain.clone());
+            carry = 0.0;
+        }
+        let pad = em * font.size - ui.ctx().fonts_mut(|f| f.glyph_width(&font, c));
+        job.append(c.encode_utf8(&mut [0; 4]), carry + pad / 2.0, plain.clone());
+        carry = pad / 2.0;
+    }
+    if !run.is_empty() {
+        job.append(&run, carry, plain);
+        carry = 0.0;
+    }
+    let g = ui.painter().layout_job(job);
+    let w = g.size().x + carry;
+    (g, w)
+}
+
 /// The size of a key cap for `keys`: the text, 5 px padding and a 1 px
 /// border on each side (`.kbd`).
 pub fn kbd_size(ui: &Ui, keys: &str) -> Vec2 {
@@ -993,7 +1038,7 @@ fn search_field_ex(
     let font = if small { 12.0 } else { 12.5 };
     let edit = egui::TextEdit::singleline(text)
         .id_salt(id)
-        .hint_text(RichText::new(hint_text).size(font))
+        .hint_text(RichText::new(hint_text).font(FontId::proportional(font)))
         .font(FontId::proportional(font))
         .desired_width(width)
         .min_size(vec2(0.0, h))
@@ -1070,23 +1115,26 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, body: &str, actions: im
     let content_h: f32 = ui.data(|d| d.get_temp(id).unwrap_or(150.0));
     let top = ui.cursor().top();
     ui.vertical_centered(|ui| {
+        // The prototype's `.empty`: 6 apart, text on 1.45 lines, the icon
+        // 8 more above the title and the actions 10 more under the body.
+        ui.spacing_mut().item_spacing.y = 0.0;
         ui.add_space(((ui.available_height() - content_h) / 2.0).clamp(12.0, 400.0));
         let start = ui.cursor().top();
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
         ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(24.0), p.text_muted);
         ui.add_space(14.0);
-        ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+        ui.label(RichText::new(title).font(theme::semibold(14.0)).line_height(Some(14.0 * 1.45)).color(p.text));
         if !body.is_empty() {
             ui.add_space(6.0);
             ui.scope(|ui| {
-                ui.set_max_width(320.0);
-                ui.add(
-                    egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap(),
-                );
+                // Never wider than the space there is (a sidebar would grow).
+                ui.set_max_width(ui.available_width().min(320.0));
+                let text = RichText::new(body).size(12.5).line_height(Some(12.5 * 1.45)).color(p.text_muted);
+                ui.add(egui::Label::new(text).halign(Align::Center).wrap());
             });
         }
-        ui.add_space(10.0);
+        ui.add_space(16.0);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             actions(ui);
@@ -1124,7 +1172,11 @@ pub fn banner_with(ui: &mut Ui, tone: Tone, icon: &str, text: &str, actions: imp
                 let aw: f32 = ui.data(|d| d.get_temp(wid).unwrap_or(0.0));
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - aw - if aw > 0.0 { 10.0 } else { 0.0 }).max(80.0));
-                    ui.add(egui::Label::new(RichText::new(text).size(12.5).color(p.text)).wrap());
+                    // 12.5 px on the body's 1.45 line height, like the prototype.
+                    ui.add(
+                        egui::Label::new(RichText::new(text).size(12.5).line_height(Some(12.5 * 1.45)).color(p.text))
+                            .wrap(),
+                    );
                 });
                 let before = ui.cursor().left();
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -1138,6 +1190,34 @@ pub fn banner_with(ui: &mut Ui, tone: Tone, icon: &str, text: &str, actions: imp
             });
         })
         .response
+}
+
+/// [`banner`] with styled text (bold lead, code), laid out by the caller
+/// with [`banner_format`].
+pub fn banner_job(ui: &mut Ui, tone: Tone, icon: &str, mut job: egui::text::LayoutJob) -> Response {
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(tone);
+    egui::Frame::new()
+        .fill(bg)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(fg));
+                job.wrap.max_width = ui.available_width();
+                ui.add(egui::Label::new(job).wrap());
+            });
+        })
+        .response
+}
+
+/// The text format of a [`banner_job`] part: 12.5 px (code 12.5 mono) on
+/// the 1.45 line height.
+pub fn banner_format(ui: &Ui, font: FontId) -> egui::TextFormat {
+    let p = theme::pal(ui);
+    egui::TextFormat { line_height: Some(12.5 * 1.45), ..egui::TextFormat::simple(font, p.text) }
 }
 
 /// An icon on a soft rounded square (radius = side / 4).
@@ -1355,7 +1435,8 @@ pub fn pane_body<R>(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, add
         .inner
 }
 
-/// Two panes side by side (`side`) or stacked, with a 9 px gutter that can be
+/// Two panes side by side (`side`, a 9 px gutter) or stacked (only the
+/// lower pane's 1 px top border, as the prototype); the divider can be
 /// dragged (double-click resets to `default`). The split is kept per `id`.
 /// Each pane gets a clipped `Ui` filling its rect, laid out top-down with no
 /// padding: panes draw their own bars.

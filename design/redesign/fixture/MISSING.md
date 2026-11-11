@@ -4,9 +4,9 @@ Generated with the steps in `steps/`. For each approximate screen: the automatio
 `crates/ternarywire-app/src/automation.rs` would need (a proposal; the name is free), and what it
 should do. Add the step, then replace the stand-in steps of that screen.
 
-**Exact** (49): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`
+**Exact** (52): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`, `mock`, `mock-routes`, `capture-cert`
 
-**Approximate** (15): `home`, `http-body`, `http-graphql`, `http-error`, `sio`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`, `mock`, `mock-routes`, `capture-cert`
+**Approximate** (12): `home`, `http-body`, `http-graphql`, `http-error`, `sio`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`
 
 | Screen | Needed step | What it should do |
 | --- | --- | --- |
@@ -22,9 +22,6 @@ should do. Add the step, then replace the stand-in steps of that screen.
 | `flow-settings` | `{"flow_menu": "add-block"}` | open the Add block menu |
 | `runner` | `{"runner_options": {"iterations": 12, "data_file": "data/books.csv"}}` | 12 iterations from the data file (iteration 3 asks for book 9 → the 404 failure); then {"runner_select": "Get book#3"} |
 | `runner-perf` | `{"runner_mode": "performance"}` | switch the runner to Performance (25 users, 30 s), then runner_start |
-| `mock` | `{"auto": "start"}` | start the mock server (port 3000); its log then needs traffic, e.g. {"_poke": "mock"}, and {"auto": "select:1"} |
-| `mock-routes` | `{"mock_section": "routes"}` | show the Routes tab (and {"auto": "start"}) |
-| `capture-cert` | `{"capture_cert": true}` | open the certificate panel of the capture proxy |
 
 ## States the fixture cannot produce
 

@@ -35,7 +35,8 @@ pub struct WebhookTab {
     filter: String,
     settings_open: bool,
     /// Automation: `start`, `stop`, `settings`, `select[:n]` (the latest
-    /// request, or the n-th row from the top), `hit:<METHOD> <path> [body]`.
+    /// request, or the n-th row from the top), `hit:<METHOD> <path> [body]`,
+    /// `replay:<url>` (replays the selected request to the URL).
     pub auto: Option<String>,
 }
 
@@ -146,8 +147,13 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Webhoo
     let auto = tab.auto.take();
     let mut do_start = auto.as_deref() == Some("start") && tab.listener.is_none() && !tab.starting;
     let mut do_stop = auto.as_deref() == Some("stop");
+    let mut auto_replay = false;
     match auto.as_deref() {
         Some("settings") => tab.settings_open = !tab.settings_open,
+        Some(a) if a.starts_with("replay:") => {
+            tab.replay_target = a[7..].to_string();
+            auto_replay = true;
+        }
         Some(a) if a.starts_with("select") => {
             if let Some(l) = &tab.listener {
                 let events = l.events();
@@ -171,7 +177,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Webhoo
     }
 
     // Title and address bar.
-    let mut acts = Acts::default();
+    let mut acts = Acts { replay: auto_replay, ..Default::default() };
     let mut copy_addr = false;
     sv::tool_title(
         ui,
@@ -346,7 +352,8 @@ fn settings(ui: &mut Ui, id: egui::Id, tab: &mut WebhookTab) {
                 tab.status = v as u16;
                 let apply_w = if running {
                     let g = ui.painter().layout_no_wrap(tr("Apply").into(), theme::medium(12.0), p.text);
-                    8.0 + 13.0 + 5.0 + g.size().x + 8.0 + 8.0
+                    // The ghost button (padding 8, its 1 px borders) and the 8 before it.
+                    1.0 + 8.0 + 13.0 + 5.0 + g.size().x + 8.0 + 1.0 + 8.0
                 } else {
                     0.0
                 };
@@ -379,13 +386,17 @@ fn waiting(ui: &mut Ui, tab: &WebhookTab, url: Option<&str>, do_start: &mut bool
                 "curl -X POST {url}/hook \\\n  -H \"Content-Type: application/json\" \\\n  -d '{{\"hello\":\"world\"}}'"
             );
             let port = tab.address().map_or(tab.port, |a| a.port());
+            // The prototype centers the empty state's 24 px top padding with
+            // the rest (its bottom padding is the gap above the command).
+            ui.add_space(24.0);
             kit::empty_state(
                 ui,
                 icons::HOURGLASS,
                 tr("Waiting for requests"),
                 tr("Requests sent to the address above appear here. Try:"),
                 |ui| {
-                    ui.add_space(14.0);
+                    // 24 under the body (the `.empty` padding), less the actions' 16.
+                    ui.add_space(8.0);
                     let w = ui.available_width().min(620.0);
                     ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
                         egui::Frame::new()
@@ -394,30 +405,45 @@ fn waiting(ui: &mut Ui, tab: &WebhookTab, url: Option<&str>, do_start: &mut bool
                             .corner_radius(egui::CornerRadius::same(9))
                             .inner_margin(egui::Margin { left: 14, right: 10, top: 10, bottom: 10 })
                             .show(ui, |ui| {
-                                ui.set_width(w - 24.0);
-                                ui.horizontal(|ui| {
+                                // 620 wide with its 14 + 10 padding and 1 px border.
+                                ui.set_width(w - 26.0);
+                                // `$`, the command (12 px on 1.45 lines) and Copy, centered on
+                                // one another; Copy's width is measured on the previous frame.
+                                let copy_w_id = ui.scope_id().with("copy-w");
+                                let copy_w: f32 = ui.data(|d| d.get_temp(copy_w_id).unwrap_or(120.0));
+                                let dollar = ui.painter().layout_no_wrap("$".into(), theme::mono(12.0), p.text_faint);
+                                let text_w = (ui.available_width() - dollar.size().x - copy_w - 20.0).max(80.0);
+                                let mut job = egui::text::LayoutJob::single_section(
+                                    curl.clone(),
+                                    egui::TextFormat {
+                                        line_height: Some(12.0 * 1.45),
+                                        ..egui::TextFormat::simple(theme::mono(12.0), p.text)
+                                    },
+                                );
+                                job.wrap.max_width = text_w;
+                                job.wrap.break_anywhere = true;
+                                let g = ui.painter().layout_job(job);
+                                sv::hrow(ui, g.size().y.max(24.0), |ui| {
                                     ui.spacing_mut().item_spacing.x = 10.0;
-                                    ui.label(RichText::new("$").font(theme::mono(12.0)).color(p.text_faint));
+                                    let (r, _) = ui.allocate_exact_size(dollar.size(), egui::Sense::hover());
+                                    ui.painter().galley(r.min, dollar, p.text_faint);
+                                    let (r, _) = ui.allocate_exact_size(vec2(text_w, g.size().y), egui::Sense::hover());
+                                    ui.painter().galley(r.min, g, p.text);
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if kit::button_ex(
+                                        let b = kit::button_ex(
                                             ui,
                                             kit::Kind::Secondary,
                                             Some(icons::COPY),
                                             tr("Copy command"),
                                             true,
-                                        )
-                                        .clicked()
-                                        {
+                                        );
+                                        if (b.rect.width() - copy_w).abs() > 0.5 {
+                                            ui.data_mut(|d| d.insert_temp(copy_w_id, b.rect.width()));
+                                            ui.ctx().request_repaint();
+                                        }
+                                        if b.clicked() {
                                             acts.copy = Some(curl.clone());
                                         }
-                                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&curl).font(theme::mono(12.0)).color(p.text),
-                                                )
-                                                .wrap(),
-                                            );
-                                        });
                                     });
                                 });
                             });
@@ -429,8 +455,15 @@ fn waiting(ui: &mut Ui, tab: &WebhookTab, url: Option<&str>, do_start: &mut bool
                         &[&cmd],
                     );
                     let mut job = egui::text::LayoutJob::default();
-                    let plain = egui::TextFormat::simple(egui::FontId::proportional(12.0), p.text_muted);
-                    let code = egui::TextFormat::simple(theme::mono(12.0), p.text_muted);
+                    let line = 12.0 * 1.45;
+                    let plain = egui::TextFormat {
+                        line_height: Some(line),
+                        ..egui::TextFormat::simple(egui::FontId::proportional(12.0), p.text_muted)
+                    };
+                    let code = egui::TextFormat {
+                        line_height: Some(line),
+                        ..egui::TextFormat::simple(theme::mono(12.0), p.text_muted)
+                    };
                     match text.find(&cmd) {
                         Some(i) => {
                             job.append(&text[..i], 0.0, plain.clone());
@@ -442,10 +475,10 @@ fn waiting(ui: &mut Ui, tab: &WebhookTab, url: Option<&str>, do_start: &mut bool
                     job.wrap.max_width = ui.available_width() - 30.0;
                     let g = ui.painter().layout_job(job);
                     let ig = ui.painter().layout_no_wrap(icons::INFO.into(), theme::icon_font(12.0), p.text_faint);
-                    let size = vec2(ig.size().x + 6.0 + g.size().x, g.size().y.max(18.0));
+                    let size = vec2(ig.size().x + 6.0 + g.size().x, g.size().y.max(line));
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     ui.painter().galley(
-                        pos2(rect.left(), rect.top() + 9.0 - ig.size().y / 2.0),
+                        pos2(rect.left(), rect.top() + line / 2.0 - ig.size().y / 2.0),
                         ig.clone(),
                         p.text_faint,
                     );
@@ -638,7 +671,8 @@ fn detail(ui: &mut Ui, tab: &mut WebhookTab, e: &WebhookEvent, base: &str, acts:
                 sv::hrow(ui, 18.0, |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.label(RichText::new(icons::ARROW_CLOCKWISE).font(theme::icon_font(12.5)).color(p.text_muted));
-                    ui.add_space(-4.0);
+                    // A space of the 12.5 px title apart, like the prototype's text.
+                    ui.add_space(-4.5);
                     ui.label(kit::section_title(tr("Replay")).color(p.text));
                     ui.add(
                         egui::Label::new(kit::hint(
@@ -714,10 +748,32 @@ fn detail(ui: &mut Ui, tab: &mut WebhookTab, e: &WebhookEvent, base: &str, acts:
     ui.advance_cursor_after_rect(full);
 }
 
+/// JSON on one line with a space after `:` and `,` (`{"received": true}`).
+fn one_line_json(v: &serde_json::Value) -> String {
+    struct Spaced;
+    impl serde_json::ser::Formatter for Spaced {
+        fn begin_array_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
+            if first { Ok(()) } else { w.write_all(b", ") }
+        }
+        fn begin_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
+            if first { Ok(()) } else { w.write_all(b", ") }
+        }
+        fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+            w.write_all(b": ")
+        }
+    }
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, Spaced);
+    match serde::Serialize::serialize(v, &mut ser) {
+        Ok(()) => String::from_utf8(out).unwrap_or_default(),
+        Err(_) => v.to_string(),
+    }
+}
+
 /// A response body on one line (JSON compacted and highlighted), elided.
 fn one_line_body(ui: &mut Ui, body: &[u8]) {
     let text = match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
+        Ok(v) => one_line_json(&v),
         Err(_) => String::from_utf8_lossy(body).replace(['\n', '\r'], " "),
     };
     let dark = ui.visuals().dark_mode;
@@ -743,5 +799,14 @@ fn run(app: &mut TernaryWireApp, tab_id: u64, tab: &mut WebhookTab, start_now: b
         tab.stop(&app.rt);
     } else if start_now && tab.listener.is_none() && !tab.starting {
         start(app, tab_id, tab);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn one_line_json_spaces_separators() {
+        let v = serde_json::json!({"received": true, "ids": [1, 2]});
+        assert_eq!(super::one_line_json(&v), r#"{"received": true, "ids": [1, 2]}"#);
     }
 }

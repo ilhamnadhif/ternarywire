@@ -869,9 +869,9 @@ fn functional_options(ui: &mut Ui, tab: &mut RunnerTab) {
         ui.add_space(7.0);
         let mut pick = false;
         let label = if tab.data_path.is_some() { tr("Change…") } else { tr("Select file") };
-        // A small button: padding 8, a 13 px icon, a 5 px gap and the label.
+        // A small button: padding 8 and a 1 px border, a 13 px icon, a 5 px gap and the label.
         let button_w =
-            ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 16.0 + 13.0 + 5.0;
+            ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 18.0 + 13.0 + 5.0;
         frow(ui, false, tr("Data file"), tr("CSV or JSON; one iteration per row."), button_w, |ui| {
             let o = kit::ButtonOpts { icon: Some(icons::FILE_ARROW_UP), ..Default::default() };
             pick = kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, label, o).clicked();

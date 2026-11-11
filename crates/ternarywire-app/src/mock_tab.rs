@@ -50,8 +50,9 @@ pub struct MockTab {
     filter: String,
     selected_route: usize,
     settings_open: bool,
-    /// Automation: `start`, `stop`, `routes`, `logs`, `settings`,
-    /// `select[:n]` (n-th row from the top), `hit:<METHOD> <path> [body]`.
+    /// Automation: `start`, `stop`, `routes`, `logs`, `settings`, `port:<n>`,
+    /// `select[:n]` (n-th row from the top), `route:<request name>`,
+    /// `hit:<METHOD> <path> [body]`.
     pub auto: Option<String>,
 }
 
@@ -227,12 +228,19 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
     let mut do_stop = false;
     let mut clear_logs = false;
     let mut select_row: Option<usize> = None;
+    let mut select_route: Option<String> = None;
     match tab.auto.take().as_deref() {
         Some("start") => do_start = true,
         Some("stop") => do_stop = true,
         Some("routes") => tab.sub = Sub::Routes,
         Some("logs") => tab.sub = Sub::Logs,
         Some("settings") => tab.settings_open = !tab.settings_open,
+        Some(a) if a.starts_with("port:") => {
+            if let Ok(p) = a[5..].parse() {
+                tab.port = p;
+            }
+        }
+        Some(a) if a.starts_with("route:") => select_route = Some(a[6..].to_string()),
         Some(a) if a.starts_with("select") => {
             select_row = Some(a.strip_prefix("select:").and_then(|n| n.parse().ok()).unwrap_or(0));
         }
@@ -321,6 +329,12 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
         None => ternarywire_mock::routes(&collection),
     };
     let logs = tab.server.as_ref().map(|s| s.logs()).unwrap_or_default();
+    if let Some(name) = select_route
+        && let Some(i) = routes.iter().position(|r| r.request_name == name)
+    {
+        tab.selected_route = i;
+        tab.sub = Sub::Routes;
+    }
     if let Some(n) = select_row {
         // Rows are newest first.
         if let Some(i) = logs.len().checked_sub(n + 1) {
@@ -502,17 +516,19 @@ fn settings(ui: &mut Ui, id: egui::Id, tab: &mut MockTab, running: bool) {
                             });
                         });
                     });
-                    sv::seg_track(ui, 26.0);
-                    ui.push_id("fail-kind", |ui| {
-                        kit::segmented_sm(
-                            ui,
-                            fail_kind,
-                            &[
-                                (FailKind::Status, tr("Error status")),
-                                (FailKind::Drop, tr("Drop connection")),
-                                (FailKind::Timeout, tr("Timeout")),
-                            ],
-                        )
+                    sv::undimmed(ui, |ui| {
+                        sv::seg_track(ui, 26.0);
+                        ui.push_id("fail-kind", |ui| {
+                            kit::segmented_sm(
+                                ui,
+                                fail_kind,
+                                &[
+                                    (FailKind::Status, tr("Error status")),
+                                    (FailKind::Drop, tr("Drop connection")),
+                                    (FailKind::Timeout, tr("Timeout")),
+                                ],
+                            )
+                        })
                     });
                 });
             }),
@@ -680,9 +696,31 @@ fn example<'a>(c: &'a Collection, request: &str, name: &str) -> Option<&'a Examp
     c.find_request(request)?.examples.iter().find(|e| e.name == name)
 }
 
+/// The no-match message: its first sentence bold, the request in code.
+fn no_match_job(ui: &Ui, text: &str, what: &str) -> egui::text::LayoutJob {
+    let plain = kit::banner_format(ui, egui::FontId::proportional(12.5));
+    let bold = kit::banner_format(ui, theme::semibold(12.5));
+    let code = kit::banner_format(ui, theme::mono(12.5));
+    let mut job = egui::text::LayoutJob::default();
+    let lead = text.find(". ").map_or(0, |i| i + 1);
+    job.append(&text[..lead], 0.0, bold);
+    let rest = &text[lead..];
+    match rest.find(what) {
+        Some(i) => {
+            job.append(&rest[..i], 0.0, plain.clone());
+            job.append(what, 0.0, code);
+            job.append(&rest[i + what.len()..], 0.0, plain);
+        }
+        None => job.append(rest, 0.0, plain),
+    }
+    job
+}
+
+/// The media type an example is served as (`application/json`, without
+/// parameters such as `charset`).
 fn content_type(e: &Example) -> String {
     match e.headers.iter().find(|h| h.enabled && h.key.eq_ignore_ascii_case("content-type")) {
-        Some(h) => h.value.clone(),
+        Some(h) => h.value.split(';').next().unwrap_or_default().trim().to_string(),
         None => match e.language.as_deref() {
             Some("json") => "application/json".into(),
             Some("xml") => "application/xml".into(),
@@ -730,6 +768,9 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                         Some(tr("Duration")),
                     );
                 }
+                if let Some(a) = l.remote {
+                    sv::metric(ui, Some(icons::DESKTOP), &trf("from {}", &[&a.to_string()]), None);
+                }
             });
         },
         |ui| {
@@ -747,7 +788,7 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                     ui.spacing_mut().item_spacing.y = 6.0;
                     sv::hrow(ui, 24.0, |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(14.0)).color(p.ok));
+                        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(13.0)).color(p.ok));
                         ui.label(RichText::new(tr("Matched")).font(theme::medium(13.0)).color(p.text));
                         sv::method_tag(ui, &r.method);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -766,12 +807,16 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                         });
                     });
                     let detail = match example(c, &r.request_id, ex_name) {
+                        _ if l.status == 0 => tr(
+                            "Dropped by failure simulation (Failures › Drop connection) before the example was sent.",
+                        )
+                        .to_string(),
                         Some(e) => {
                             format!("{} · {} · {}", trf("Served example “{}”", &[&e.name]), l.status, content_type(e))
                         }
                         None => trf("Served example “{}”", &[&ex_name]),
                     };
-                    sv::hrow(ui, 18.0, |ui| {
+                    sv::hrow(ui, 12.0 * 1.45, |ui| {
                         ui.add_space(22.0);
                         ui.add(egui::Label::new(kit::hint(ui, &detail)).wrap());
                     });
@@ -787,15 +832,11 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
             }
             None if l.status == 404 => {
                 let what = format!("{} {}", l.method, l.path);
-                kit::banner(
-                    ui,
-                    Tone::Warn,
-                    icons::WARNING,
-                    &trf(
-                        "No match. No request in “{}” has a saved example for {}, so the server answered 404.",
-                        &[&c.name, &what],
-                    ),
+                let text = trf(
+                    "No match. No request in “{}” has a saved example for {}, so the server answered 404.",
+                    &[&c.name, &what],
                 );
+                kit::banner_job(ui, Tone::Warn, icons::WARNING, no_match_job(ui, &text, &what));
             }
             None => {
                 kit::banner(
@@ -997,6 +1038,7 @@ mod tests {
             matched: None,
             status: 200,
             duration_ms: 1.0,
+            remote: None,
         }
     }
 

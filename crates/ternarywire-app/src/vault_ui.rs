@@ -117,6 +117,7 @@ fn kind_icon(kind: ProviderKind) -> &'static str {
 /// Width of a small button with an icon, to lay out fields beside it.
 fn small_button_w(ui: &Ui, icon: bool, text: &str) -> f32 {
     let g = ui.painter().layout_no_wrap(text.to_string(), theme::medium(12.0), egui::Color32::PLACEHOLDER);
+    // Padding 8 and a 1 px border on each side.
     g.size().x + 18.0 + if icon { 13.0 + 5.0 } else { 0.0 }
 }
 
