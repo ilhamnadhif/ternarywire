@@ -11,7 +11,11 @@
   {"vault_provider": {"id": "corp-vault", "name": "corp-vault", "kind": "hashicorp_vault", "address": "https://vault.corp:8200", "mount": "secret", "kv_version": "auto"}},
   {"vault_provider": {"id": "aws-prod", "name": "aws-prod", "kind": "aws_secrets_manager", "region": "ap-southeast-1"}},
   {"vault_provider": {"id": "team-1p", "name": "team-1p", "kind": "one_password"}},
-  {"dialog": "vault:link:db_password"},
+  {"vault_credential": ["corp-vault", "token", "s.fixture-token"]},
+  {"vault_link": {"name": "db_password", "provider_id": "corp-vault", "reference": "path/to/db#password"}},
+  {"vault_link": {"name": "stripe_key", "provider_id": "aws-prod", "reference": "prod/stripe#secret"}},
+  {"vault_link": {"name": "github_pat", "provider_id": "team-1p", "reference": "op://Dev/GitHub/token"}},
+  {"dialog": "vault:link:db_password|apps/bookstore/db#password"},
   {"wait_ms": 800},
   {"screenshot": "@OUT"},
   {"quit": true}
