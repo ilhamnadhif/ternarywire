@@ -1,0 +1,15 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"sidebar": "flows"},
+  {"open_flow": "Catalog summary"},
+  {"wait_ms": 500},
+  {"run_flow": true},
+  {"wait_ms": 5000},
+  {"flow_select": "Books"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

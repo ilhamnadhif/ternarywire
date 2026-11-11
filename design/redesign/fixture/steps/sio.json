@@ -1,0 +1,44 @@
+[
+  {
+    "window": [
+      "@W",
+      "@H"
+    ]
+  },
+  {
+    "theme": "@THEME"
+  },
+  {
+    "expand": "Bookstore API"
+  },
+  {
+    "expand": "Realtime & AI"
+  },
+  {
+    "open": "Chat events"
+  },
+  {
+    "auto": "connect"
+  },
+  {
+    "wait_ms": 1500
+  },
+  {
+    "auto": "emit"
+  },
+  {
+    "wait_ms": 3000
+  },
+  {
+    "auto": "select:5"
+  },
+  {
+    "wait_ms": 800
+  },
+  {
+    "screenshot": "@OUT"
+  },
+  {
+    "quit": true
+  }
+]

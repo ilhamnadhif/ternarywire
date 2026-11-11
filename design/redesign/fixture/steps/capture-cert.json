@@ -1,0 +1,14 @@
+[
+  {"_poke": "capture"},
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"new_capture": 8888},
+  {"wait_ms": 4500},
+  {"auto": "select:0"},
+  {"auto": "cert"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

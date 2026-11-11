@@ -1,0 +1,50 @@
+[
+  {
+    "window": [
+      "@W",
+      "@H"
+    ]
+  },
+  {
+    "theme": "@THEME"
+  },
+  {
+    "expand": "Bookstore API"
+  },
+  {
+    "expand": "Realtime & AI"
+  },
+  {
+    "open": "Sensor stream"
+  },
+  {
+    "auto": "connect"
+  },
+  {
+    "wait_ms": 3000
+  },
+  {
+    "auto": "compose:sensors/kitchen/target|1|true|{\n  \"c\": 22,\n  \"by\": \"{{clientId}}\"\n}"
+  },
+  {
+    "wait_ms": 100
+  },
+  {
+    "auto": "publish"
+  },
+  {
+    "wait_ms": 2500
+  },
+  {
+    "auto": "select:4"
+  },
+  {
+    "wait_ms": 800
+  },
+  {
+    "screenshot": "@OUT"
+  },
+  {
+    "quit": true
+  }
+]

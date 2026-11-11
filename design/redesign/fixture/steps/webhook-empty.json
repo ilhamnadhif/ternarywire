@@ -1,0 +1,12 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"new_webhook": 8787},
+  {"auto": "start"},
+  {"wait_ms": 600},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

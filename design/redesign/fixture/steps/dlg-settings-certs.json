@@ -1,0 +1,16 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "List books"},
+  {"section": "params"},
+  {"send": true},
+  {"wait_idle": true},
+  {"wait_ms": 300},
+  {"dialog": "settings:certs"},
+  {"settings_draft": {"certificates": {"ca_enabled": true, "ca_path": "~/certs/corp-root-ca.pem", "client_certs": [{"enabled": true, "host": "api.bookstore.dev:443", "cert_path": "~/certs/client.crt", "key_path": "~/certs/client.key", "pfx_path": "", "passphrase": "{{vault:client-cert}}"}]}}},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

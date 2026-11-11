@@ -1,0 +1,12 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "Assistant"},
+  {"auto": "send"},
+  {"wait_ms": 6000},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

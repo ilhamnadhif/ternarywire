@@ -1,0 +1,18 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "List books"},
+  {"section": "params"},
+  {"send": true},
+  {"wait_idle": true},
+  {"wait_ms": 300},
+  {"vault_provider": {"id": "corp-vault", "name": "corp-vault", "kind": "hashicorp_vault", "address": "https://vault.corp:8200", "mount": "secret", "kv_version": "auto"}},
+  {"vault_provider": {"id": "aws-prod", "name": "aws-prod", "kind": "aws_secrets_manager", "region": "ap-southeast-1"}},
+  {"vault_provider": {"id": "team-1p", "name": "team-1p", "kind": "one_password"}},
+  {"dialog": "vault:link:db_password"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

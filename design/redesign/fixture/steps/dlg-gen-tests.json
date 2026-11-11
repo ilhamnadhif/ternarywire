@@ -1,0 +1,16 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "List books"},
+  {"section": "params"},
+  {"send": true},
+  {"wait_idle": true},
+  {"wait_ms": 300},
+  {"resp_panel": "generate_tests"},
+  {"wait_ms": 300},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

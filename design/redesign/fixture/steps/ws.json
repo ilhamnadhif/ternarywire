@@ -1,0 +1,50 @@
+[
+  {
+    "window": [
+      "@W",
+      "@H"
+    ]
+  },
+  {
+    "theme": "@THEME"
+  },
+  {
+    "expand": "Bookstore API"
+  },
+  {
+    "expand": "Realtime & AI"
+  },
+  {
+    "open": "Echo socket"
+  },
+  {
+    "auto": "connect"
+  },
+  {
+    "wait_ms": 3000
+  },
+  {
+    "auto": "composer:{\"type\":\"subscribe\",\"channel\":\"books\"}"
+  },
+  {
+    "wait_ms": 100
+  },
+  {
+    "auto": "send"
+  },
+  {
+    "wait_ms": 1500
+  },
+  {
+    "auto": "select:3"
+  },
+  {
+    "wait_ms": 800
+  },
+  {
+    "screenshot": "@OUT"
+  },
+  {
+    "quit": true
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {"_env": {"TERNARYWIRE_UPDATE_URL": "http://127.0.0.1:18795/__fixture/update.json"}},
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "List books"},
+  {"section": "params"},
+  {"send": true},
+  {"wait_idle": true},
+  {"wait_ms": 300},
+  {"wait_ms": 1500},
+  {"dialog": "update:progress"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

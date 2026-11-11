@@ -1,0 +1,13 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"sidebar": "apis"},
+  {"open_spec": "bookstore.yaml"},
+  {"auto": "preview"},
+  {"spec_sync": "Bookstore API"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

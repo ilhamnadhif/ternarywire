@@ -1,0 +1,20 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "List books"},
+  {"section": "params"},
+  {"send": true},
+  {"wait_idle": true},
+  {"wait_ms": 300},
+  {"fork": "Payments"},
+  {"wait_ms": 4500},
+  {"open": "Create charge"},
+  {"url": "{{baseUrl}}/v2/charges"},
+  {"open": "List books"},
+  {"fork_sync": ["Payments (fork)", true]},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

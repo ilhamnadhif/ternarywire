@@ -1,0 +1,14 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "Current user"},
+  {"section": "auth"},
+  {"send": true},
+  {"wait_idle": true},
+  {"resp_section": "tests"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

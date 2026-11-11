@@ -1,0 +1,17 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"runner": "Bookstore API"},
+  {"wait_ms": 300},
+  {"runner_options": {"iterations": 12, "data_file": "data/books.csv"}},
+  {"wait_ms": 300},
+  {"runner_start": true},
+  {"wait_ms": 500},
+  {"wait_idle": true},
+  {"runner_select": "Get book#3"},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]

@@ -1,0 +1,1 @@
+[{"window": ["@W", "@H"]}, {"theme": "@THEME"}, {"expand": "Bookstore API"}, {"expand": "Realtime & AI"}, {"open": "Create book"}, {"section": "body"}, {"send": true}, {"wait_idle": true}, {"resp_section": "headers"}, {"wait_ms": 800}, {"screenshot": "@OUT"}, {"quit": true}]

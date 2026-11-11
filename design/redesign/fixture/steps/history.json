@@ -1,0 +1,1 @@
+[{"window": ["@W", "@H"]}, {"theme": "@THEME"}, {"expand": "Bookstore API"}, {"expand": "Realtime & AI"}, {"sidebar": "history"}, {"open_history": "/books?page=1"}, {"collapse": "Bookstore API/Orders"}, {"wait_ms": 800}, {"screenshot": "@OUT"}, {"quit": true}]

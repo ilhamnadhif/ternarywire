@@ -1,0 +1,44 @@
+[
+  {
+    "window": [
+      "@W",
+      "@H"
+    ]
+  },
+  {
+    "theme": "@THEME"
+  },
+  {
+    "expand": "Bookstore API"
+  },
+  {
+    "expand": "Realtime & AI"
+  },
+  {
+    "open": "Greeter"
+  },
+  {
+    "grpc_load": true
+  },
+  {
+    "wait_ms": 2000
+  },
+  {
+    "grpc_invoke": true
+  },
+  {
+    "wait_ms": 1500
+  },
+  {
+    "auto": "select:2"
+  },
+  {
+    "wait_ms": 800
+  },
+  {
+    "screenshot": "@OUT"
+  },
+  {
+    "quit": true
+  }
+]

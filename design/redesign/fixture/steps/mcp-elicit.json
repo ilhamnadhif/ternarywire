@@ -1,0 +1,14 @@
+[
+  {"window": ["@W", "@H"]},
+  {"theme": "@THEME"},
+  {"expand": "Bookstore API"},
+  {"expand": "Realtime & AI"},
+  {"open": "Tools server"},
+  {"auto": "connect"},
+  {"wait_ms": 1500},
+  {"auto": "call:create_order:{\"bookIds\":[4,5]}"},
+  {"wait_ms": 2000},
+  {"wait_ms": 800},
+  {"screenshot": "@OUT"},
+  {"quit": true}
+]
