@@ -1992,11 +1992,11 @@ fn log_row(ui: &mut Ui, l: &LogLine, selected: bool) -> egui::Response {
     x += 8.0;
     // The meta first (as the prototype's span), the message in what is left.
     if !l.meta.is_empty() && right - x > 60.0 {
-        let g = truncated(&painter, &l.meta, egui::FontId::proportional(11.5), p.text_faint, right - x - 16.0);
+        let g = truncated(&painter, &l.meta, egui::FontId::proportional(11.5), p.text_faint, right - x - 8.0);
         painter.galley(pos2(x, cy - g.size().y / 2.0), g.clone(), p.text_faint);
         x += g.size().x + 8.0;
     }
-    if right > x + 8.0 {
+    if right > x + 4.0 {
         let (font, color) = if l.dir == Dir::System {
             (egui::FontId::proportional(12.0), if l.error { p.text } else { p.text_muted })
         } else {
