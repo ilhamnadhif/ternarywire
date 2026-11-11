@@ -791,7 +791,8 @@ fn frow(ui: &mut Ui, first: bool, label: &str, help: &str, control_w: f32, add: 
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y + 0.5, Stroke::new(1.0, p.border));
     }
-    ui.add_space(7.0);
+    // 7 px padding, under the 1 px hairline of a row that is not the first.
+    ui.add_space(if first { 7.0 } else { 8.0 });
     let w = ui.available_width();
     let label_w = (w - control_w - 14.0).max(80.0);
     let lay = |text: &str, font: FontId, color: Color32, line: f32| {
@@ -800,8 +801,8 @@ fn frow(ui: &mut Ui, first: bool, label: &str, help: &str, control_w: f32, add: 
         job.wrap.max_width = label_w;
         ui.painter().layout_job(job)
     };
-    let lg = lay(label, theme::medium(13.0), p.text, 19.0);
-    let hg = (!help.is_empty()).then(|| lay(help, FontId::proportional(12.0), p.text_muted, 17.0));
+    let lg = lay(label, theme::medium(13.0), p.text, 18.85);
+    let hg = (!help.is_empty()).then(|| lay(help, FontId::proportional(12.0), p.text_muted, 17.4));
     let text_h = lg.size().y + hg.as_ref().map_or(0.0, |g| 1.0 + g.size().y);
     let h = text_h.max(26.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
@@ -825,12 +826,16 @@ fn num_unit<T: egui::emath::Numeric>(
     width: f32,
     unit: &str,
 ) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        num_input(ui, ("runner-num", name), name, value, range, width);
-        if !unit.is_empty() {
-            ui.label(RichText::new(unit).size(12.0).color(theme::pal(ui).text_faint));
-        }
+    ui.scope(|ui| {
+        // A row as tall as the 26 px input.
+        ui.spacing_mut().interact_size.y = 26.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            num_input(ui, ("runner-num", name), name, value, range, width);
+            if !unit.is_empty() {
+                ui.label(RichText::new(unit).size(12.0).color(theme::pal(ui).text_faint));
+            }
+        });
     });
 }
 
@@ -856,6 +861,8 @@ fn functional_options(ui: &mut Ui, tab: &mut RunnerTab) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             ui.allocate_ui_with_layout(vec2(half, 0.0), Layout::top_down(Align::Min), |ui| {
+                // The full half, so Delay starts in the grid's second column.
+                ui.set_width(half);
                 kit::field(ui, tr("Iterations"), tr("Times to run the requests."), |ui| {
                     num_unit(ui, tr("Iterations"), &mut tab.iterations, 1.0..=1_000_000.0, 80.0, "");
                 });
@@ -869,9 +876,9 @@ fn functional_options(ui: &mut Ui, tab: &mut RunnerTab) {
         ui.add_space(7.0);
         let mut pick = false;
         let label = if tab.data_path.is_some() { tr("Change…") } else { tr("Select file") };
-        // A small button: padding 8, a 13 px icon, a 5 px gap and the label.
+        // A small button: border 1, padding 8, a 13 px icon, a 5 px gap and the label.
         let button_w =
-            ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 16.0 + 13.0 + 5.0;
+            ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 18.0 + 13.0 + 5.0;
         frow(ui, false, tr("Data file"), tr("CSV or JSON; one iteration per row."), button_w, |ui| {
             let o = kit::ButtonOpts { icon: Some(icons::FILE_ARROW_UP), ..Default::default() };
             pick = kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, label, o).clicked();
@@ -1054,16 +1061,17 @@ fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, 
     let gap = 10.0;
     let w = ui.available_width();
     let mut cols = cols.clamp(1, cards.len());
-    while cols > 1 && (w - gap * (cols - 1) as f32) / cols as f32 <= 118.0 {
+    // The prototype keeps its columns and wraps the text in narrow cards;
+    // only cards narrower than 64 fold into more rows.
+    while cols > 1 && (w - gap * (cols - 1) as f32) / (cols as f32) < 64.0 {
         cols = if cols.is_multiple_of(2) { cols / 2 } else { cols - 1 };
     }
     let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor();
     let text_w = (cw - 30.0).max(20.0);
     let measure = ui.painter().clone();
-    let lay = |text: &str, font: FontId, color: Color32, line: f32, one_line: bool| {
+    let lay = |text: &str, font: FontId, color: Color32, line: f32| {
         let mut job = LayoutJob::default();
         job.append(text, 0.0, TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) });
-        job.wrap = if one_line { egui::text::TextWrapping::truncate_at_width(text_w) } else { job.wrap };
         job.wrap.max_width = text_w;
         measure.layout_job(job)
     };
@@ -1075,9 +1083,9 @@ fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, 
             .iter()
             .map(|(label, value, color, sub)| {
                 (
-                    lay(label, FontId::proportional(11.5), p.text_muted, 17.0, false),
-                    lay(value, theme::semibold(22.0), color.unwrap_or(p.text), 31.0, true),
-                    lay(if sub.is_empty() { " " } else { sub }, FontId::proportional(11.5), p.text_faint, 17.0, false),
+                    lay(label, FontId::proportional(11.5), p.text_muted, 16.7),
+                    lay(value, theme::semibold(22.0), color.unwrap_or(p.text), 31.9),
+                    lay(if sub.is_empty() { " " } else { sub }, FontId::proportional(11.5), p.text_faint, 16.7),
                 )
             })
             .collect();

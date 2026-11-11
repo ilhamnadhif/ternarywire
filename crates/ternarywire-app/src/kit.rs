@@ -1137,10 +1137,11 @@ pub fn field<R>(ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) 
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 5.0;
-        ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text));
+        // On the prototype's 1.45 lines (`.field label`, `.field .help`).
+        ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text).line_height(Some(17.4)));
         let r = add(ui);
         if !help.is_empty() {
-            ui.label(RichText::new(help).size(11.5).color(p.text_muted));
+            ui.label(RichText::new(help).size(11.5).color(p.text_muted).line_height(Some(16.7)));
         }
         r
     })
