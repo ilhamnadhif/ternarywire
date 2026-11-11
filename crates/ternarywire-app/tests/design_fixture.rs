@@ -1014,6 +1014,8 @@ fn write_flows(root: &Path) {
     summarize["id"] = json!("sum");
     summarize["position"] = json!([774.0, 200.0]);
     summarize["config"]["base_url"] = json!(AI_BASE);
+    // Streams, so the run log shows the answer (the prototype's info line).
+    summarize["config"]["stream"] = json!(true);
     summarize["config"]["system"] = json!("You summarize the Bookstore catalogue in one or two sentences.");
     summarize["config"]["prompt"] = json!(
         "Summarize the catalog for {{inputs.user}}: {{blocks.Books.output.json}}. The signed-in user: {{blocks.User.output.json}}."

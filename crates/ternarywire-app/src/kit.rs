@@ -1020,20 +1020,21 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, body: &str, actions: im
     let content_h: f32 = ui.data(|d| d.get_temp(id).unwrap_or(150.0));
     let top = ui.cursor().top();
     ui.vertical_centered(|ui| {
-        ui.add_space(((ui.available_height() - content_h) / 2.0).clamp(12.0, 400.0));
+        // At least the prototype's 24 px padding (`.empty`) above the icon.
+        ui.add_space(((ui.available_height() - content_h) / 2.0).clamp(24.0, 400.0));
         let start = ui.cursor().top();
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
         ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(24.0), p.text_muted);
         ui.add_space(14.0);
-        ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+        // Title and body on the prototype's 1.45 lines.
+        ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text).line_height(Some(20.3)));
         if !body.is_empty() {
             ui.add_space(6.0);
             ui.scope(|ui| {
                 ui.set_max_width(320.0);
-                ui.add(
-                    egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap(),
-                );
+                let body = RichText::new(body).size(12.5).color(p.text_muted).line_height(Some(18.1));
+                ui.add(egui::Label::new(body).halign(Align::Center).wrap());
             });
         }
         ui.add_space(10.0);

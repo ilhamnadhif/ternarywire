@@ -244,9 +244,11 @@ fn var_line_ex(
         );
         ui.fonts_mut(|f| f.layout_job(job))
     };
+    // The placeholder in the field's font (the prototype's placeholders are
+    // in the input's font, faint; see the weak color below).
     let mut edit = TextEdit::singleline(text)
         .id(id)
-        .hint_text(hint)
+        .hint_text(RichText::new(hint).font(theme::mono(font_size)))
         .desired_width(width)
         .font(egui::TextStyle::Monospace)
         .margin(if frame { egui::Margin::symmetric(10, 0) } else { egui::Margin::symmetric(9, 0) })
@@ -262,7 +264,13 @@ fn var_line_ex(
             .min_size(egui::vec2(0.0, h))
             .align(egui::Align2::LEFT_CENTER);
     }
-    let out = edit.show(ui);
+    let faint = theme::pal(ui).text_faint;
+    let out = ui
+        .scope(|ui| {
+            ui.visuals_mut().weak_text_color = Some(faint);
+            edit.show(ui)
+        })
+        .inner;
     variable_tooltip(ui, &out, text, vars);
     if !hint.is_empty() {
         a11y_name(&out.response.response, hint);

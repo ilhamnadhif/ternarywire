@@ -81,7 +81,8 @@ pub enum Step {
     /// the selection).
     FlowSelect(String),
     /// Flow tab action: `validate` (lists the problems, no toast),
-    /// `add-block` (opens the Add block menu), `fit`.
+    /// `add-block` (opens the Add block menu), `fit`, `view:<zoom>:<x>:<y>`
+    /// (a fixed zoom with the canvas origin at x, y).
     FlowAction(String),
     /// Sets options of the active runner tab: `mode` (`functional`,
     /// `performance`), `iterations`, `delay_ms`, `data_file` (relative to the
