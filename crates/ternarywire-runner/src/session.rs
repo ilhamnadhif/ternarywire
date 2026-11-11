@@ -870,7 +870,7 @@ async fn ws_config(
         PrepareContext { resolver, auth: &auth, auth_owner_id: Some(&owner), defaults: &defaults, base_dir: None };
     let mut prepared = prepare(&http, &pctx);
     for name in &prepared.unresolved {
-        exec.network(ConsoleKind::Warn, format!("variable \"{name}\" is not defined"));
+        exec.network(ConsoleKind::Warn, format!("Undefined variable {{{{{name}}}}} — sent as typed"));
     }
     exec.unresolved = prepared.unresolved.clone();
     apply_auth(ctx, &mut prepared, exec).await?;
