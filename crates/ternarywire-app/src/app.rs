@@ -2454,20 +2454,41 @@ impl TernaryWireApp {
                         ui.add_space(10.0);
                     }
                     ui.add_space(8.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(w, 12.0 * 1.45),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.set_min_height(12.0 * 1.45);
-                            ui.label(kit::eyebrow(ui, tr("Connect with another protocol")));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(kit::hint(
-                                    ui,
-                                    tr("Every request type has its own tab, message log and scripts"),
-                                ));
-                            });
-                        },
-                    );
+                    // The eyebrow on the left, the hint on the right; when they
+                    // don't fit on one line, both narrow in proportion and wrap
+                    // (the prototype's flex row).
+                    let eyebrow = kit::eyebrow(ui, tr("Connect with another protocol")).line_height(Some(10.5 * 1.45));
+                    let hint = kit::hint_block(ui, tr("Every request type has its own tab, message log and scripts"));
+                    let width_of = |ui: &egui::Ui, t: &egui::RichText| {
+                        egui::WidgetText::from(t.clone())
+                            .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                            .size()
+                            .x
+                    };
+                    let (ew, hw) = (width_of(ui, &eyebrow), width_of(ui, &hint));
+                    // 8 px gaps on both sides of the spacer between them.
+                    let over = (ew + 16.0 + hw - w).max(0.0);
+                    let (ew, hw) = (ew - over * ew / (ew + hw), hw - over * hw / (ew + hw));
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ew, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(ew);
+                                ui.add(egui::Label::new(eyebrow).wrap());
+                            },
+                        );
+                        ui.add_space(w - ew - hw);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(hw, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(hw);
+                                ui.add(egui::Label::new(hint).wrap());
+                            },
+                        );
+                    });
                     ui.add_space(10.0);
                     let protos: [(&str, &str, &str, Option<&'static str>); 6] = [
                         ("WS", tr("WebSocket"), tr("Messages both ways"), None),
