@@ -202,7 +202,7 @@ pub fn var_line(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, true)
+    var_line_ex(ui, id, text, vars, hint, width, true, false)
 }
 
 /// [`var_line`] without its own frame, for table cells and grouped inputs.
@@ -218,9 +218,22 @@ pub fn var_cell(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, false)
+    var_line_ex(ui, id, text, vars, hint, width, false, false)
 }
 
+/// [`var_cell`] for a URL: the `?`, `=` and `&` of its query are muted.
+pub fn url_cell(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    vars: &VarCtx,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    var_line_ex(ui, id, text, vars, hint, width, false, true)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn var_line_ex(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -229,6 +242,7 @@ fn var_line_ex(
     hint: &str,
     width: f32,
     frame: bool,
+    url: bool,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
@@ -236,6 +250,10 @@ fn var_line_ex(
     // A text color override (a disabled table row) recolors the plain text;
     // `{{variable}}` chips keep their colors.
     let override_color = ui.visuals().override_text_color;
+    // Frameless fields paint the chips themselves, as the prototype's `.var`
+    // (radius 4, 3 px padding, -1 px margin): `chips` gets their byte ranges
+    // and fills, and the text after the layout shift.
+    let mut chips: Vec<(std::ops::Range<usize>, egui::Color32)> = Vec::new();
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
         let mut job = highlight::cached(
             ui.ctx(),
@@ -254,6 +272,33 @@ fn var_line_ex(
                 if s.format.background == egui::Color32::TRANSPARENT {
                     s.format.color = color;
                 }
+            }
+        }
+        if url {
+            job = mute_query_marks(job, crate::theme::palette(dark).text_muted);
+        }
+        if !frame {
+            chips.clear();
+            let mut after_chip = false;
+            for s in &mut job.sections {
+                let bg = s.format.background;
+                if bg == egui::Color32::TRANSPARENT {
+                    if after_chip {
+                        s.leading_space += CHIP_SHIFT;
+                        after_chip = false;
+                    }
+                    continue;
+                }
+                let (start, end): (usize, usize) = (s.byte_range.start.into(), s.byte_range.end.into());
+                match chips.last_mut() {
+                    Some((r, c)) if r.end == start && *c == bg => r.end = end,
+                    _ => {
+                        s.leading_space += CHIP_SHIFT;
+                        chips.push((start..end, bg));
+                    }
+                }
+                s.format.background = egui::Color32::TRANSPARENT;
+                after_chip = true;
             }
         }
         ui.fonts_mut(|f| f.layout_job(job))
@@ -276,7 +321,11 @@ fn var_line_ex(
             .min_size(egui::vec2(0.0, h))
             .align(egui::Align2::LEFT_CENTER);
     }
+    let chip_slot = ui.painter().add(egui::Shape::Noop);
     let out = edit.show(ui);
+    if !chips.is_empty() {
+        paint_chips(ui, chip_slot, &out, text, &chips, font_size * 1.45);
+    }
     variable_tooltip(ui, &out, text, vars);
     if !hint.is_empty() {
         a11y_name(&out.response.response, hint);
@@ -286,6 +335,79 @@ fn var_line_ex(
         response.mark_changed();
     }
     response
+}
+
+/// The URL's query separators (`?`, `=`, `&` after the first `?`, outside
+/// `{{variable}}` chips) in `color`, like the prototype's URL bar.
+fn mute_query_marks(job: egui::text::LayoutJob, color: egui::Color32) -> egui::text::LayoutJob {
+    let Some(q) = job.text.find('?') else { return job };
+    let mut out = egui::text::LayoutJob { text: String::new(), sections: Vec::new(), ..job.clone() };
+    for s in &job.sections {
+        let (start, end): (usize, usize) = (s.byte_range.start.into(), s.byte_range.end.into());
+        let piece = &job.text[start..end];
+        let chip = s.format.background != egui::Color32::TRANSPARENT;
+        let mut run = start;
+        let mut leading = s.leading_space;
+        for (i, ch) in piece.char_indices() {
+            let at = start + i;
+            if chip || at < q || !matches!(ch, '?' | '=' | '&') {
+                continue;
+            }
+            if run < at {
+                out.append(&job.text[run..at], leading, s.format.clone());
+                leading = 0.0;
+            }
+            let format = egui::TextFormat { color, ..s.format.clone() };
+            out.append(&job.text[at..at + 1], leading, format);
+            leading = 0.0;
+            run = at + 1;
+        }
+        if run < end || start == end {
+            out.append(&job.text[run..end], leading, s.format.clone());
+        }
+    }
+    out
+}
+
+/// How far a `{{variable}}` chip moves the text after its start and after
+/// its end: its 3 px padding less its -1 px margin.
+const CHIP_SHIFT: f32 = 2.0;
+
+/// The `{{variable}}` chips of a single-line field behind its text: 3 px
+/// wider than the text on each side, `height` high (the prototype's line),
+/// radius 4.
+fn paint_chips(
+    ui: &Ui,
+    slot: egui::layers::ShapeIdx,
+    out: &egui::text_edit::TextEditOutput,
+    text: &str,
+    chips: &[(std::ops::Range<usize>, egui::Color32)],
+    height: f32,
+) {
+    use egui::text::CCursor;
+    let at = |byte: usize| {
+        let chars = text.get(..byte).map_or(0, |t| t.chars().count());
+        out.galley.pos_from_cursor(CCursor::new(chars)).translate(out.galley_pos.to_vec2())
+    };
+    let shapes = chips
+        .iter()
+        .filter(|(r, _)| r.end <= text.len())
+        .map(|(r, fill)| {
+            let start = at(r.start);
+            let end = at(r.end);
+            // The next character starts after the chip's shift.
+            let right = if r.end < text.len() { end.left() - CHIP_SHIFT } else { end.left() };
+            let rect = egui::Rect::from_x_y_ranges(
+                start.left() - 3.0..=right + 3.0,
+                start.center().y - height / 2.0..=start.center().y + height / 2.0,
+            );
+            egui::Shape::rect_filled(rect, egui::CornerRadius::same(4), *fill)
+        })
+        .collect::<Vec<_>>();
+    // The chips may reach past the text area (padding, line height) but not
+    // past the field.
+    let clip = out.text_clip_rect.expand2(egui::vec2(3.0, height)).intersect(out.response.response.rect);
+    ui.painter().with_clip_rect(clip.intersect(ui.clip_rect())).set(slot, egui::Shape::Vec(shapes));
 }
 
 /// Multi-line code editor with highlighting (and variable overlay when

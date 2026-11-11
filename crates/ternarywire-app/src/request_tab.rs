@@ -829,9 +829,10 @@ fn panes(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditC
         // gutter comes out of the response), as in the prototype.
         let area = ui.available_rect_before_wrap();
         let len = if side { area.width() } else { area.height() };
-        // Stacked, the divider's line is where the response's top border is.
-        let request = if side { tab.split * len } else { tab.split * len - size::GUTTER / 2.0 };
-        let default = (request / (len - size::GUTTER).max(1.0)).clamp(0.15, 0.85);
+        // Stacked, the divider is the response's 1 px top border.
+        let request = tab.split * len;
+        let divider = if side { size::GUTTER } else { 1.0 };
+        let default = (request / (len - divider).max(1.0)).clamp(0.15, 0.85);
         // Both panes edit the tab; they are drawn one after the other.
         let cell = RefCell::new((tab, item, actions, Rect::NOTHING));
         kit::panes(
@@ -868,15 +869,17 @@ fn panes(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditC
             )
         }
         (false, mode) => {
+            // The response's 1 px top border is the divider (dragged in a
+            // 9 px band around it).
             let a = if mode == PanelMode::Maximized {
                 size::ACTION_ROW + size::TABS
             } else {
-                (area.height() - size::ACTION_ROW - g).max(0.0)
+                (area.height() - size::ACTION_ROW - 1.0).max(0.0)
             };
             (
                 Some(Rect::from_min_size(area.min, vec2(area.width(), a))),
-                Some(Rect::from_min_size(pos2(area.left(), area.top() + a), vec2(area.width(), g))),
-                Rect::from_min_max(pos2(area.left(), area.top() + a + g), area.max),
+                Some(Rect::from_center_size(pos2(area.center().x, area.top() + a + 0.5), vec2(area.width(), g))),
+                Rect::from_min_max(pos2(area.left(), area.top() + a + 1.0), area.max),
             )
         }
     };
@@ -1208,7 +1211,7 @@ fn url_bar(
             .layout(Layout::left_to_right(Align::Center)),
     );
     field.set_clip_rect(urect.intersect(ui.clip_rect()));
-    let r = widgets::var_cell(
+    let r = widgets::url_cell(
         &mut field,
         "url",
         &mut url,
