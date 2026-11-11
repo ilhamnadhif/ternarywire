@@ -287,7 +287,7 @@ Details: [docs/scripting.md](docs/scripting.md).
 
 ### Collection Runner and performance tests
 
-![Collection Runner: 10 requests, 20 tests passed](docs/screenshots/runner.png)
+![Collection Runner: 10 requests, 17 tests passed](docs/screenshots/runner.png)
 
 - Run a collection or folder with an environment, iterations, a delay, a CSV or JSON data file,
   `pm.execution.setNextRequest`/`skipRequest`, a custom order and simulated network failures.

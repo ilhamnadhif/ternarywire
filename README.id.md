@@ -290,7 +290,7 @@ Detail: [docs/scripting.md](docs/scripting.md) (bahasa Inggris).
 
 ### Collection Runner dan performance test
 
-![Collection Runner: 10 request, 20 tes lulus](docs/screenshots/runner.png)
+![Collection Runner: 10 request, 17 tes lulus](docs/screenshots/runner.png)
 
 - Jalankan koleksi atau folder dengan environment, iterasi, jeda, berkas data CSV atau JSON,
   `pm.execution.setNextRequest`/`skipRequest`, urutan kustom, dan simulasi gangguan jaringan.
