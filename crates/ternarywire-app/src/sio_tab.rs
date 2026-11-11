@@ -193,6 +193,15 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
             emit_now = Some((tab.event.clone(), tab.args.clone(), tab.ack));
             tab.auto = None;
         }
+        Some(a) if a.starts_with("load:") => {
+            // A saved message into the composer (automation).
+            if let Some(m) = req.messages.iter().find(|m| m.name == a["load:".len()..]) {
+                tab.event = m.event.clone();
+                tab.args = m.arguments.clone();
+                tab.ack = m.ack;
+            }
+            tab.auto = None;
+        }
         Some(a) if a.starts_with("select:") || a.starts_with("section:") => {
             if let Some(i) = a.strip_prefix("select:").and_then(|i| i.parse().ok()) {
                 tab.log.selected = Some(i);
@@ -268,7 +277,10 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
                         ui,
                         |ui| {
                             ui.label(RichText::new(tr("Event")).color(p.text_muted));
-                            let w = (ui.available_width() - 130.0).clamp(90.0, 150.0);
+                            // 150 wide while Expect ack (box, 6, label) still fits after it.
+                            let ack_w =
+                                15.0 + 6.0 + pc::text_width(ui, tr("Expect ack"), egui::FontId::proportional(13.0));
+                            let w = (ui.available_width() - 8.0 - ack_w - 16.0).clamp(90.0, 150.0);
                             pc::input_sm(ui, event, "message", w, true);
                             pc::check_label(ui, ack, tr("Expect ack"))
                                 .on_hover_text(tr("Ask the server to acknowledge; its answer appears in the log"));
@@ -298,7 +310,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
                         ui,
                         |ui| pc::toolbar_title(ui, tr("Event listeners"), None),
                         |ui| {
-                            pc::check_label(ui, only, tr("Only show incoming events listed here"));
+                            pc::check_label_sm(ui, only, tr("Only show incoming events listed here"));
                         },
                     );
                     pc::body(ui, "sio-listeners", 0.0, 10.0, |ui| {
@@ -721,8 +733,8 @@ fn ack_row(ui: &mut Ui, id: u64, event: &str, reply: &mut SocketIoArg) -> bool {
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                pc::mono_tag(ui, &format!("#{id}"), 80.0);
-                ui.label(RichText::new(event).font(theme::mono(12.0)).strong());
+                pc::mono_tag_ex(ui, &format!("#{id}"), 80.0, 11.5);
+                mono_bold(ui, event);
                 let tip = match reply.kind {
                     SocketIoArgKind::Json => tr("Arguments as a JSON array, a single JSON value, or plain text."),
                     _ => tr("Sent as one argument"),
@@ -736,6 +748,18 @@ fn ack_row(ui: &mut Ui, id: u64, event: &str, reply: &mut SocketIoArg) -> bool {
         },
     );
     send
+}
+
+/// An event name in bold monospace (`.mono.semi`, 12): the monospace font
+/// has one weight, so it is drawn twice half a point apart, as browsers
+/// embolden it.
+fn mono_bold(ui: &mut Ui, text: &str) {
+    let p = theme::pal(ui);
+    let g = ui.painter().layout_no_wrap(text.to_string(), theme::mono(12.0), p.text);
+    let (rect, r) = ui.allocate_exact_size(g.size() + egui::vec2(0.5, 0.0), egui::Sense::hover());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
+    ui.painter().galley(rect.min, g.clone(), p.text);
+    ui.painter().galley(rect.min + egui::vec2(0.5, 0.0), g, p.text);
 }
 
 /// What is wrong with an argument as typed; values with variables are
@@ -758,8 +782,9 @@ fn arg_problem(a: &SocketIoArg) -> Option<&'static str> {
 /// The emit arguments: a numbered card each (`.argc`) with its kind.
 fn args_editor(ui: &mut Ui, args: &mut Vec<SocketIoArg>, vars: &VarCtx, root: &std::path::Path) {
     let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(24.0);
+    let w = ui.available_width();
+    ui.allocate_ui_with_layout(egui::vec2(w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(kit::section_title(tr("Arguments")));
         if !args.is_empty() {
             kit::tone_pill(ui, &args.len().to_string(), kit::Tone::Neutral);
@@ -822,9 +847,10 @@ fn args_editor(ui: &mut Ui, args: &mut Vec<SocketIoArg>, vars: &VarCtx, root: &s
                     match a.kind {
                         SocketIoArgKind::Json | SocketIoArgKind::Text => {
                             let lang = if a.kind == SocketIoArgKind::Json { Lang::Json } else { Lang::Text };
-                            egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 6)).show(ui, |ui| {
+                            // `.code .src`: 8 / 14 around 20 px lines.
+                            egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                pc::plain_editor(ui, "value", &mut a.value, lang, Some(vars), 2);
+                                pc::plain_editor(ui, "value", &mut a.value, lang, Some(vars), 1);
                             });
                         }
                         SocketIoArgKind::Binary => {
@@ -866,7 +892,8 @@ fn args_editor(ui: &mut Ui, args: &mut Vec<SocketIoArg>, vars: &VarCtx, root: &s
     if let Some(i) = remove {
         args.remove(i);
     }
-    ui.horizontal(|ui| {
+    let w = ui.available_width();
+    ui.allocate_ui_with_layout(egui::vec2(w, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         if kit::ghost(ui, Some(icons::PLUS), tr("Add argument")).clicked() {
             args.push(SocketIoArg::default());
         }

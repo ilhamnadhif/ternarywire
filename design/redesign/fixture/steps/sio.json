@@ -24,6 +24,12 @@
     "wait_ms": 1500
   },
   {
+    "auto": "load:Say hello"
+  },
+  {
+    "wait_ms": 100
+  },
+  {
     "auto": "emit"
   },
   {

@@ -69,10 +69,12 @@ pub fn button_ex(ui: &mut Ui, kind: Kind, icon: Option<&str>, text: &str, small:
 /// The general button: kind, size, label and options.
 pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>) -> Response {
     let p = theme::pal(ui);
-    let (height, font_size, icon_size, pad, gap, radius) = match size {
-        Size::Sm => (24.0, 12.0, 13.0, 8.0, 5.0, RADIUS_SM),
-        Size::Md => (30.0, 12.5, 15.0, 12.0, 6.0, RADIUS),
-        Size::Lg => (38.0, 13.0, 15.0, 16.0, 7.0, 9),
+    // Padding left and right of the content (`.pbig`: 14 / 16), inside a
+    // 1 px border (transparent on primary and ghost buttons).
+    let (height, font_size, icon_size, (pad_l, pad_r), gap, radius) = match size {
+        Size::Sm => (24.0, 12.0, 13.0, (8.0, 8.0), 5.0, RADIUS_SM),
+        Size::Md => (30.0, 12.5, 15.0, (12.0, 12.0), 6.0, RADIUS),
+        Size::Lg => (38.0, 13.0, 15.0, (14.0, 16.0), 6.0, 9),
     };
     let enabled = ui.is_enabled();
     let text_color = match kind {
@@ -97,7 +99,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     ];
     let n = parts.iter().flatten().count();
     let content_w = parts.iter().flatten().sum::<f32>() + gap * n.saturating_sub(1) as f32 + kbd_w;
-    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad * 2.0 };
+    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad_l + pad_r + 2.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(width.max(height).max(o.min_width), height), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, text));
     if ui.is_rect_visible(rect) {
@@ -145,7 +147,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
             Kind::Secondary if galley.is_some() => p.text_muted,
             _ => text_color,
         };
-        let mut x = rect.center().x - content_w / 2.0;
+        let mut x = rect.center().x - content_w / 2.0 + (pad_l - pad_r) / 2.0;
         let put = |g: std::sync::Arc<egui::Galley>, color: Color32, x: &mut f32| {
             painter.galley(pos2(*x, rect.center().y - g.size().y / 2.0), g.clone(), fade(color));
             *x += g.size().x + gap;
@@ -321,6 +323,21 @@ pub fn tabs_with<T: PartialEq + Copy>(
     changed
 }
 
+/// The width the tabs of [`tabs_with`] take (for controls that give way).
+pub fn tabs_width<T: PartialEq + Copy>(ui: &Ui, items: &[Tab<'_, T>]) -> f32 {
+    let w = |text: &str, f: FontId| ui.painter().layout_no_wrap(text.to_string(), f, Color32::PLACEHOLDER).size().x;
+    items
+        .iter()
+        .map(|t| {
+            18.0 + w(t.label, theme::medium(12.5))
+                + t.count.as_ref().map_or(0.0, |c| 6.0 + (w(c, theme::semibold(10.5)) + 10.0).max(17.0))
+                + if t.dot { 12.0 } else { 0.0 }
+                + t.icon.map_or(0.0, |i| w(i, theme::icon_font(14.0)) + 6.0)
+        })
+        .sum::<f32>()
+        + 2.0 * items.len().saturating_sub(1) as f32
+}
+
 /// Paints the tabs at the cursor (35 high, the underline on its bottom edge).
 fn tab_row<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[Tab<'_, T>], _compat: bool) -> bool {
     let p = theme::pal(ui);
@@ -458,6 +475,20 @@ pub fn segmented_sm<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[
 }
 
 /// A segmented control whose segments may have an icon.
+/// The width of a [`segmented_ex`] control with these (icon, label) items.
+pub fn segmented_width(ui: &Ui, items: &[(Option<&str>, &str)], small: bool) -> f32 {
+    let (font, pad) = if small { (11.5, 8.0) } else { (12.0, 10.0) };
+    let w = |text: &str, f: FontId| ui.painter().layout_no_wrap(text.to_string(), f, Color32::PLACEHOLDER).size().x;
+    items
+        .iter()
+        .map(|(icon, label)| {
+            w(label, theme::medium(font)) + icon.map_or(0.0, |i| w(i, theme::icon_font(font)) + 5.0) + pad * 2.0
+        })
+        .sum::<f32>()
+        + items.len().saturating_sub(1) as f32
+        + 4.0
+}
+
 pub fn segmented_ex<T: PartialEq + Copy>(
     ui: &mut Ui,
     current: &mut T,
@@ -471,9 +502,8 @@ pub fn segmented_ex<T: PartialEq + Copy>(
         .iter()
         .map(|(_, icon, label)| {
             let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(font), Color32::PLACEHOLDER);
-            let ig = icon.map(|i| {
-                ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font + 1.0), Color32::PLACEHOLDER)
-            });
+            let ig =
+                icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font), Color32::PLACEHOLDER));
             let w = g.size().x + ig.as_ref().map_or(0.0, |g| g.size().x + 5.0) + pad * 2.0;
             (g, ig, w)
         })
@@ -584,7 +614,9 @@ fn paint_pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32, o: PillOpts<'_>
     let galley = ui.painter().layout_no_wrap(text.to_string(), theme::medium(font), fg);
     let icon = o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font + 1.0), fg));
     let lead = if o.dot { 11.0 } else { 0.0 } + icon.as_ref().map_or(0.0, |g| g.size().x + 5.0);
-    let size = vec2(galley.size().x + lead + pad * 2.0, h);
+    // An outline adds its 1 px border on both sides (`.pill.outline`).
+    let border = if o.outline { 1.0 } else { 0.0 };
+    let size = vec2(galley.size().x + lead + pad * 2.0 + border * 2.0, h);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -596,7 +628,7 @@ fn paint_pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32, o: PillOpts<'_>
             if o.outline { Stroke::new(1.0, p.border) } else { Stroke::NONE },
             StrokeKind::Inside,
         );
-        let mut x = rect.left() + pad;
+        let mut x = rect.left() + border + pad;
         if o.dot {
             let c = pos2(x + 3.0, rect.center().y);
             if o.live {
@@ -648,7 +680,8 @@ pub fn metric_colored(ui: &mut Ui, icon: &str, text: &str, color: Option<Color32
 /// The size of a key cap for `keys`.
 pub fn kbd_size(ui: &Ui, keys: &str) -> Vec2 {
     let g = ui.painter().layout_no_wrap(keys.to_string(), FontId::proportional(10.5), Color32::PLACEHOLDER);
-    vec2(g.size().x + 10.0, 18.0)
+    // 5 px padding inside a 1 px border.
+    vec2(g.size().x + 12.0, 18.0)
 }
 
 /// Paints a key cap in `rect` (18 high; see [`kbd_size`]).
@@ -790,9 +823,16 @@ pub fn paint_check(ui: &Ui, rect: Rect, on: bool, mixed: bool, hovered: bool, en
 
 /// A checkbox with a label after it (the label is clickable too).
 pub fn checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
+    let size = body_size(ui);
+    checkbox_ex(ui, on, text, 8.0, size)
+}
+
+/// [`checkbox`] with `gap` between the box and a label of `size`
+/// (`label.row` with gap 6, `.small` labels).
+pub fn checkbox_ex(ui: &mut Ui, on: &mut bool, text: &str, gap: f32, size: f32) -> Response {
     let p = theme::pal(ui);
-    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(body_size(ui)), p.text);
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(15.0 + 8.0 + g.size().x, g.size().y.max(18.0)), Sense::click());
+    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(size), p.text);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(15.0 + gap + g.size().x, g.size().y.max(18.0)), Sense::click());
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
@@ -804,7 +844,7 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
         let b = Rect::from_min_size(pos2(rect.left(), rect.center().y - 7.5), vec2(15.0, 15.0));
         paint_check(ui, b, *on, false, resp.hovered(), enabled);
         let color = if enabled { p.text } else { p.text.gamma_multiply(0.45) };
-        ui.painter().galley(pos2(b.right() + 8.0, rect.center().y - g.size().y / 2.0), g, color);
+        ui.painter().galley(pos2(b.right() + gap, rect.center().y - g.size().y / 2.0), g, color);
         if resp.has_focus() {
             ui.painter().rect_stroke(
                 b.expand(2.0),
@@ -953,6 +993,8 @@ fn search_field_ex(
     let resp = ui
         .scope(|ui| {
             ui.spacing_mut().interact_size.y = h;
+            // egui draws placeholders in the weak text color: faint, as `::placeholder`.
+            ui.visuals_mut().weak_text_color = Some(p.text_faint);
             let radius = CornerRadius::same(if small { RADIUS_SM } else { RADIUS });
             ui.visuals_mut().widgets.inactive.corner_radius = radius;
             ui.visuals_mut().widgets.hovered.corner_radius = radius;
@@ -1131,10 +1173,11 @@ pub fn field<R>(ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) 
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 5.0;
-        ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text));
+        // On the body's 1.45 lines, like `.field > label` and `.help`.
+        ui.label(RichText::new(label).font(theme::medium(12.0)).line_height(Some(12.0 * 1.45)).color(p.text));
         let r = add(ui);
         if !help.is_empty() {
-            ui.label(RichText::new(help).size(11.5).color(p.text_muted));
+            ui.label(RichText::new(help).size(11.5).line_height(Some(11.5 * 1.45)).color(p.text_muted));
         }
         r
     })
@@ -1279,7 +1322,9 @@ pub fn panes(ui: &mut Ui, id: Id, side: bool, default: f32, left: impl FnOnce(&m
     let rect = ui.available_rect_before_wrap();
     let key = id.with(if side { "split-side" } else { "split-stack" });
     let mut split: f32 = ui.data_mut(|d| *d.get_persisted_mut_or(key, default));
-    let g = size::GUTTER;
+    // Side by side: a 9 px gutter; stacked: only the hairline on top of the
+    // second pane (as the prototype), grabbed a few px around it.
+    let g = if side { size::GUTTER } else { 1.0 };
     let (len, min_a, min_b): (f32, f32, f32) =
         if side { (rect.width() - g, 340.0, 300.0) } else { (rect.height() - g, 120.0, 140.0) };
     let a = (len * split).clamp(min_a.min(len * 0.5), (len - min_b).max(len * 0.5));
@@ -1307,7 +1352,8 @@ pub fn panes(ui: &mut Ui, id: Id, side: bool, default: f32, left: impl FnOnce(&m
     pane(ui, ra, Box::new(left), "a");
     pane(ui, rb, Box::new(right), "b");
     // Gutter: a hairline in its middle and a grip on hover.
-    let resp = ui.interact(rg, id.with("gutter"), Sense::click_and_drag());
+    let hit = if side { rg } else { rg.expand2(vec2(0.0, 4.0)) };
+    let resp = ui.interact(hit, id.with("gutter"), Sense::click_and_drag());
     let painter = ui.painter();
     if side {
         painter.vline(rg.center().x, rg.y_range(), Stroke::new(1.0, p.border));

@@ -14,7 +14,7 @@ should do. Add the step, then replace the stand-in steps of that screen.
 | `http-body` | `{"edit": {"request": "Create book", "body_raw": "…"}}` | the tab of Create book is unsaved (dot) in the prototype |
 | `http-graphql` | `{"graphql_schema": "fetch"}` | fetch the schema (server.py answers introspection) and open the schema explorer |
 | `http-error` | (none) | the refused port is 18794 instead of 18795, since server.py listens on 18795 |
-| `sio` | (server) | the pending-ack card needs a server event that asks for an ack, which echo_server.rs never sends; `{"auto": "select:5"}` selects the row |
+| `sio` | (server) | the pending-ack card needs a server event that asks for an ack, which server.py never sends; the prototype's second argument (a file) is not in the saved message that `{"auto": "load:Say hello"}` puts in the composer; `{"auto": "select:5"}` selects the row |
 | `env` | `{"env_row_menu": "pageSize"}` | the hover menu of a variable row (Persist / Reset current value) |
 | `history` | `{"open_history": "hist-11"}` | open a history entry as a tab (with its "Opened from History" bar); a scratch tab with the same request stands in |
 | `spec-sync` | `{"spec_sync": "Bookstore API"}` | run Sync spec → collection and open the Sync popover; also an unsaved edit and a warning |

@@ -184,7 +184,8 @@ fn bubble<R>(
         egui::Layout::left_to_right(egui::Align::Min)
     };
     let (fill_c, stroke) = match who {
-        Who::User => (p.accent_soft, Stroke::NONE),
+        // The border is transparent, but still 1 px wide.
+        Who::User => (p.accent_soft, Stroke::new(1.0, Color32::TRANSPARENT)),
         Who::Assistant => (p.surface, Stroke::new(1.0, p.border)),
         Who::Tool => (p.well, Stroke::new(1.0, p.border)),
     };
@@ -203,16 +204,18 @@ fn bubble<R>(
             .corner_radius(CornerRadius::same(12))
             .inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 10 })
             .show(ui, |ui| {
-                ui.set_max_width(max_w - 24.0);
+                // The maximum is the bubble's border box (12 px padding, 1 px border).
+                ui.set_max_width(max_w - 26.0);
                 if let Some(w) = fit {
                     // Editors are as wide as their text (within the bubble's maximum).
-                    let w = w.clamp(150.0, max_w - 24.0);
+                    let w = w.clamp(150.0, max_w - 26.0);
                     ui.set_min_width(w);
                     ui.set_max_width(w);
                 }
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    let label_h = if label.1.is_some() { 18.0 } else { 15.0 };
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    // `.bl` on the bubble's 1.55 lines: 11.5 for tools, else 10.5.
+                    let label_h = if label.1.is_some() { 11.5 * 1.55 } else { 10.5 * 1.55 };
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), label_h),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -220,7 +223,7 @@ fn bubble<R>(
                             ui.spacing_mut().item_spacing.x = 6.0;
                             match label.1 {
                                 Some(icon) => {
-                                    ui.label(RichText::new(icon).font(theme::icon_font(12.0)).color(p.text_muted));
+                                    ui.label(RichText::new(icon).font(theme::icon_font(11.5)).color(p.text_muted));
                                     ui.label(RichText::new(label.0).font(theme::semibold(11.5)).color(p.text_muted));
                                 }
                                 None => {
@@ -229,7 +232,7 @@ fn bubble<R>(
                             }
                         },
                     );
-                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.add_space(2.0);
                     add(ui)
                 })
                 .inner
@@ -243,11 +246,31 @@ fn bubble<R>(
     .inner
 }
 
+/// The text lines of a chat bubble: 13 on 1.55.
+const BUBBLE_LINE: f32 = 13.0 * 1.55;
+
+/// An editable prompt or message: Inter 13 on `line` lines, `{{variables}}`
+/// as chips, no frame of its own.
+fn prose(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    vars: &VarCtx,
+    rows: usize,
+    line: f32,
+) -> egui::Response {
+    ui.scope(|ui| {
+        ui.visuals_mut().selection.stroke = Stroke::NONE;
+        widgets::line_editor(ui, id, text, Lang::Text, Some(vars), rows, Some(13.0), line)
+    })
+    .inner
+}
+
 /// The answer as text, with `**bold**` spans set in semibold.
 fn answer_job(text: &str, p: &theme::Palette) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let regular = egui::TextFormat {
-        line_height: Some(20.0),
+        line_height: Some(BUBBLE_LINE),
         ..egui::TextFormat::simple(egui::FontId::proportional(13.0), p.text)
     };
     let bold = egui::TextFormat { font_id: theme::semibold(13.0), ..regular.clone() };
@@ -257,6 +280,91 @@ fn answer_job(text: &str, p: &theme::Palette) -> egui::text::LayoutJob {
         }
     }
     job
+}
+
+/// A block of an answer: a paragraph, or the items of a list with their
+/// markers (`1.`, `•`).
+enum Block<'a> {
+    Para(String),
+    List(Vec<(&'a str, String)>),
+}
+
+/// The answer in blocks (blank lines between them); a block whose lines
+/// start with `1. ` or `- ` is a list.
+fn blocks(text: &str) -> Vec<Block<'_>> {
+    let marker = |line: &str| -> Option<usize> {
+        let t = line.trim_start();
+        let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && t[digits..].starts_with(". ") {
+            Some(line.len() - t.len() + digits + 2)
+        } else if t.starts_with("- ") || t.starts_with("* ") {
+            Some(line.len() - t.len() + 2)
+        } else {
+            None
+        }
+    };
+    let mut out = Vec::new();
+    for block in text.split("\n\n").map(|b| b.trim_matches('\n')).filter(|b| !b.trim().is_empty()) {
+        let lines: Vec<&str> = block.lines().collect();
+        if lines.first().is_some_and(|l| marker(l).is_some()) {
+            let mut items: Vec<(&str, String)> = Vec::new();
+            for line in lines {
+                match marker(line) {
+                    Some(n) => {
+                        let m = line[..n].trim();
+                        let m = if m == "-" || m == "*" { "•" } else { m };
+                        items.push((m, line[n..].to_string()));
+                    }
+                    None => {
+                        if let Some(last) = items.last_mut() {
+                            last.1.push(' ');
+                            last.1.push_str(line.trim());
+                        }
+                    }
+                }
+            }
+            out.push(Block::List(items));
+        } else {
+            out.push(Block::Para(block.to_string()));
+        }
+    }
+    out
+}
+
+/// The answer like the prototype's HTML: paragraphs 8 apart, list items 3
+/// apart with their markers in a 20 px margin.
+fn answer_blocks(ui: &mut Ui, text: &str, p: &theme::Palette) {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    for (i, block) in blocks(text).into_iter().enumerate() {
+        if i > 0 {
+            ui.add_space(8.0);
+        }
+        match block {
+            Block::Para(t) => {
+                ui.add(egui::Label::new(answer_job(&t, p)).selectable(true).wrap());
+            }
+            Block::List(items) => {
+                for (j, (m, t)) in items.into_iter().enumerate() {
+                    if j > 0 {
+                        ui.add_space(3.0);
+                    }
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, BUBBLE_LINE), egui::Sense::hover());
+                        // The marker ends a space before the item's text.
+                        ui.painter().text(
+                            egui::pos2(r.right() - 3.6, r.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            m,
+                            egui::FontId::proportional(13.0),
+                            p.text,
+                        );
+                        ui.add(egui::Label::new(answer_job(&t, p)).selectable(true).wrap());
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Three dots that pulse while the answer streams.
@@ -394,7 +502,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
                         }
                     });
                     pc::bar_divider(ui);
-                    let w = (ui.available_width() - 33.0).max(80.0);
+                    let w = (ui.available_width() - 28.0).max(80.0);
                     let r = pc::bar_var(ui, "ai-model", &mut req.model, &vars, tr("model"), w);
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !running {
                         send = true;
@@ -402,7 +510,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
                     let focused = r.has_focus();
                     r.on_hover_text(tr("Model"));
                     pc::bar_divider(ui);
-                    let more = pc::bar_combo(ui, tr("Choose a model"), ui.available_width(), |_, _| {});
+                    let more = pc::bar_caret(ui, tr("Choose a model"));
                     let more = more.on_hover_text(tr("Choose a model"));
                     egui::Popup::menu(&more).width(260.0).show(|ui| {
                         egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
@@ -748,28 +856,39 @@ fn conversation(ui: &mut Ui, req: &mut AiRequest, vars: &VarCtx, running: bool) 
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 6.0;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(RichText::new(icons::GEAR).font(theme::icon_font(14.0)).color(p.text_faint));
-                    ui.label(kit::section_title(tr("System prompt")));
-                });
+                // The title on its 1.45 line, 6 above the prompt.
+                let w = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(w, 12.5 * 1.45),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new(icons::GEAR).font(theme::icon_font(13.0)).color(p.text_faint));
+                        ui.label(kit::section_title(tr("System prompt")));
+                    },
+                );
+                // `.textarea` on the well: a transparent 1 px border, 8 / 10
+                // padding, Inter 13 on 1.5 lines.
                 egui::Frame::new()
                     .fill(p.well)
                     .corner_radius(CornerRadius::same(theme::RADIUS))
-                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .inner_margin(egui::Margin::symmetric(11, 9))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        let r = pc::plain_editor(ui, "ai-system", &mut req.system, Lang::Text, Some(vars), 2);
+                        let r = prose(ui, "ai-system", &mut req.system, vars, 2, 13.0 * 1.5);
                         if req.system.is_empty() && !r.has_focus() {
                             ui.painter().text(
-                                r.rect.left_top() + egui::vec2(0.0, 2.0),
+                                r.rect.left_top() + egui::vec2(0.0, 13.0 * 0.25),
                                 egui::Align2::LEFT_TOP,
                                 tr("Optional instructions for the model"),
-                                theme::mono(12.0),
+                                egui::FontId::proportional(13.0),
                                 p.text_faint,
                             );
                         }
                     });
+                // The textarea sits on a text line: its descent (4) shows under
+                // it, after the item spacing already there.
+                ui.add_space(4.0 - ui.spacing().item_spacing.y);
             });
         // Messages.
         let mut remove = None;
@@ -779,21 +898,21 @@ fn conversation(ui: &mut Ui, req: &mut AiRequest, vars: &VarCtx, running: bool) 
             let who = if m.role == "assistant" { Who::Assistant } else { Who::User };
             let label = if who == Who::User { tr("User") } else { tr("Assistant") };
             ui.push_id(("ai-msg", i), |ui| {
-                let wrap = (ui.available_width() * 0.86 - 34.0 - 24.0).max(100.0);
-                let text_w = ui
-                    .painter()
-                    .layout(m.content.clone(), theme::mono(12.5), Color32::PLACEHOLDER, wrap - 10.0)
-                    .size()
-                    .x;
-                let (focused, rect) = bubble(ui, who, (label, None), 0.86, Some(text_w + 8.0), |ui| {
+                // As wide as its longest line: a text that wraps fills the bubble.
+                let text_w = m
+                    .content
+                    .lines()
+                    .map(|l| pc::text_width(ui, l, egui::FontId::proportional(13.0)))
+                    .fold(0.0, f32::max);
+                let (focused, rect) = bubble(ui, who, (label, None), 0.86, Some(text_w + 1.0), |ui| {
                     let rows = if i + 1 == n { 2 } else { 1 };
-                    let r = pc::plain_editor(ui, ("ai-msg", i), &mut m.content, Lang::Text, Some(vars), rows);
+                    let r = prose(ui, ("ai-msg", i), &mut m.content, vars, rows, BUBBLE_LINE);
                     if m.content.is_empty() && !r.has_focus() {
                         ui.painter().text(
-                            r.rect.left_top() + egui::vec2(0.0, 2.0),
+                            r.rect.left_top() + egui::vec2(0.0, (BUBBLE_LINE - 13.0) / 2.0),
                             egui::Align2::LEFT_TOP,
                             tr("Write a message…"),
-                            theme::mono(12.0),
+                            egui::FontId::proportional(13.0),
                             p.text_faint,
                         );
                     }
@@ -962,13 +1081,19 @@ fn answer(
                     (trf("Tool result · {}", &[name]), icons::CHECK_CIRCLE)
                 };
                 ui.push_id(("ai-step", i), |ui| {
-                    bubble(ui, Who::Tool, (&label, Some(icon)), 0.86, None, |ui| {
-                        let short = if *is_call {
-                            format!("{name}({})", crate::dialogs::ellipsize(&pc::preview_text(body), 150))
-                        } else {
-                            crate::dialogs::ellipsize(&pc::preview_text(body), 160)
-                        };
-                        ui.add(egui::Label::new(RichText::new(short).font(theme::mono(11.5)).color(p.text)).wrap());
+                    let short = if *is_call {
+                        format!("{name}({})", crate::dialogs::ellipsize(&pc::preview_text(body), 150))
+                    } else {
+                        crate::dialogs::ellipsize(&pc::preview_text(body), 160)
+                    };
+                    // Monospace 11.5 on the bubble's 1.55 lines; the bubble is as
+                    // wide as the line (or wraps it at its maximum).
+                    let text =
+                        RichText::new(short).font(theme::mono(11.5)).line_height(Some(11.5 * 1.55)).color(p.text);
+                    let w = pc::text_width(ui, text.text(), theme::mono(11.5));
+                    let label_w = pc::text_width(ui, &label, theme::semibold(11.5)) + 11.5 + 6.0;
+                    bubble(ui, Who::Tool, (&label, Some(icon)), 0.86, Some(w.max(label_w) + 1.0), |ui| {
+                        ui.add(egui::Label::new(text).wrap());
                         let id = ui.make_persistent_id(("ai-step-full", i));
                         if pc::disclosure(ui, id, tr("Details"), None, false, |_| {}) {
                             pc::code_block(ui, ("ai-step-text", i), body);
@@ -978,9 +1103,15 @@ fn answer(
                 });
             }
             if running || !text.is_empty() {
-                bubble(ui, Who::Assistant, (tr("Assistant"), None), 0.92, None, |ui| {
+                // As wide as its longest line, up to 92 %.
+                let natural = text
+                    .lines()
+                    .map(|l| pc::text_width(ui, &l.replace("**", ""), egui::FontId::proportional(13.0)))
+                    .fold(0.0, f32::max);
+                let fit = if running { None } else { Some(natural + 1.0) };
+                bubble(ui, Who::Assistant, (tr("Assistant"), None), 0.92, fit, |ui| {
                     if !text.is_empty() {
-                        ui.add(egui::Label::new(answer_job(text, &p)).selectable(true).wrap());
+                        answer_blocks(ui, text, &p);
                     }
                     if running {
                         typing_dots(ui);
