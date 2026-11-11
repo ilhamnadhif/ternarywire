@@ -199,6 +199,22 @@ pub fn accent(dark: bool) -> Color32 {
     palette(dark).accent
 }
 
+/// The dot of the environment at `index` (selector, sidebar, palette): the
+/// prototype's green, amber and red first (the same in both themes), then
+/// other hues.
+pub fn env_color(index: usize, dark: bool) -> Color32 {
+    let colors = [
+        Color32::from_rgb(0x22, 0xa6, 0x60),
+        Color32::from_rgb(0xe0, 0xa0, 0x20),
+        Color32::from_rgb(0xe1, 0x4d, 0x2a),
+        palette(dark).info,
+        method_color("PATCH", dark),
+        method_color("HEAD", dark),
+        method_color("OPTIONS", dark),
+    ];
+    colors[index % colors.len()]
+}
+
 pub fn method_color(method: &str, dark: bool) -> Color32 {
     let (d, l) = match method.to_ascii_uppercase().as_str() {
         "GET" => ((74, 205, 128), (22, 140, 78)),
@@ -340,7 +356,24 @@ pub const RADIUS_LG: u8 = 10;
 /// Dialogs.
 pub const RADIUS_DIALOG: u8 = 14;
 
+/// Text fields: egui's look, plus the prototype's focus halo (`.input:focus`:
+/// a 3 px accent ring at 16 %) around a framed field while it has focus.
+struct FieldStyle;
+
+impl egui::theme::StyleProvider<egui::widget_style::TextEditStyle> for FieldStyle {
+    fn style(&mut self, args: &egui::widget_style::StyleArgs<'_>) -> egui::widget_style::TextEditStyle {
+        let mut s: egui::widget_style::TextEditStyle = egui::theme::DefaultStyle.style(args);
+        let frame = &mut s.atom_layout.frame;
+        if args.state == egui::widget_style::WidgetState::Active && frame.stroke.width > 0.0 {
+            let accent = palette(args.style.visuals.dark_mode).accent;
+            frame.shadow = Shadow { offset: [0, 0], blur: 0, spread: 3, color: soft(accent, 0.16) };
+        }
+        s
+    }
+}
+
 pub fn apply(ctx: &egui::Context, font_size: f32) {
+    ctx.replace_widget_theme::<egui::widget_style::TextEditStyle>(FieldStyle);
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         ctx.style_mut_of(theme, |style| {
             let dark = theme == egui::Theme::Dark;
@@ -363,6 +396,8 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             s.scroll.bar_width = 8.0;
             s.scroll.floating_width = 3.0;
             s.scroll.floating_allocated_width = 0.0;
+            // Content is cut at the edge of a scroll area, without a fade.
+            s.scroll.fade.strength = 0.0;
 
             let v: &mut Visuals = &mut style.visuals;
             v.panel_fill = p.canvas;

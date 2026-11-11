@@ -808,7 +808,7 @@ pub(crate) fn segmented_sm<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, it
 /// The color of an environment's dot, from its place in the list (the
 /// workspace format has no color of its own).
 pub(crate) fn env_color(p: &theme::Palette, index: usize) -> Color32 {
-    [p.ok, p.warn, p.accent, p.info, p.text_muted][index % 5]
+    theme::env_color(index, p.canvas == theme::palette(true).canvas)
 }
 
 // ---------------------------------------------------------------------------

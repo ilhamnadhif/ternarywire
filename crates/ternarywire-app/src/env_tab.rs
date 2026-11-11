@@ -35,23 +35,11 @@ pub struct EnvTab {
 // ---------------------------------------------------------------------------
 
 /// The color of the environment at `index` in the list. Environments have
-/// no color in the model, so it is derived from their position, cycling
-/// through palette tokens in this order: ok, warn, accent, info, then the
-/// PATCH, HEAD and OPTIONS method colors. It stays the same as long as the
-/// order of the list does.
+/// no color in the model, so it is derived from their position
+/// (`theme::env_color`). It stays the same as long as the order of the list
+/// does.
 pub fn env_color(ui: &Ui, index: usize) -> Color32 {
-    let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    let colors = [
-        p.ok,
-        p.warn,
-        p.accent,
-        p.info,
-        theme::method_color("PATCH", dark),
-        theme::method_color("HEAD", dark),
-        theme::method_color("OPTIONS", dark),
-    ];
-    colors[index % colors.len()]
+    theme::env_color(index, ui.visuals().dark_mode)
 }
 
 /// The 26 px rounded tile with the icon of a view: accent soft, or a soft

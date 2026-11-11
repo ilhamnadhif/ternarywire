@@ -62,7 +62,7 @@ mime_guess = "2"
 boa_engine = { version = "0.22", default-features = false }
 boa_gc = "0.22"
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wayland", "x11", "persistence"] }
-egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui = { version = "0.37", features = ["monochrome_emoji_fonts", "experimental"] }
 egui_extras = { version = "0.37", features = ["image"] }
 rfd = "0.17"
 open = "5"
