@@ -78,8 +78,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     let text_color = match kind {
         Kind::Primary => p.on_accent,
         Kind::Danger => p.err,
+        Kind::Secondary | Kind::Ghost if o.on => p.accent_text,
         Kind::Secondary => p.text,
-        Kind::Ghost if o.on => p.accent_text,
         Kind::Ghost => p.text_muted,
     };
     let galley = (!text.is_empty())
@@ -108,6 +108,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
         let pressed = enabled && resp.is_pointer_button_down_on();
         let (fill, stroke) = match kind {
             Kind::Primary => (if hovered || pressed { p.accent_hover } else { p.accent }, Stroke::NONE),
+            // On (its menu or popover is open): the prototype's `.btn.on`.
+            Kind::Secondary if o.on => (p.accent_soft, Stroke::NONE),
             Kind::Secondary | Kind::Danger => (
                 if pressed {
                     p.subtle
@@ -144,10 +146,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
             );
         }
         let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
-        let icon_color = match kind {
-            Kind::Secondary if galley.is_some() => p.text_muted,
-            _ => text_color,
-        };
+        // Icons take the text's color (the prototype's `.btn .i` inherits it).
+        let icon_color = text_color;
         let mut x = rect.center().x - content_w / 2.0;
         let put = |g: std::sync::Arc<egui::Galley>, color: Color32, x: &mut f32| {
             painter.galley(pos2(*x, rect.center().y - g.size().y / 2.0), g.clone(), fade(color));

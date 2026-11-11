@@ -1239,7 +1239,8 @@ fn sync_option(ui: &mut Ui, name: &str, detail: &str, on: bool) -> egui::Respons
 fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) -> egui::Response {
     let p = theme::pal(ui);
     let bg = ui.painter().add(egui::Shape::Noop);
-    let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 9)).show(ui, |ui| {
+    // 9 × 10 padding inside the 1 px border.
+    let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(11, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -1248,9 +1249,10 @@ fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) 
             ui.painter().rect_filled(t, CornerRadius::same(7), fill);
             ui.painter().text(t.center(), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), fg);
             ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(RichText::new(title).font(theme::medium(13.0)).color(p.text));
-                ui.add(egui::Label::new(RichText::new(hint).size(12.0).color(p.text_muted)).wrap());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(title).font(theme::medium(13.0)).color(p.text).line_height(Some(18.85)));
+                let hint = RichText::new(hint).size(12.0).color(p.text_muted).line_height(Some(17.4));
+                ui.add(egui::Label::new(hint).wrap());
             });
         });
     });
@@ -1276,21 +1278,18 @@ fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) 
 fn sync_menu(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
     let p = theme::pal(ui);
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.label(RichText::new(tr("Sync with a collection")).font(theme::semibold(13.0)).color(p.text));
+    // The prototype's 1.45 lines: title 18.85, hint 17.4, eyebrow 15.2.
+    let title = RichText::new(tr("Sync with a collection")).font(theme::semibold(13.0)).color(p.text);
+    ui.label(title.line_height(Some(18.85)));
     ui.add_space(2.0);
-    ui.add(
-        egui::Label::new(kit::hint(
-            ui,
-            tr("Operations match by method and path. Your scripts, auth and examples are kept."),
-        ))
-        .wrap(),
-    );
+    let text = tr("Operations match by method and path. Your scripts, auth and examples are kept.");
+    ui.add(egui::Label::new(kit::hint(ui, text).line_height(Some(17.4))).wrap());
     ui.add_space(10.0);
     if app.ws.data.collections.is_empty() {
         ui.label(RichText::new(tr("No collections yet: generate one from the spec first.")).color(p.text_muted));
         return;
     }
-    ui.label(kit::eyebrow(ui, tr("Collection")));
+    ui.label(kit::eyebrow(ui, tr("Collection")).line_height(Some(15.2)));
     ui.add_space(4.0);
     let forks: Vec<&str> = app.ws.forks.iter().map(|f| f.fork.as_str()).collect();
     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
@@ -1359,7 +1358,7 @@ fn sync_note(app: &mut TernaryWireApp, ui: &mut Ui, tab: &SpecTab, report: &str)
     let mut open = None;
     kit::bar(ui, 36.0, true, |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(14.0)).color(p.info));
+        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(12.5)).color(p.info));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             close = kit::icon_button_sm(ui, icons::X, tr("Dismiss")).clicked();
