@@ -376,7 +376,7 @@ fn add_secret(app: &mut TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog) {
     kit::card(ui).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(kit::section_title(tr("Add a secret")).color(theme::pal(ui).text));
+        ui.label(kit::section_title(tr("Add a secret")).color(theme::pal(ui).text).line_height(Some(12.5 * 1.45)));
         row(ui, 26.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let name = small_input(ui, &mut d.new_name, tr("Name"), tr("Name"), 200.0, true);

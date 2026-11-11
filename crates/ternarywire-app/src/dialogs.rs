@@ -436,6 +436,12 @@ pub(crate) fn pane_bar<R>(ui: &mut Ui, height: f32, right_pad: f32, add: impl Fn
     out
 }
 
+/// Height a result list may take before the window cuts off the dialog,
+/// over a footer `footer_h` high.
+fn list_room(ui: &Ui, footer_h: f32) -> f32 {
+    room(ui) + FOOTER_H - footer_h
+}
+
 /// Space a dialog body may use before the window cuts it off.
 pub(crate) fn fit_height(ctx: &egui::Context, reserved: f32, max: f32) -> f32 {
     (ctx.content_rect().height() - reserved).max(140.0).min(max)
@@ -665,13 +671,16 @@ fn pane_row(ui: &mut Ui, icon: Option<&str>, label: &str, trail: Option<&str>, s
 }
 
 /// The selected row of a list on a `well`: a white card with a 1 px ring
-/// and the card shadow.
+/// and the card shadow. In the dark theme only the fill: the prototype's
+/// ring goes with the card shadow, which the dark theme has not.
 fn raised(ui: &Ui, rect: Rect, radius: CornerRadius) {
     let p = theme::pal(ui);
-    if !ui.visuals().dark_mode {
-        let shadow = egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(10) };
-        ui.painter().add(shadow.as_shape(rect, radius));
+    if ui.visuals().dark_mode {
+        ui.painter().rect_filled(rect, radius, p.surface);
+        return;
     }
+    let shadow = egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(10) };
+    ui.painter().add(shadow.as_shape(rect, radius));
     ui.painter().rect(rect, radius, p.surface, Stroke::new(1.0, p.border), StrokeKind::Outside);
 }
 
@@ -2438,7 +2447,6 @@ fn palette(
     let q = query.trim().to_string();
     let order = rank(&entries, &q);
     let no_requests = !entries.iter().any(|e| e.group == Group::Requests);
-    let max_h = fit_height(ctx, 260.0, if q.is_empty() { 440.0 } else { 300.0 });
     let mut chosen = None;
     let outcome = Modal::new("palette", 660.0).top().show(ctx, |ui| {
         let (up, down, enter) = nav_keys(ui);
@@ -2446,6 +2454,8 @@ fn palette(
         if search_header(ui, "palette-search", query, hint, icons::MAGNIFYING_GLASS).changed() {
             *selected = 0;
         }
+        // Over a footer of key hints (18 + 25).
+        let max_h = list_room(ui, 43.0).min(if q.is_empty() { 440.0 } else { 300.0 });
         step(selected, order.len(), up, down);
         if order.is_empty() {
             if q.is_empty() && no_requests {
@@ -2549,7 +2559,6 @@ fn env_switcher(
         let active = order.iter().position(|i| entries[*i].current).unwrap_or(0);
         (active + 1) % order.len().max(1)
     });
-    let max_h = fit_height(ctx, 260.0, 440.0);
     let mut chosen = None;
     let mut edit = false;
     let out = Modal::new("env-switch", 500.0).top().show(ctx, |ui| {
@@ -2557,6 +2566,8 @@ fn env_switcher(
         if search_header(ui, "env-search", query, tr("Switch environment…"), icons::GLOBE).changed() {
             sel = 0;
         }
+        // Over a footer with a small button (24 + 25).
+        let max_h = list_room(ui, 49.0).min(440.0);
         step(&mut sel, order.len(), up, down);
         if order.is_empty() {
             no_results(ui, &trf("No results for “{}”", &[&q]), tr("Check the spelling or try another word."));
@@ -5012,6 +5023,14 @@ fn prompt(app: &mut TernaryWireApp, ctx: &egui::Context, kind: &Prompt, text: &m
 mod tests {
     use super::*;
     use ternarywire_core::model::HttpRequest;
+
+    #[test]
+    fn palette_ranks_word_starts_alike_in_list_order() {
+        let e = |l: &str| PaletteEntry::new(Group::Requests, icons::GLOBE, l, PaletteAction::NewRequest);
+        let entries = [e("Notebook"), e("List books"), e("Get book"), e("Bookmarks")];
+        let labels: Vec<&str> = rank(&entries, "book").iter().map(|i| entries[*i].label.as_str()).collect();
+        assert_eq!(labels, ["Bookmarks", "List books", "Get book", "Notebook"]);
+    }
 
     fn scratch(app: &mut TernaryWireApp, name: &str) {
         let item = RequestItem::new(name, HttpRequest::new("GET", format!("http://{name}.test")));
