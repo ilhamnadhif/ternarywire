@@ -919,7 +919,7 @@ impl TernaryWireApp {
     }
 
     pub fn new_request_tab(&mut self) {
-        let item = RequestItem::new(tr("Untitled Request"), HttpRequest::default());
+        let item = RequestItem::new(tr("Untitled request"), HttpRequest::default());
         let mut tab = RequestTab::scratch(item);
         tab.focus_url = true;
         self.add_tab(TabKind::Request(Box::new(tab)));
@@ -1897,7 +1897,7 @@ impl TernaryWireApp {
     pub fn new_graphql_tab(&mut self) {
         let mut req = HttpRequest { method: "POST".into(), ..Default::default() };
         req.body.mode = ternarywire_core::model::BodyMode::GraphQl;
-        let item = RequestItem::new(tr("Untitled Request"), req);
+        let item = RequestItem::new(tr("Untitled request"), req);
         let mut tab = RequestTab::scratch(item);
         tab.focus_url = true;
         self.add_tab(TabKind::Request(Box::new(tab)));
@@ -2912,8 +2912,10 @@ fn rail_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool, dot: Option
                 egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: egui::Color32::from_black_alpha(10) };
             painter.add(shadow.as_shape(rect, radius));
         }
-        // The ring sits outside the 38 px button (`box-shadow: 0 0 0 1px`).
-        painter.rect(rect, radius, p.surface, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Outside);
+        // The ring sits outside the 38 px button (`box-shadow: 0 0 0 1px`);
+        // the dark prototype has none (its shadow list is invalid there).
+        let ring = if ui.visuals().dark_mode { egui::Stroke::NONE } else { egui::Stroke::new(1.0, p.border) };
+        painter.rect(rect, radius, p.surface, ring, egui::StrokeKind::Outside);
     } else if r.hovered() {
         painter.rect_filled(rect, radius, p.hover);
     }
@@ -3221,7 +3223,7 @@ mod tests {
         assert_eq!(tab_names(&app), ["a"]);
         assert_eq!(app.active, 0);
         app.apply_tab_bar(None, Some(TabBarAct::New), None);
-        assert_eq!(tab_names(&app), ["a", "Untitled Request"]);
+        assert_eq!(tab_names(&app), ["a", "Untitled request"]);
     }
 
     #[test]
@@ -3436,7 +3438,7 @@ mod tests {
         let other_root = other.root().to_path_buf();
         app.switch_workspace(other, &other_root);
         assert_eq!(app.ws.root(), other_root);
-        assert_eq!(tab_names(&app), ["Untitled Request"]);
+        assert_eq!(tab_names(&app), ["Untitled request"]);
         assert!(cancel.is_cancelled());
     }
 

@@ -69,11 +69,10 @@ pub fn button_ex(ui: &mut Ui, kind: Kind, icon: Option<&str>, text: &str, small:
 /// The general button: kind, size, label and options.
 pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>) -> Response {
     let p = theme::pal(ui);
-    // Left and right padding; the pane action (`.pbig`) has 14 / 16.
-    let (height, font_size, icon_size, (pad_l, pad_r), gap, radius) = match size {
-        Size::Sm => (24.0, 12.0, 13.0, (8.0, 8.0), 5.0, RADIUS_SM),
-        Size::Md => (30.0, 12.5, 15.0, (12.0, 12.0), 6.0, RADIUS),
-        Size::Lg => (38.0, 13.0, 15.0, (14.0, 16.0), 6.0, 9),
+    let (height, font_size, icon_size, pad, gap, radius) = match size {
+        Size::Sm => (24.0, 12.0, 13.0, 8.0, 5.0, RADIUS_SM),
+        Size::Md => (30.0, 12.5, 15.0, 12.0, 6.0, RADIUS),
+        Size::Lg => (38.0, 13.0, 15.0, 16.0, 7.0, 9),
     };
     let enabled = ui.is_enabled();
     let text_color = match kind {
@@ -87,9 +86,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
         .then(|| ui.painter().layout_no_wrap(text.to_string(), theme::medium(font_size), Color32::PLACEHOLDER));
     let icon_galley =
         o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(icon_size), Color32::PLACEHOLDER));
-    // The caret is an icon like the others (`.btn .i`): 13 in a small button.
     let caret_galley = o.caret.then(|| {
-        ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(icon_size), Color32::PLACEHOLDER)
+        ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(12.0), Color32::PLACEHOLDER)
     });
     let kbd_w = o.kbd.map(|k| kbd_size(ui, k).x + gap).unwrap_or(0.0);
     let parts = [
@@ -99,10 +97,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     ];
     let n = parts.iter().flatten().count();
     let content_w = parts.iter().flatten().sum::<f32>() + gap * n.saturating_sub(1) as f32 + kbd_w;
-    // Every button has a 1 px border (transparent on ghost buttons) outside
-    // its padding, as in the prototype's `.btn`.
-    let natural_w = content_w + pad_l + pad_r + 2.0;
-    let width = if galley.is_none() && caret_galley.is_none() { height } else { natural_w };
+    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad * 2.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(width.max(height).max(o.min_width), height), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, text));
     if ui.is_rect_visible(rect) {
@@ -150,11 +145,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
             Kind::Secondary if galley.is_some() => p.text_muted,
             _ => text_color,
         };
-        let mut x = if galley.is_none() && caret_galley.is_none() {
-            rect.center().x - content_w / 2.0
-        } else {
-            rect.left() + 1.0 + pad_l + (rect.width() - natural_w) / 2.0
-        };
+        let mut x = rect.center().x - content_w / 2.0;
         let put = |g: std::sync::Arc<egui::Galley>, color: Color32, x: &mut f32| {
             painter.galley(pos2(*x, rect.center().y - g.size().y / 2.0), g.clone(), fade(color));
             *x += g.size().x + gap;
@@ -979,9 +970,7 @@ fn search_field_ex(
     let font = if small { 12.0 } else { 12.5 };
     let edit = egui::TextEdit::singleline(text)
         .id_salt(id)
-        // The placeholder in the field's own size (egui gives a hint without
-        // a font the body size).
-        .hint_text(RichText::new(hint_text).font(FontId::proportional(font)).color(p.text_faint))
+        .hint_text(RichText::new(hint_text).color(p.text_faint))
         .font(FontId::proportional(font))
         .desired_width(width)
         .min_size(vec2(0.0, h))
@@ -1169,11 +1158,7 @@ pub fn field<R>(ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) 
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 5.0;
-        // The label's line is 1.45 high, as in the prototype (`.field > label`).
-        ui.allocate_ui_with_layout(vec2(ui.available_width(), 17.4), Layout::left_to_right(Align::Center), |ui| {
-            ui.set_min_height(17.4);
-            ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text));
-        });
+        ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text));
         let r = add(ui);
         if !help.is_empty() {
             ui.label(RichText::new(help).size(11.5).color(p.text_muted));
@@ -1569,8 +1554,10 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
                 color: Color32::from_black_alpha(if ui.visuals().dark_mode { 0 } else { 10 }),
             };
             painter.add(shadow.as_shape(rect, CornerRadius::same(6)));
-            // The ring sits outside the row (`box-shadow: 0 0 0 1px`).
-            painter.rect(rect, CornerRadius::same(6), p.surface, Stroke::new(1.0, p.border), StrokeKind::Outside);
+            // The ring sits outside the row (`box-shadow: 0 0 0 1px`); the
+            // dark prototype has none (its shadow list is invalid there).
+            let ring = if ui.visuals().dark_mode { Stroke::NONE } else { Stroke::new(1.0, p.border) };
+            painter.rect(rect, CornerRadius::same(6), p.surface, ring, StrokeKind::Outside);
             painter.rect_filled(
                 Rect::from_min_size(pos2(rect.left() - 2.0, rect.top() + 7.0), vec2(3.0, rect.height() - 14.0)),
                 CornerRadius::same(2),
@@ -1675,14 +1662,17 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
 /// A group header in a sidebar list (`TODAY`, `ENVIRONMENTS`).
 pub fn sidebar_group(ui: &mut Ui, text: &str) {
     let p = theme::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-    ui.painter().text(
-        pos2(rect.left() + 8.0, rect.bottom() - 6.0),
-        Align2::LEFT_BOTTOM,
-        text.to_uppercase(),
-        theme::semibold(10.5),
-        p.text_faint,
-    );
+    // `.grp`: 12 px above a 10.5 px line (1.45 high), 4 below, 0.06 em apart.
+    let line = 10.5 * 1.45;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0 + line + 4.0), Sense::hover());
+    let mut job = egui::text::LayoutJob::default();
+    let format = egui::text::TextFormat {
+        extra_letter_spacing: 0.06 * 10.5,
+        ..egui::text::TextFormat::simple(theme::semibold(10.5), p.text_faint)
+    };
+    job.append(&text.to_uppercase(), 0.0, format);
+    let g = ui.painter().layout_job(job);
+    ui.painter().galley(pos2(rect.left() + 8.0, rect.top() + 12.0 + (line - g.size().y) / 2.0), g, p.text_faint);
 }
 
 /// `ScrollArea::show_rows` for rows of exactly `row_h` laid out edge to edge.
