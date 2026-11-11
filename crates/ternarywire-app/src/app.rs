@@ -383,6 +383,8 @@ pub enum NewItem {
 
 impl NewItem {
     /// Every item in menu order, with its icon and (untranslated) label.
+    // Only the macOS menu bar (File › New) lists them all.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn all() -> Vec<(NewItem, &'static str, &'static str)> {
         use crate::icons;
         let mut items = vec![
@@ -1833,20 +1835,20 @@ impl TernaryWireApp {
         ui.set_min_width(240.0);
         kit::menu_header(ui, tr("Requests"));
         if kit::menu_item(ui, Some(icons::GLOBE), tr("HTTP request"), Some("⌘N")).clicked() {
-            self.new_request_tab();
+            self.create_new(NewItem::Request);
         }
         if kit::menu_item(ui, Some(icons::GRAPH), tr("GraphQL request"), None).clicked() {
             self.create_new(NewItem::GraphQl);
         }
         if kit::menu_item(ui, Some(icons::PLUGS_CONNECTED), tr("WebSocket"), None).clicked() {
-            self.new_ws_tab();
+            self.create_new(NewItem::WebSocket);
         }
         let templates = protocol_templates();
         for name in ["Socket.IO", "MQTT", "gRPC", "MCP", "AI request"] {
-            if let Some((_, n, kind)) = templates.iter().find(|(_, n, _)| *n == name)
-                && kit::menu_item(ui, Some(protocol_icon(n)), tr(n), None).clicked()
+            if let Some(i) = templates.iter().position(|(_, n, _)| *n == name)
+                && kit::menu_item(ui, Some(protocol_icon(templates[i].1)), tr(templates[i].1), None).clicked()
             {
-                self.new_proto_tab(n, kind.clone());
+                self.create_new(NewItem::Protocol(i));
             }
         }
         kit::menu_sep(ui);
