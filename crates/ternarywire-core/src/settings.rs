@@ -194,6 +194,11 @@ pub struct UiSettings {
     pub language: Language,
     pub font_size: f32,
     pub editor_font_size: f32,
+    /// Saved under a new key: before 0.3 every settings file stored the old
+    /// default (`"layout": "below"`), so reading that key would keep
+    /// upgraded installs stacked. The old key is now ignored and they start
+    /// side by side like a new install.
+    #[serde(rename = "response_layout")]
     pub layout: ResponseLayout,
     pub sidebar_visible: bool,
     pub wrap_response: bool,
@@ -384,5 +389,16 @@ mod tests {
         let s: AppSettings = serde_json::from_str("{\"ui\": {\"theme\": \"dark\"}}").unwrap();
         assert_eq!(s.ui.theme, ThemePreference::Dark);
         assert_eq!(s.history_limit, 1000);
+    }
+
+    #[test]
+    fn layout_from_before_the_redesign_is_ignored() {
+        let old: AppSettings = serde_json::from_str(r#"{"ui": {"layout": "below"}}"#).unwrap();
+        assert_eq!(old.ui.layout, ResponseLayout::Side);
+        let chosen: AppSettings = serde_json::from_str(r#"{"ui": {"response_layout": "below"}}"#).unwrap();
+        assert_eq!(chosen.ui.layout, ResponseLayout::Below);
+        let saved = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(saved["ui"]["response_layout"], "below");
+        assert!(saved["ui"].get("layout").is_none());
     }
 }
