@@ -132,10 +132,7 @@ impl MqttTab {
             }
             MqttEvent::Message { topic, payload, qos, retain, direction, at_ms } => {
                 let dir = if direction == Direction::Incoming { Dir::In } else { Dir::Out };
-                let mut meta = Vec::new();
-                if qos > 0 {
-                    meta.push(format!("QoS {qos}"));
-                }
+                let mut meta = vec![format!("QoS {qos}")];
                 if retain {
                     meta.push(tr("retained").to_string());
                 }
@@ -726,15 +723,18 @@ fn subscribed_chips(ui: &mut Ui, active: &[(String, u8)]) -> (Option<String>, bo
     let mut add = false;
     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        // Rows of 24 (`.subchip`, the ghost button), 6 apart.
+        ui.spacing_mut().interact_size.y = 24.0;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             ui.add_sized(egui::vec2(0.0, 24.0), egui::Label::new(kit::eyebrow(ui, tr("Subscribed"))).selectable(false));
             ui.add_space(2.0);
             for (topic, qos) in active {
-                let tg = kit::elide(ui, topic, theme::mono(11.5), p.text, 220.0);
+                let tg = kit::elide(ui, topic, theme::mono(12.5), p.text, 220.0);
                 let qg =
                     ui.painter().layout_no_wrap(format!("QoS {qos}"), egui::FontId::proportional(11.5), p.text_faint);
-                let w = 9.0 + tg.size().x + 6.0 + qg.size().x + 6.0 + 18.0 + 4.0;
+                // A 1 px border, 9 in, the topic, its QoS and × 6 apart, 4 out.
+                let w = 1.0 + 9.0 + tg.size().x + 6.0 + qg.size().x + 6.0 + 18.0 + 4.0 + 1.0;
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::hover());
                 ui.painter().rect(
                     rect,
@@ -743,12 +743,12 @@ fn subscribed_chips(ui: &mut Ui, active: &[(String, u8)]) -> (Option<String>, bo
                     egui::Stroke::new(1.0, p.border),
                     egui::StrokeKind::Inside,
                 );
-                let mut x = rect.left() + 9.0;
+                let mut x = rect.left() + 10.0;
                 ui.painter().galley(egui::pos2(x, rect.center().y - tg.size().y / 2.0), tg.clone(), p.text);
                 x += tg.size().x + 6.0;
                 ui.painter().galley(egui::pos2(x, rect.center().y - qg.size().y / 2.0), qg.clone(), p.text_faint);
                 let xr = egui::Rect::from_center_size(
-                    egui::pos2(rect.right() - 13.0, rect.center().y),
+                    egui::pos2(rect.right() - 14.0, rect.center().y),
                     egui::vec2(18.0, 18.0),
                 );
                 let r = ui.interact(xr, ui.make_persistent_id(("unsubscribe", topic)), egui::Sense::click());
