@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::response::Response;
 use http::header::{HeaderName, HeaderValue};
 use http::{Method, StatusCode};
@@ -43,6 +43,8 @@ pub struct MockLogEntry {
     /// Status sent; 0 when a simulated failure dropped the connection.
     pub status: u16,
     pub duration_ms: f64,
+    /// The client's address.
+    pub remote: Option<SocketAddr>,
 }
 
 struct Shared {
@@ -84,7 +86,8 @@ impl MockServer {
         let app = Router::new().fallback(handle).with_state(shared.clone());
         let (tx, rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+            let service = app.into_make_service_with_connect_info::<SocketAddr>();
+            let server = axum::serve(listener, service).with_graceful_shutdown(async move {
                 let _ = rx.await;
             });
             if let Err(e) = server.await {
@@ -440,6 +443,7 @@ async fn handle(State(shared): State<Arc<Shared>>, req: Request) -> Response {
         matched,
         status: if dropped { 0 } else { res.status().as_u16() },
         duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+        remote: parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0),
     });
     res
 }

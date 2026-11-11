@@ -50,7 +50,7 @@ pub struct MockTab {
     filter: String,
     selected_route: usize,
     settings_open: bool,
-    /// Automation: `start`, `stop`, `routes`, `logs`, `settings`,
+    /// Automation: `start`, `stop`, `routes`, `logs`, `settings`, `port:<n>`,
     /// `select[:n]` (n-th row from the top), `hit:<METHOD> <path> [body]`.
     pub auto: Option<String>,
 }
@@ -233,6 +233,11 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
         Some("routes") => tab.sub = Sub::Routes,
         Some("logs") => tab.sub = Sub::Logs,
         Some("settings") => tab.settings_open = !tab.settings_open,
+        Some(a) if a.starts_with("port:") => {
+            if let Ok(p) = a[5..].parse() {
+                tab.port = p;
+            }
+        }
         Some(a) if a.starts_with("select") => {
             select_row = Some(a.strip_prefix("select:").and_then(|n| n.parse().ok()).unwrap_or(0));
         }
@@ -502,17 +507,19 @@ fn settings(ui: &mut Ui, id: egui::Id, tab: &mut MockTab, running: bool) {
                             });
                         });
                     });
-                    sv::seg_track(ui, 26.0);
-                    ui.push_id("fail-kind", |ui| {
-                        kit::segmented_sm(
-                            ui,
-                            fail_kind,
-                            &[
-                                (FailKind::Status, tr("Error status")),
-                                (FailKind::Drop, tr("Drop connection")),
-                                (FailKind::Timeout, tr("Timeout")),
-                            ],
-                        )
+                    sv::undimmed(ui, |ui| {
+                        sv::seg_track(ui, 26.0);
+                        ui.push_id("fail-kind", |ui| {
+                            kit::segmented_sm(
+                                ui,
+                                fail_kind,
+                                &[
+                                    (FailKind::Status, tr("Error status")),
+                                    (FailKind::Drop, tr("Drop connection")),
+                                    (FailKind::Timeout, tr("Timeout")),
+                                ],
+                            )
+                        })
                     });
                 });
             }),
@@ -680,9 +687,11 @@ fn example<'a>(c: &'a Collection, request: &str, name: &str) -> Option<&'a Examp
     c.find_request(request)?.examples.iter().find(|e| e.name == name)
 }
 
+/// The media type an example is served as (`application/json`, without
+/// parameters such as `charset`).
 fn content_type(e: &Example) -> String {
     match e.headers.iter().find(|h| h.enabled && h.key.eq_ignore_ascii_case("content-type")) {
-        Some(h) => h.value.clone(),
+        Some(h) => h.value.split(';').next().unwrap_or_default().trim().to_string(),
         None => match e.language.as_deref() {
             Some("json") => "application/json".into(),
             Some("xml") => "application/xml".into(),
@@ -730,6 +739,9 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                         Some(tr("Duration")),
                     );
                 }
+                if let Some(a) = l.remote {
+                    sv::metric(ui, Some(icons::DESKTOP), &trf("from {}", &[&a.to_string()]), None);
+                }
             });
         },
         |ui| {
@@ -747,7 +759,7 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                     ui.spacing_mut().item_spacing.y = 6.0;
                     sv::hrow(ui, 24.0, |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(14.0)).color(p.ok));
+                        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(13.0)).color(p.ok));
                         ui.label(RichText::new(tr("Matched")).font(theme::medium(13.0)).color(p.text));
                         sv::method_tag(ui, &r.method);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -771,7 +783,7 @@ fn log_detail(ui: &mut Ui, l: &MockLogEntry, routes: &[MockRoute], c: &Collectio
                         }
                         None => trf("Served example “{}”", &[&ex_name]),
                     };
-                    sv::hrow(ui, 18.0, |ui| {
+                    sv::hrow(ui, 12.0 * 1.45, |ui| {
                         ui.add_space(22.0);
                         ui.add(egui::Label::new(kit::hint(ui, &detail)).wrap());
                     });
@@ -997,6 +1009,7 @@ mod tests {
             matched: None,
             status: 200,
             duration_ms: 1.0,
+            remote: None,
         }
     }
 
