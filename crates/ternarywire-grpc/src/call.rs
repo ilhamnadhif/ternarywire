@@ -273,6 +273,12 @@ async fn run(
             // tonic reports its own client-side deadline as CANCELLED.
             code = 4;
             message = deadline_msg();
+        } else if source.is_none() && code == 1 && deadline.is_some_and(|d| Instant::now() >= d) {
+            // The server's copy of the deadline (grpc-timeout) fired first and
+            // it answered CANCELLED, as tonic servers do ("Timeout expired").
+            // For the client this call ran out of time.
+            code = 4;
+            message = deadline_msg();
         } else if let Some(src) = source {
             // Our own cancellation never goes through tonic, so CANCELLED /
             // UNKNOWN with a source means the transport failed.
