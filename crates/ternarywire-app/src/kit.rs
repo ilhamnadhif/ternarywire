@@ -738,6 +738,12 @@ pub fn hint(ui: &Ui, text: &str) -> RichText {
     RichText::new(text).color(theme::pal(ui).text_muted).size(12.0)
 }
 
+/// [`hint`] as a block of the prototype's line height (1.45): a paragraph
+/// that other blocks sit a gap away from.
+pub fn hint_block(ui: &Ui, text: &str) -> RichText {
+    hint(ui, text).line_height(Some(12.0 * 1.45))
+}
+
 /// [`hint`] with code in it: each `{}` of `text` becomes the next of `code`
 /// in the mono font (`Write <span class=mono>:name</span> in the URL…`).
 pub fn hint_code(ui: &Ui, text: &str, code: &[&str]) -> egui::text::LayoutJob {
@@ -1163,7 +1169,11 @@ pub fn field<R>(ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) 
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 5.0;
-        ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text));
+        // The label's line is 1.45 high, as in the prototype (`.field > label`).
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 17.4), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_height(17.4);
+            ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text));
+        });
         let r = add(ui);
         if !help.is_empty() {
             ui.label(RichText::new(help).size(11.5).color(p.text_muted));

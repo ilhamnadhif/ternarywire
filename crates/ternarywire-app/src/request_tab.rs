@@ -4007,7 +4007,7 @@ fn tests_view(
             let pass = format!("{} {passed}", tr("Passed"));
             let fail = format!("{} {failed}", tr("Failed"));
             let skip = format!("{} {skipped}", tr("Skipped"));
-            ui.horizontal(|ui| {
+            hrow(ui, 26.0, |ui| {
                 kit::segmented_sm(
                     ui,
                     filter,
@@ -4082,11 +4082,12 @@ fn test_list_ex(ui: &mut Ui, tests: &[&TestResult], add_row: bool) -> bool {
             if resp.hovered() {
                 ui.painter().rect_filled(rect.shrink(1.0), CornerRadius::same(8), p.well);
             }
+            // Icon 13, 8 before the hint (12): the prototype's `.row`.
             ui.painter().text(
-                pos2(rect.left() + 12.0 + 7.0, rect.center().y),
+                pos2(rect.left() + 12.0 + 6.5, rect.center().y),
                 Align2::CENTER_CENTER,
                 icons::PLUS,
-                theme::icon_font(14.0),
+                theme::icon_font(13.0),
                 p.text_faint,
             );
             let g = elide(
@@ -4094,9 +4095,9 @@ fn test_list_ex(ui: &mut Ui, tests: &[&TestResult], add_row: bool) -> bool {
                 tr("Add tests in Scripts › Post-response, or right-click a value in the body."),
                 egui::FontId::proportional(12.0),
                 p.text_muted,
-                width - 50.0,
+                width - 33.0 - 12.0,
             );
-            ui.painter().galley(pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+            ui.painter().galley(pos2(rect.left() + 33.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
             clicked = resp.clicked();
         }
     });
@@ -4117,9 +4118,10 @@ fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
         (icons::X_CIRCLE, Tone::Err, tr("FAIL"))
     };
     let (color, _) = p.tone(tone);
-    let text_x = 12.0 + 16.0 + 8.0;
+    // Icon 13, 8 before the name (13), as the prototype's test row.
+    let text_x = 12.0 + 13.0 + 8.0;
     let text_w = (width - text_x - 70.0).max(60.0);
-    let name = ui.painter().layout(t.name.clone(), egui::FontId::proportional(12.5), p.text, text_w);
+    let name = ui.painter().layout(t.name.clone(), egui::FontId::proportional(13.0), p.text, text_w);
     let err = t
         .error
         .as_ref()
@@ -4134,10 +4136,10 @@ fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
     let first_line = if err.is_none() { rect.center().y } else { rect.top() + pad + name.size().y / 2.0 };
     let name_top = if err.is_none() { rect.center().y - name.size().y / 2.0 } else { rect.top() + pad };
     ui.painter().text(
-        pos2(rect.left() + 12.0 + 8.0, first_line),
+        pos2(rect.left() + 12.0 + 6.5, first_line),
         Align2::CENTER_CENTER,
         icon,
-        theme::icon_font(16.0),
+        theme::icon_font(13.0),
         color,
     );
     ui.painter().galley(pos2(rect.left() + text_x, name_top), name.clone(), p.text);

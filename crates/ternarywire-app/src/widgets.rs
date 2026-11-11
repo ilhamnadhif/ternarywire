@@ -824,6 +824,8 @@ fn kv_table_inner(
                     if faded {
                         ui.visuals_mut().override_text_color = Some(p.text_faint);
                     }
+                    // Values are 12 px mono like the keys (`.kv .kr .mono`).
+                    ui.style_mut().text_styles.insert(egui::TextStyle::Monospace, theme::mono(12.0));
                     var_cell(ui, "v", &mut row.value, vars, if is_new { opts.value_hint } else { "" }, val_rect.width())
                 })
                 .inner;
