@@ -132,6 +132,20 @@ pub enum Step {
     OpenHistory(String),
     /// Collapses a folder of the tree: `Collection/Folder`.
     Collapse(String),
+    /// Opens the request named in that collection: `["Payments (fork)",
+    /// "List customers"]` (`open` takes the first of that name).
+    OpenIn([String; 2]),
+    /// Adds an HTTP request at the top level of a collection:
+    /// `["Payments", "Refund charge", "POST", "{{baseUrl}}/v1/refunds"]`.
+    AddRequest([String; 4]),
+    /// Deletes the request named in that collection: `["Payments", "Legacy webhook"]`.
+    DeleteRequest([String; 2]),
+    /// Sets (or adds) a collection variable: `["Payments", "apiVersion", "2026-11-01"]`.
+    CollectionVar([String; 3]),
+    /// Open pull/merge dialog: includes or leaves out the change of this name.
+    ForkToggle(String),
+    /// Open pull/merge dialog: shows the diff of the change of this name.
+    ForkSelect(String),
     Quit(bool),
 }
 
@@ -673,6 +687,68 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                         app.sidebar.expanded.remove(&id);
                     }
                 }
+            }
+        }
+        Step::OpenIn([coll, name]) => {
+            let found = find_collection(app, &coll).and_then(|c| {
+                let col = app.ws.data.collection(&c)?;
+                col.requests()
+                    .into_iter()
+                    .find(|r| r.name == name)
+                    .map(|r| ItemRef { collection: c.clone(), item: r.id.clone() })
+            });
+            match found {
+                Some(r) => app.open_item(r),
+                None => eprintln!("automation: request {coll}/{name} not found"),
+            }
+        }
+        Step::AddRequest([coll, name, method, url]) => {
+            if let Some(c) = find_collection(app, &coll) {
+                let item = ternarywire_core::model::RequestItem::new(
+                    name,
+                    ternarywire_core::model::HttpRequest::new(method, url),
+                );
+                if let Some(col) = app.ws.data.collection_mut(&c) {
+                    col.items.push(ternarywire_core::model::Item::Request(item));
+                    app.ws.mark_collection(&c);
+                }
+            }
+        }
+        Step::DeleteRequest([coll, name]) => {
+            let found = find_collection(app, &coll).and_then(|c| {
+                let id = app.ws.data.collection(&c)?.requests().into_iter().find(|r| r.name == name)?.id.clone();
+                Some((c, id))
+            });
+            if let Some((c, id)) = found
+                && let Some(col) = app.ws.data.collection_mut(&c)
+            {
+                col.remove(&id);
+                app.ws.mark_collection(&c);
+            }
+        }
+        Step::CollectionVar([coll, key, value]) => {
+            if let Some(c) = find_collection(app, &coll)
+                && let Some(col) = app.ws.data.collection_mut(&c)
+            {
+                match col.variables.iter_mut().find(|v| v.key == key) {
+                    Some(v) => v.value = value,
+                    None => col.variables.push(ternarywire_core::variables::Variable::new(key, value)),
+                }
+                app.ws.mark_collection(&c);
+            }
+        }
+        Step::ForkToggle(name) => {
+            if let Some(crate::dialogs::Dialog::ForkSync(f)) = &mut app.dialog
+                && let Some(e) = f.plan.entries.iter_mut().find(|e| e.name == name)
+            {
+                e.apply = !e.apply;
+            }
+        }
+        Step::ForkSelect(name) => {
+            if let Some(crate::dialogs::Dialog::ForkSync(f)) = &mut app.dialog
+                && let Some(i) = f.plan.entries.iter().position(|e| e.name == name)
+            {
+                f.selected = i;
             }
         }
         Step::Quit(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
