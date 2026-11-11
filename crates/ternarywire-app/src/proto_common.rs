@@ -321,7 +321,8 @@ pub fn title_row(
                         }
                     }
                 }
-                ui.add_space(4.0);
+                // `.crumbs` gap 4 and the pills' 8 px margin.
+                ui.add_space(8.0);
                 let start = ui.cursor().left();
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -476,6 +477,36 @@ pub fn bar_combo(ui: &mut Ui, name: &str, width: f32, add: impl FnOnce(&Ui, Rect
         add(ui, content);
         ui.painter().text(
             pos2(rect.right() - 16.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icons::CARET_DOWN,
+            theme::icon_font(11.0),
+            p.text_faint,
+        );
+        if resp.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(2.0),
+                CornerRadius::same(5),
+                Stroke::new(1.5, p.accent),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    resp
+}
+
+/// A caret-only drop-down cell of a [`connect_bar`] (27 wide: 8 px around
+/// the caret), e.g. the model list after the model field.
+pub fn bar_caret(ui: &mut Ui, name: &str) -> egui::Response {
+    let p = theme::pal(ui);
+    let h = ui.available_height();
+    let (rect, resp) = ui.allocate_exact_size(vec2(27.0, h), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), name));
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 0.0, p.hover);
+        }
+        ui.painter().text(
+            rect.center(),
             Align2::CENTER_CENTER,
             icons::CARET_DOWN,
             theme::icon_font(11.0),
@@ -760,6 +791,8 @@ pub fn input_sm(ui: &mut Ui, text: &mut String, hint: &str, width: f32, mono: bo
     let p = theme::pal(ui);
     ui.scope(|ui| {
         ui.spacing_mut().interact_size.y = 26.0;
+        // egui draws placeholders in the weak text color: faint, as `::placeholder`.
+        ui.visuals_mut().weak_text_color = Some(p.text_faint);
         let r = CornerRadius::same(theme::RADIUS_SM);
         let w = &mut ui.visuals_mut().widgets;
         for v in [&mut w.inactive, &mut w.hovered, &mut w.active] {
@@ -768,7 +801,7 @@ pub fn input_sm(ui: &mut Ui, text: &mut String, hint: &str, width: f32, mono: bo
         let font = if mono { theme::mono(12.0) } else { egui::FontId::proportional(12.0) };
         let r = ui.add(
             egui::TextEdit::singleline(text)
-                .hint_text(RichText::new(hint).color(p.text_faint))
+                .hint_text(RichText::new(hint).font(font.clone()).color(p.text_faint))
                 .desired_width(width.max(36.0))
                 .font(font)
                 .margin(egui::Margin::symmetric(8, 0))
@@ -810,7 +843,8 @@ pub fn var_input_sm(
     let bg = ui.painter().add(egui::Shape::Noop);
     let inner = rect.shrink(1.0);
     let r = inside(ui, UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)), |ui| {
-        widgets::var_cell(ui, id, text, vars, hint, inner.width())
+        ui.visuals_mut().weak_text_color = Some(p.text_faint);
+        widgets::var_cell_sized(ui, id, text, vars, hint, inner.width(), 12.0)
     });
     let stroke = if r.hovered() { p.text_faint } else { p.border_strong };
     ui.painter().set(
@@ -883,7 +917,13 @@ where
 
 /// A checkbox with a label after it, in the small text of toolbars.
 pub fn check_label(ui: &mut Ui, on: &mut bool, label: &str) -> egui::Response {
-    kit::checkbox(ui, on, label)
+    let size = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+    kit::checkbox_ex(ui, on, label, 6.0, size)
+}
+
+/// [`check_label`] with a small (12) label.
+pub fn check_label_sm(ui: &mut Ui, on: &mut bool, label: &str) -> egui::Response {
+    kit::checkbox_ex(ui, on, label, 6.0, 12.0)
 }
 
 /// A bordered list (`.tbl-wrap`) of rows at least `row_h` high (`.lrow`:
@@ -943,22 +983,22 @@ pub fn disclosure(
 ) -> bool {
     let p = theme::pal(ui);
     let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(default_open));
-    let row =
-        ui.allocate_ui_with_layout(vec2(ui.available_width(), 22.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
-            ui.add(
-                egui::Label::new(RichText::new(caret).font(theme::icon_font(12.0)).color(p.text_faint))
-                    .selectable(false),
-            );
-            ui.add(egui::Label::new(kit::section_title(title)).selectable(false));
-            if let Some(n) = count {
-                kit::tone_pill(ui, &n.to_string(), Tone::Neutral);
-            }
-            let start = ui.cursor().left();
-            ui.with_layout(Layout::right_to_left(Align::Center), end);
-            start
-        });
+    // As high as its title line (12.5 on 1.45), or its count pill.
+    let h = if count.is_some() { 20.0 } else { 12.5 * 1.45 };
+    let row = ui.allocate_ui_with_layout(vec2(ui.available_width(), h), Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+        ui.add(
+            egui::Label::new(RichText::new(caret).font(theme::icon_font(13.0)).color(p.text_faint)).selectable(false),
+        );
+        ui.add(egui::Label::new(kit::section_title(title)).selectable(false));
+        if let Some(n) = count {
+            kit::tone_pill(ui, &n.to_string(), Tone::Neutral);
+        }
+        let start = ui.cursor().left();
+        ui.with_layout(Layout::right_to_left(Align::Center), end);
+        start
+    });
     let header = Rect::from_min_max(row.response.rect.min, pos2(row.inner + 4.0, row.response.rect.bottom()));
     let r = ui.interact(header, id.with("toggle"), Sense::click());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
@@ -1071,7 +1111,8 @@ pub fn editor_well(
     r
 }
 
-/// A frameless code editor (inside a card or bubble), no gutter.
+/// A frameless code editor (inside a card or bubble), no gutter, no
+/// padding, 20 px lines (`.code .src` without its padding).
 pub fn plain_editor(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -1081,18 +1122,8 @@ pub fn plain_editor(
     rows: usize,
 ) -> egui::Response {
     ui.scope(|ui| {
-        let v = ui.visuals_mut();
-        v.text_edit_bg_color = Some(Color32::TRANSPARENT);
-        v.extreme_bg_color = Color32::TRANSPARENT;
-        for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active]
-        {
-            w.bg_stroke = Stroke::NONE;
-        }
-        v.selection.stroke = Stroke::NONE;
-        // No padding of its own: the card or bubble around it has it.
-        ui.spacing_mut().button_padding = vec2(0.0, 2.0);
-        ui.spacing_mut().interact_size.y = 18.0;
-        widgets::code_editor(ui, id, text, lang, vars, rows, false)
+        ui.visuals_mut().selection.stroke = Stroke::NONE;
+        widgets::line_editor(ui, id, text, lang, vars, rows, None, 20.0)
     })
     .inner
 }
@@ -1105,24 +1136,10 @@ pub fn code_block(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, text:
         .fill(p.surface)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(10, 6))
+        .inner_margin(egui::Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.scope(|ui| {
-                let v = ui.visuals_mut();
-                v.text_edit_bg_color = Some(Color32::TRANSPARENT);
-                v.extreme_bg_color = Color32::TRANSPARENT;
-                for w in [
-                    &mut v.widgets.noninteractive,
-                    &mut v.widgets.inactive,
-                    &mut v.widgets.hovered,
-                    &mut v.widgets.active,
-                ] {
-                    w.bg_stroke = Stroke::NONE;
-                }
-                ui.spacing_mut().button_padding = vec2(4.0, 2.0);
-                text_view(ui, id, text);
-            });
+            text_view(ui, id, text);
         });
 }
 
@@ -1199,15 +1216,22 @@ pub fn notice_card_ex<R>(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 8.0;
-            ui.allocate_ui_with_layout(vec2(ui.available_width(), 20.0), Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                end(ui);
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            // The title's 1.45 line (a pill at the end makes it 20).
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 13.0 * 1.45),
+                Layout::right_to_left(Align::Center),
+                |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(p.accent_text));
-                    ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(13.0)).color(p.text)).truncate());
-                });
-            });
+                    end(ui);
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(p.accent_text));
+                        ui.add(
+                            egui::Label::new(RichText::new(title).font(theme::semibold(13.0)).color(p.text)).truncate(),
+                        );
+                    });
+                },
+            );
             add(ui)
         })
         .inner
@@ -1337,11 +1361,17 @@ pub fn row_summary(ui: &mut Ui, text: &str) {
 
 /// An outlined monospace tag (`.pill.outline.mono`, 11): an event, a topic.
 pub fn mono_tag(ui: &mut Ui, text: &str, max: f32) -> egui::Response {
+    mono_tag_ex(ui, text, max, 11.0)
+}
+
+/// [`mono_tag`] with text of `size` (11.5 without the prototype's inline 11).
+pub fn mono_tag_ex(ui: &mut Ui, text: &str, max: f32, size: f32) -> egui::Response {
     let p = theme::pal(ui);
-    let g = kit::elide(ui, text, theme::mono(11.0), p.text_muted, max);
-    let (rect, r) = ui.allocate_exact_size(vec2(g.size().x + 14.0, 20.0), Sense::hover());
+    let g = kit::elide(ui, text, theme::mono(size), p.text_muted, max);
+    // 7 px padding inside a 1 px border.
+    let (rect, r) = ui.allocate_exact_size(vec2(g.size().x + 16.0, 20.0), Sense::hover());
     ui.painter().rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, p.border), StrokeKind::Inside);
-    ui.painter().galley(pos2(rect.left() + 7.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+    ui.painter().galley(pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
     r
 }
 
@@ -1665,11 +1695,22 @@ impl Log {
                 status(ui);
             },
             |ui| {
-                // The search gives way to the title and its count.
-                let w = (ui.available_width() - 120.0 - 180.0 - 22.0 - 24.0).clamp(90.0, 150.0);
+                // The search (150) gives way to the title and its count.
+                let left = if title.is_empty() {
+                    0.0
+                } else {
+                    text_width(ui, tr(title), theme::semibold(12.5)) + 8.0 + pill_width(ui, &n.to_string())
+                };
+                let seg = kit::segmented_width(ui, &Self::filters(), true);
+                let w = (ui.available_width() - left - 16.0 - seg - 8.0 - 8.0 - 22.0).clamp(90.0, 150.0);
                 self.tools(ui, &id, true, w)
             },
         );
+    }
+
+    /// The direction filter: (icon, label) of All, Sent and Received.
+    fn filters() -> [(Option<&'static str>, &'static str); 3] {
+        [(None, tr("All")), (Some(icons::ARROW_UP), tr("Sent")), (Some(icons::ARROW_DOWN), tr("Received"))]
     }
 
     /// The log's controls for a bar or the end of a tab strip (right to
@@ -1685,14 +1726,15 @@ impl Log {
             kit::search_field_sm(ui, (&id, "search"), &mut self.search, tr("Search messages"), search_w);
         }
         if filter {
+            let [all, sent, received] = Self::filters();
             ui.push_id((&id, "filter"), |ui| {
                 kit::segmented_ex(
                     ui,
                     &mut self.filter,
                     &[
-                        (LogFilter::All, None, tr("All")),
-                        (LogFilter::Sent, Some(icons::ARROW_UP), tr("Sent")),
-                        (LogFilter::Received, Some(icons::ARROW_DOWN), tr("Received")),
+                        (LogFilter::All, all.0, all.1),
+                        (LogFilter::Sent, sent.0, sent.1),
+                        (LogFilter::Received, received.0, received.1),
                     ],
                     true,
                 );
@@ -1807,7 +1849,7 @@ impl Log {
         let mut close = false;
         row_bar(ui, 34.0, 12.0, 10.0, false, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.spacing_mut().item_spacing.x = 8.0;
                 close = kit::icon_button_sm(ui, icons::X, tr("Close (Esc)")).clicked();
                 if kit::icon_button_sm(ui, icons::COPY, tr("Copy message")).clicked() {
                     ui.ctx().copy_text(shown.clone());
@@ -1840,31 +1882,17 @@ impl Log {
             let inner = rect.shrink(1.0);
             inside(ui, UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)), |ui| {
                 egui::ScrollArea::vertical().id_salt((&id, "message")).auto_shrink([false; 2]).show(ui, |ui| {
-                    egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                    // `.code .src` (JSON) or `.mono` text, 10 / 12 in.
+                    let margin = if *json { egui::Margin::symmetric(14, 8) } else { egui::Margin::symmetric(12, 10) };
+                    egui::Frame::new().inner_margin(margin).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         if *json {
-                            ui.scope(|ui| {
-                                let v = ui.visuals_mut();
-                                v.text_edit_bg_color = Some(Color32::TRANSPARENT);
-                                v.extreme_bg_color = Color32::TRANSPARENT;
-                                for w in [
-                                    &mut v.widgets.noninteractive,
-                                    &mut v.widgets.inactive,
-                                    &mut v.widgets.hovered,
-                                    &mut v.widgets.active,
-                                ] {
-                                    w.bg_stroke = Stroke::NONE;
-                                }
-                                ui.spacing_mut().button_padding = vec2(4.0, 2.0);
-                                text_view(ui, (&id, "message-text", number), shown);
-                            });
+                            text_view(ui, (&id, "message-text", number), shown);
                         } else {
-                            ui.add_space(4.0);
-                            let rt = RichText::new(shown.as_str()).font(theme::mono(12.5)).color(if l.error {
-                                p.err
-                            } else {
-                                p.text
-                            });
+                            let rt = RichText::new(shown.as_str())
+                                .font(theme::mono(12.5))
+                                .line_height(Some(18.0))
+                                .color(if l.error { p.err } else { p.text });
                             ui.add(egui::Label::new(rt).wrap().selectable(true));
                         }
                     });
@@ -1875,6 +1903,16 @@ impl Log {
             self.selected = None;
         }
     }
+}
+
+/// The width of `text` in `font` on one line.
+pub fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER).size().x
+}
+
+/// The width of a (20 high) [`kit::tone_pill`] showing `text`.
+pub fn pill_width(ui: &Ui, text: &str) -> f32 {
+    text_width(ui, text, theme::medium(11.5)) + 14.0
 }
 
 /// `14:02:31.123` in local time.
@@ -1943,15 +1981,18 @@ fn log_row(ui: &mut Ui, l: &LogLine, selected: bool) -> egui::Response {
     }
     right -= 8.0;
     if !l.title.is_empty() {
-        let g = truncated(&painter, &l.title, theme::mono(11.5), p.text, 128.0);
+        // As wide as the title (a long topic), leaving the message some room.
+        let max = ((right - x) * 0.6).max(128.0);
+        let g = truncated(&painter, &l.title, theme::mono(11.5), p.text, max);
         let chip = Rect::from_min_size(pos2(x, cy - g.size().y / 2.0 - 1.0), vec2(g.size().x + 12.0, g.size().y + 2.0));
         painter.rect_filled(chip, CornerRadius::same(5), if selected { p.surface } else { p.subtle });
         painter.galley(pos2(chip.left() + 6.0, cy - g.size().y / 2.0), g, p.text);
         x = chip.right();
     }
     x += 8.0;
+    // The meta first (as the prototype's span), the message in what is left.
     if !l.meta.is_empty() && right - x > 60.0 {
-        let g = truncated(&painter, &l.meta, egui::FontId::proportional(11.5), p.text_faint, (right - x) * 0.5);
+        let g = truncated(&painter, &l.meta, egui::FontId::proportional(11.5), p.text_faint, right - x - 16.0);
         painter.galley(pos2(x, cy - g.size().y / 2.0), g.clone(), p.text_faint);
         x += g.size().x + 8.0;
     }
@@ -2058,7 +2099,7 @@ pub fn text_view(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, text: 
         && (text.len() > 64 * 1024 || serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok());
     let lang = if is_json { crate::highlight::Lang::Json } else { crate::highlight::Lang::Text };
     let mut t = text.to_string();
-    widgets::code_editor(ui, id, &mut t, lang, None, 1, true);
+    widgets::code_view(ui, id, &mut t, lang);
 }
 
 // ---------------------------------------------------------------------------
