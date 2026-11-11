@@ -70,9 +70,9 @@ def run(cmd):
     subprocess.run(cmd, check=True)
 
 
-def subset(src, dst, args):
+def subset(src, dst, args, features="kern,liga,calt,tnum"):
     run([sys.executable, "-m", "fontTools.subset", src, f"--output-file={dst}",
-         "--layout-features=kern,liga,calt,tnum", "--no-hinting", "--desubroutinize",
+         f"--layout-features={features}", "--no-hinting", "--desubroutinize",
          "--name-IDs=0,1,2,3,4,5,6,13,14", "--drop-tables+=DSIG,STAT"] + args)
 
 
@@ -98,8 +98,9 @@ def main():
             subset(os.path.join(a.inter, f"Inter-{weight}.ttf"), os.path.join(OUT, f"Inter-{weight}.ttf"),
                    [f"--unicodes={TEXT_RANGES}"])
     if a.jetbrains:
+        # No ligatures in code (egui shapes text, so `//` or `=>` would join).
         subset(os.path.join(a.jetbrains, "JetBrainsMono-Regular.ttf"),
-               os.path.join(OUT, "JetBrainsMono-Regular.ttf"), [f"--unicodes={TEXT_RANGES}"])
+               os.path.join(OUT, "JetBrainsMono-Regular.ttf"), [f"--unicodes={TEXT_RANGES}"], "kern,tnum")
 
     codepoints = {}
     with open(os.path.join(a.phosphor, "codepoints.rs"), encoding="utf-8") as f:
