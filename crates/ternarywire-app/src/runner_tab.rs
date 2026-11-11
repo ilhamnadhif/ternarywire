@@ -791,7 +791,8 @@ fn frow(ui: &mut Ui, first: bool, label: &str, help: &str, control_w: f32, add: 
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y + 0.5, Stroke::new(1.0, p.border));
     }
-    ui.add_space(7.0);
+    // 7 px padding, under the 1 px hairline of a row that is not the first.
+    ui.add_space(if first { 7.0 } else { 8.0 });
     let w = ui.available_width();
     let label_w = (w - control_w - 14.0).max(80.0);
     let lay = |text: &str, font: FontId, color: Color32, line: f32| {
@@ -800,8 +801,8 @@ fn frow(ui: &mut Ui, first: bool, label: &str, help: &str, control_w: f32, add: 
         job.wrap.max_width = label_w;
         ui.painter().layout_job(job)
     };
-    let lg = lay(label, theme::medium(13.0), p.text, 19.0);
-    let hg = (!help.is_empty()).then(|| lay(help, FontId::proportional(12.0), p.text_muted, 17.0));
+    let lg = lay(label, theme::medium(13.0), p.text, 18.85);
+    let hg = (!help.is_empty()).then(|| lay(help, FontId::proportional(12.0), p.text_muted, 17.4));
     let text_h = lg.size().y + hg.as_ref().map_or(0.0, |g| 1.0 + g.size().y);
     let h = text_h.max(26.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
@@ -825,12 +826,16 @@ fn num_unit<T: egui::emath::Numeric>(
     width: f32,
     unit: &str,
 ) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        num_input(ui, ("runner-num", name), name, value, range, width);
-        if !unit.is_empty() {
-            ui.label(RichText::new(unit).size(12.0).color(theme::pal(ui).text_faint));
-        }
+    ui.scope(|ui| {
+        // A row as tall as the 26 px input.
+        ui.spacing_mut().interact_size.y = 26.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            num_input(ui, ("runner-num", name), name, value, range, width);
+            if !unit.is_empty() {
+                ui.label(RichText::new(unit).size(12.0).color(theme::pal(ui).text_faint));
+            }
+        });
     });
 }
 
@@ -856,6 +861,8 @@ fn functional_options(ui: &mut Ui, tab: &mut RunnerTab) {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             ui.allocate_ui_with_layout(vec2(half, 0.0), Layout::top_down(Align::Min), |ui| {
+                // The full half, so Delay starts in the grid's second column.
+                ui.set_width(half);
                 kit::field(ui, tr("Iterations"), tr("Times to run the requests."), |ui| {
                     num_unit(ui, tr("Iterations"), &mut tab.iterations, 1.0..=1_000_000.0, 80.0, "");
                 });
@@ -1026,15 +1033,11 @@ fn perf_options(ui: &mut Ui, tab: &mut RunnerTab) {
             ui.label(RichText::new("s").size(12.0).color(theme::pal(ui).text_faint));
             num_input(ui, ("runner-num", "ramp"), tr("Ramp-up"), &mut tab.ramp_s, 0.0..=3600.0, 64.0);
         });
+        // The prototype's hint: 6 above, 10 below, 17.4 px lines.
         ui.add_space(6.0);
-        ui.add(
-            egui::Label::new(kit::hint(
-                ui,
-                tr("Each virtual user loops over the selected requests with its own copy of the variables."),
-            ))
-            .wrap(),
-        );
-        ui.add_space(4.0);
+        let text = tr("Each virtual user loops over the selected requests with its own copy of the variables.");
+        ui.add(egui::Label::new(kit::hint(ui, text).line_height(Some(17.4))).wrap());
+        ui.add_space(2.0);
     });
 }
 
@@ -1042,10 +1045,10 @@ fn perf_options(ui: &mut Ui, tab: &mut RunnerTab) {
 // Results: shared pieces
 // ---------------------------------------------------------------------------
 
-/// Number cards in one row of `cols` equal columns (fewer when they would be
-/// narrower than 118 px: six cards become two rows of three), 10 apart. The
-/// value stays on one line; labels and hints wrap, and the cards of a row
-/// share the height of the tallest.
+/// Number cards in one row of `cols` equal columns (fewer only when they
+/// would be narrower than 64 px), 10 apart. Labels, values and hints wrap
+/// like the prototype's, and the cards of a row share the height of the
+/// tallest.
 fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, String)]) {
     if cards.is_empty() {
         return;
@@ -1054,16 +1057,17 @@ fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, 
     let gap = 10.0;
     let w = ui.available_width();
     let mut cols = cols.clamp(1, cards.len());
-    while cols > 1 && (w - gap * (cols - 1) as f32) / cols as f32 <= 118.0 {
+    // The prototype keeps its columns and wraps the text in narrow cards;
+    // only cards narrower than 64 fold into more rows.
+    while cols > 1 && (w - gap * (cols - 1) as f32) / (cols as f32) < 64.0 {
         cols = if cols.is_multiple_of(2) { cols / 2 } else { cols - 1 };
     }
     let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor();
     let text_w = (cw - 30.0).max(20.0);
     let measure = ui.painter().clone();
-    let lay = |text: &str, font: FontId, color: Color32, line: f32, one_line: bool| {
+    let lay = |text: &str, font: FontId, color: Color32, line: f32| {
         let mut job = LayoutJob::default();
         job.append(text, 0.0, TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) });
-        job.wrap = if one_line { egui::text::TextWrapping::truncate_at_width(text_w) } else { job.wrap };
         job.wrap.max_width = text_w;
         measure.layout_job(job)
     };
@@ -1075,9 +1079,9 @@ fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, 
             .iter()
             .map(|(label, value, color, sub)| {
                 (
-                    lay(label, FontId::proportional(11.5), p.text_muted, 17.0, false),
-                    lay(value, theme::semibold(22.0), color.unwrap_or(p.text), 31.0, true),
-                    lay(if sub.is_empty() { " " } else { sub }, FontId::proportional(11.5), p.text_faint, 17.0, false),
+                    lay(label, FontId::proportional(11.5), p.text_muted, 16.7),
+                    lay(value, theme::semibold(22.0), color.unwrap_or(p.text), 31.9),
+                    lay(if sub.is_empty() { " " } else { sub }, FontId::proportional(11.5), p.text_faint, 16.7),
                 )
             })
             .collect();
@@ -1868,8 +1872,9 @@ fn perf_results(ui: &mut Ui, tab: &mut RunnerTab) {
             let percentiles_card = |ui: &mut Ui| {
                 kit::card(ui).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(kit::section_title(tr("Latency percentiles")));
-                    ui.add_space(12.0 - 6.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(kit::section_title(tr("Latency percentiles")).line_height(Some(18.1)));
+                    ui.add_space(12.0);
                     percentiles(ui, &r.latency);
                 });
             };
@@ -1953,15 +1958,22 @@ fn percent(f: f64) -> String {
 fn percentiles(ui: &mut Ui, l: &ternarywire_runner::perf::LatencyStats) {
     let p = theme::pal(ui);
     let max = l.max_ms.max(0.001);
-    ui.spacing_mut().item_spacing.y = 10.0;
-    for (label, v, color) in [
+    // Rows of the prototype's 18.1 px line, 10 apart.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    for (i, (label, v, color)) in [
         ("p50", l.p50_ms, p.ok),
         ("p90", l.p90_ms, p.info),
         ("p95", l.p95_ms, p.info),
         ("p99", l.p99_ms, p.warn),
         (tr("Max"), l.max_ms, p.err),
-    ] {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if i > 0 {
+            ui.add_space(10.0);
+        }
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.1), Sense::hover());
         let painter = ui.painter();
         let cy = rect.center().y;
         painter.text(pos2(rect.left(), cy), Align2::LEFT_CENTER, label, theme::medium(12.0), p.text_muted);
@@ -1979,7 +1991,7 @@ fn per_request(ui: &mut Ui, tab: &RunnerTab, r: &PerfReport) {
     let dark = ui.visuals().dark_mode;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(kit::section_title(tr("Per request")));
+        ui.label(kit::section_title(tr("Per request")).line_height(Some(18.0)));
         ui.spacing_mut().item_spacing.y = 0.0;
         let width = ui.available_width();
         let left = ui.cursor().left();
@@ -2020,8 +2032,11 @@ fn per_request(ui: &mut Ui, tab: &RunnerTab, r: &PerfReport) {
                     theme::semibold(10.5),
                     theme::method_color(badge, dark),
                 );
+                // The prototype's narrow cell shrinks the 34 px method span to
+                // its text: the name follows the method 8 px after it.
+                let mw = g.size().x;
                 painter.galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
-                x += 34.0 + 8.0;
+                x += mw + 8.0;
             }
             let g = elide(ui, &q.name, FontId::proportional(12.0), p.text, (name_end - x - 8.0).max(20.0));
             ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
@@ -2065,23 +2080,27 @@ fn nice_max(v: f64) -> f64 {
 fn timeline_chart(ui: &mut Ui, samples: &[PerfSample]) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
+    // The prototype's chart is a 700 × 226 drawing scaled to the card's
+    // width: margins, text and lines scale with it.
     let w = ui.available_width();
-    let h = (w * 226.0 / 700.0).clamp(180.0, 240.0);
+    let sc = (w / 700.0).max(0.5);
+    let h = 226.0 * sc;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-    let plot = Rect::from_min_max(rect.min + vec2(46.0, 14.0), rect.max - vec2(46.0, 30.0));
-    let painter = ui.painter_at(rect.expand(2.0));
+    let plot = Rect::from_min_max(rect.min + vec2(46.0, 14.0) * sc, rect.max - vec2(46.0, 30.0) * sc);
+    // Axis labels may reach into the card's padding.
+    let painter = ui.painter_at(rect.expand2(vec2(14.0, 2.0)));
     let max_rps = nice_max(samples.iter().map(|s| s.rps).fold(1.0, f64::max));
     let max_lat = nice_max(samples.iter().map(|s| s.avg_latency_ms).fold(0.1, f64::max));
-    let small = FontId::proportional(11.0);
+    let small = FontId::proportional(11.0 * sc);
     for k in 0..=4 {
         let f = k as f64 / 4.0;
         let y = plot.bottom() - plot.height() * f as f32;
         painter.hline(plot.x_range(), y, Stroke::new(1.0, p.border));
         let rps = max_rps * f;
         let left = if max_rps >= 4.0 { format!("{rps:.0}") } else { format!("{rps:.1}") };
-        painter.text(pos2(plot.left() - 8.0, y), Align2::RIGHT_CENTER, left, small.clone(), p.text_faint);
+        painter.text(pos2(plot.left() - 8.0 * sc, y), Align2::RIGHT_CENTER, left, small.clone(), p.text_faint);
         let lat = if k == 0 { "0 ms".to_string() } else { fmt_ms(max_lat * f) };
-        painter.text(pos2(plot.right() + 8.0, y), Align2::LEFT_CENTER, lat, small.clone(), p.text_faint);
+        painter.text(pos2(plot.right() + 8.0 * sc, y), Align2::LEFT_CENTER, lat, small.clone(), p.text_faint);
     }
     if samples.len() < 2 {
         painter.text(
@@ -2113,11 +2132,11 @@ fn timeline_chart(ui: &mut Ui, samples: &[PerfSample]) {
         }
     }
     painter.add(mesh);
-    painter.add(egui::Shape::line(rps.clone(), Stroke::new(2.0, p.accent)));
-    painter.add(egui::Shape::line(lat.clone(), Stroke::new(2.0, p.info)));
-    // Time axis.
+    painter.add(egui::Shape::line(rps.clone(), Stroke::new(2.0 * sc, p.accent)));
+    painter.add(egui::Shape::line(lat.clone(), Stroke::new(2.0 * sc, p.info)));
+    // Time axis (the prototype's baseline 8 above the bottom).
     let last = samples.len() - 1;
-    let y = rect.bottom() - 6.0;
+    let y = rect.bottom() - 5.0 * sc;
     painter.text(
         pos2(plot.left(), y),
         Align2::LEFT_BOTTOM,

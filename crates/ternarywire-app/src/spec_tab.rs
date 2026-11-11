@@ -38,7 +38,7 @@ use crate::app::{TabKind, TernaryWireApp};
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
 use crate::kit::Tone;
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, size};
 use crate::widgets;
 use crate::{icons, kit};
 
@@ -954,11 +954,17 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
             // or, when narrow, stacked.
             let id = egui::Id::unique(("spec-split", &tab.path));
             let tab = std::cell::RefCell::new(&mut *tab);
+            // 54 % of the whole width (or height), gutter included, like
+            // the prototype's `flex: 0 0 54%`; `panes` splits what is left
+            // after the gutter.
+            let room = ui.available_rect_before_wrap();
+            let len = if narrow { room.height() } else { room.width() };
+            let split = 0.54 * len / (len - size::GUTTER).max(1.0);
             kit::panes(
                 ui,
                 id,
                 !narrow,
-                0.54,
+                split,
                 |ui| editor_area(app, ui, &mut tab.borrow_mut()),
                 |ui| {
                     let r = ui.max_rect();
@@ -1233,7 +1239,8 @@ fn sync_option(ui: &mut Ui, name: &str, detail: &str, on: bool) -> egui::Respons
 fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) -> egui::Response {
     let p = theme::pal(ui);
     let bg = ui.painter().add(egui::Shape::Noop);
-    let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 9)).show(ui, |ui| {
+    // 9 × 10 padding inside the 1 px border.
+    let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(11, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -1242,9 +1249,10 @@ fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) 
             ui.painter().rect_filled(t, CornerRadius::same(7), fill);
             ui.painter().text(t.center(), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), fg);
             ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(RichText::new(title).font(theme::medium(13.0)).color(p.text));
-                ui.add(egui::Label::new(RichText::new(hint).size(12.0).color(p.text_muted)).wrap());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(title).font(theme::medium(13.0)).color(p.text).line_height(Some(18.85)));
+                let hint = RichText::new(hint).size(12.0).color(p.text_muted).line_height(Some(17.4));
+                ui.add(egui::Label::new(hint).wrap());
             });
         });
     });
@@ -1270,21 +1278,18 @@ fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) 
 fn sync_menu(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
     let p = theme::pal(ui);
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.label(RichText::new(tr("Sync with a collection")).font(theme::semibold(13.0)).color(p.text));
+    // The prototype's 1.45 lines: title 18.85, hint 17.4, eyebrow 15.2.
+    let title = RichText::new(tr("Sync with a collection")).font(theme::semibold(13.0)).color(p.text);
+    ui.label(title.line_height(Some(18.85)));
     ui.add_space(2.0);
-    ui.add(
-        egui::Label::new(kit::hint(
-            ui,
-            tr("Operations match by method and path. Your scripts, auth and examples are kept."),
-        ))
-        .wrap(),
-    );
+    let text = tr("Operations match by method and path. Your scripts, auth and examples are kept.");
+    ui.add(egui::Label::new(kit::hint(ui, text).line_height(Some(17.4))).wrap());
     ui.add_space(10.0);
     if app.ws.data.collections.is_empty() {
         ui.label(RichText::new(tr("No collections yet: generate one from the spec first.")).color(p.text_muted));
         return;
     }
-    ui.label(kit::eyebrow(ui, tr("Collection")));
+    ui.label(kit::eyebrow(ui, tr("Collection")).line_height(Some(15.2)));
     ui.add_space(4.0);
     let forks: Vec<&str> = app.ws.forks.iter().map(|f| f.fork.as_str()).collect();
     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
@@ -1353,7 +1358,7 @@ fn sync_note(app: &mut TernaryWireApp, ui: &mut Ui, tab: &SpecTab, report: &str)
     let mut open = None;
     kit::bar(ui, 36.0, true, |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(14.0)).color(p.info));
+        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(12.5)).color(p.info));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             close = kit::icon_button_sm(ui, icons::X, tr("Dismiss")).clicked();
@@ -1406,7 +1411,8 @@ fn editor(ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
             scroll_to = Some(line);
         }
         let rows = crate::env_tab::editor_rows(ui, rect.height());
-        let r = widgets::code_editor_gutter(ui, ("spec", &tab.path), &mut tab.text, lang, None, rows, false, None);
+        let r =
+            widgets::code_editor_gutter_nowrap(ui, ("spec", &tab.path), &mut tab.text, lang, None, rows, false, None);
         widgets::a11y_name(&r, &tab.title());
         if r.changed() {
             tab.last_edit = Some(Instant::now());
@@ -1416,7 +1422,7 @@ fn editor(ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
         }
         tab.editor_id = Some(editor_id);
         if let Some(line) = scroll_to {
-            let y = line_offset(ui, &tab.text, line, r.rect.width() - 60.0);
+            let y = line_offset(line);
             let target =
                 Rect::from_min_size(Pos2::new(r.rect.left(), r.rect.top() + 8.0 + y), vec2(r.rect.width(), 20.0));
             ui.scroll_to_rect(target, Some(Align::Center));
@@ -1424,22 +1430,10 @@ fn editor(ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
     });
 }
 
-fn mono_size(ui: &Ui) -> f32 {
-    ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5)
-}
-
-/// Height of the text above `line` (1-based) when wrapped at `width`, in
-/// the editor's 20 px lines.
-fn line_offset(ui: &Ui, text: &str, line: usize, width: f32) -> f32 {
-    if line <= 1 {
-        return 0.0;
-    }
-    let before: String = text.split('\n').take(line - 1).collect::<Vec<_>>().join("\n");
-    let mut job = LayoutJob::simple(before, FontId::monospace(mono_size(ui)), Color32::PLACEHOLDER, width.max(50.0));
-    for s in &mut job.sections {
-        s.format.line_height = Some(20.0);
-    }
-    ui.painter().layout_job(job).size().y
+/// Height of the text above `line` (1-based): the editor's lines do not
+/// wrap and are 20 px each.
+fn line_offset(line: usize) -> f32 {
+    line.saturating_sub(1) as f32 * 20.0
 }
 
 /// Puts the editor's cursor on `line` and selects the line from `col`.
@@ -1724,23 +1718,37 @@ fn docs_page(ui: &mut Ui, c: &Collection, version: Option<&str>, target: &mut Op
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
-        ui.label(RichText::new(&c.name).font(theme::semibold(21.0)).color(p.text));
+        // On the prototype's 1.45 lines.
+        ui.label(RichText::new(&c.name).font(theme::semibold(21.0)).color(p.text).line_height(Some(30.45)));
         if !c.description.trim().is_empty() {
-            ui.add(egui::Label::new(RichText::new(c.description.trim()).color(p.text_muted)).wrap());
+            let text = RichText::new(c.description.trim()).size(13.0).color(p.text_muted).line_height(Some(18.85));
+            ui.add(egui::Label::new(text).wrap());
         }
     });
     let requests = c.requests();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-        let ops =
-            if requests.len() == 1 { tr("1 operation").to_string() } else { trf("{} operations", &[&requests.len()]) };
-        kit::pill_ex(ui, &ops, Tone::Info, kit::PillOpts { icon: Some(icons::LIST), ..Default::default() });
-        if let Some(v) = version {
-            kit::pill_ex(ui, &format!("v{v}"), Tone::Neutral, kit::PillOpts { outline: true, ..Default::default() });
-        }
-        for v in c.variables.iter().filter(|v| !v.key.is_empty() && !v.is_secret()) {
-            variable_chip(ui, &v.key, &v.value);
-        }
+    // Lines as tall as their pills (20) and chips (22), 6 apart.
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 20.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            let ops = if requests.len() == 1 {
+                tr("1 operation").to_string()
+            } else {
+                trf("{} operations", &[&requests.len()])
+            };
+            kit::pill_ex(ui, &ops, Tone::Info, kit::PillOpts { icon: Some(icons::LIST), ..Default::default() });
+            if let Some(v) = version {
+                kit::pill_ex(
+                    ui,
+                    &format!("v{v}"),
+                    Tone::Neutral,
+                    kit::PillOpts { outline: true, ..Default::default() },
+                );
+            }
+            for v in c.variables.iter().filter(|v| !v.key.is_empty() && !v.is_secret()) {
+                variable_chip(ui, &v.key, &v.value);
+            }
+        });
     });
     if requests.is_empty() {
         ui.label(RichText::new(tr("The spec has no operations yet.")).color(p.text_muted));
@@ -1749,7 +1757,7 @@ fn docs_page(ui: &mut Ui, c: &Collection, version: Option<&str>, target: &mut Op
     // Index of the endpoints; a click scrolls to one.
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(kit::eyebrow(ui, tr("Endpoints")));
+        docs_label(ui, tr("Endpoints"));
         egui::Frame::new()
             .fill(p.surface)
             .stroke(Stroke::new(1.0, p.border))
@@ -1780,9 +1788,9 @@ fn variable_chip(ui: &mut Ui, key: &str, value: &str) {
     resp.on_hover_text(format!("{{{{{key}}}}} = {value}"));
 }
 
-/// A small upper-case label above a docs block.
+/// A small upper-case label above a docs block (on a 15.2 px line).
 fn docs_label(ui: &mut Ui, text: &str) {
-    ui.label(kit::eyebrow(ui, text));
+    ui.label(kit::eyebrow(ui, text).line_height(Some(15.2)));
 }
 
 /// A read-only block of code (a request body or an example) in a well.
@@ -1804,7 +1812,8 @@ fn code_block(ui: &mut Ui, text: &str) {
     });
 }
 
-/// `GET /books/:id` without the `{{baseUrl}}`, scheme, host and query.
+/// `GET /books/{id}` without the `{{baseUrl}}`, scheme, host and query;
+/// path variables (`:id` in the requests) are shown the spec's way.
 fn docs_path(url: &str) -> String {
     let mut s = url.split('?').next().unwrap_or("").trim();
     if s.starts_with("{{")
@@ -1814,7 +1823,16 @@ fn docs_path(url: &str) -> String {
     } else if let Some(i) = s.find("://") {
         s = s[i + 3..].find('/').map(|j| &s[i + 3 + j..]).unwrap_or("/");
     }
-    if s.is_empty() { "/".into() } else { s.to_string() }
+    if s.is_empty() {
+        return "/".into();
+    }
+    s.split('/')
+        .map(|seg| match seg.strip_prefix(':') {
+            Some(name) if !name.is_empty() => format!("{{{name}}}"),
+            _ => seg.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A path with its parameters (`:id`, `{id}`) in the accent color.
@@ -1822,7 +1840,7 @@ fn path_job(path: &str, p: &Palette, size: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     for (i, seg) in path.split('/').enumerate() {
         if i > 0 {
-            job.append("/", 0.0, TextFormat::simple(theme::mono(size), p.text_muted));
+            job.append("/", 0.0, TextFormat::simple(theme::mono(size), p.text));
         }
         let color = if seg.starts_with(':') || seg.starts_with('{') { p.accent_text } else { p.text };
         job.append(seg, 0.0, TextFormat::simple(theme::mono(size), color));
@@ -1882,12 +1900,28 @@ fn docs_items(ui: &mut Ui, items: &[Item], depth: usize, target: &mut Option<Id>
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        let size = if depth == 0 { 17.0 } else { 15.0 };
-                        ui.label(RichText::new(&f.name).font(theme::semibold(size)).color(p.text));
-                        kit::tone_pill(ui, &count_requests(&f.items).to_string(), Tone::Neutral);
-                    });
+                    // The prototype's heading row: the name 6 px lower than
+                    // the row (its own top margin), the count centered on
+                    // the row.
+                    let size = if depth == 0 { 17.0 } else { 15.0 };
+                    let name = ui.painter().layout_job(LayoutJob::single_section(
+                        f.name.clone(),
+                        TextFormat {
+                            line_height: Some(size * 1.45),
+                            ..TextFormat::simple(theme::semibold(size), p.text)
+                        },
+                    ));
+                    let row = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 6.0 + size * 1.45));
+                    let name_rect = Rect::from_min_size(pos2(row.left(), row.top() + 6.0), name.size());
+                    ui.put(name_rect, egui::Label::new(name));
+                    let rest = Rect::from_min_max(pos2(name_rect.right() + 8.0, row.top()), row.max);
+                    ui.scope_builder(
+                        UiBuilder::new().max_rect(rest).layout(Layout::left_to_right(Align::Center)),
+                        |ui| {
+                            kit::tone_pill(ui, &count_requests(&f.items).to_string(), Tone::Neutral);
+                        },
+                    );
+                    ui.advance_cursor_after_rect(row);
                     if !f.description.trim().is_empty() {
                         ui.add(egui::Label::new(RichText::new(f.description.trim()).color(p.text_muted)).wrap());
                     }
@@ -1927,8 +1961,10 @@ fn request_card(ui: &mut Ui, r: &RequestItem, target: &mut Option<Id>) {
     let resp = kit::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 10.0;
-        ui.label(RichText::new(&r.name).font(theme::semibold(14.0)).color(p.text));
-        ui.horizontal(|ui| {
+        ui.label(RichText::new(&r.name).font(theme::semibold(14.0)).color(p.text).line_height(Some(20.3)));
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 20.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_size(vec2(w, 20.0));
             ui.spacing_mut().item_spacing.x = 8.0;
             let method = method_of(r);
             kit::pill(ui, &method, theme::method_color(&method, dark));
@@ -2673,7 +2709,7 @@ mod tests {
         select_line(&ctx, id, "a\nbcdef\ng", 2, 3);
         let range = egui::text_edit::TextEditState::load(&ctx, id).unwrap().cursor.char_range().unwrap();
         assert_eq!((range.secondary.index.0, range.primary.index.0), (4, 7));
-        assert_eq!(docs_path("{{baseUrl}}/books/:id?x=1"), "/books/:id");
+        assert_eq!(docs_path("{{baseUrl}}/books/:id?x=1"), "/books/{id}");
         assert_eq!(docs_path("https://api.example.com/v1/items"), "/v1/items");
     }
 

@@ -260,9 +260,11 @@ fn var_line_ex(
         );
         ui.fonts_mut(|f| f.layout_job(job))
     };
+    // The placeholder in the field's font (the prototype's placeholders are
+    // in the input's font, faint; see the weak color below).
     let mut edit = TextEdit::singleline(text)
         .id(id)
-        .hint_text(hint)
+        .hint_text(RichText::new(hint).font(theme::mono(font_size)))
         .desired_width(width)
         .font(egui::FontId::monospace(font_size))
         .margin(if frame { egui::Margin::symmetric(10, 0) } else { egui::Margin::symmetric(9, 0) })
@@ -280,8 +282,10 @@ fn var_line_ex(
     }
     // Not taller than the cell (the default interact height would push the
     // text below its middle in a small input).
+    let faint = theme::pal(ui).text_faint;
     let out = ui
         .scope(|ui| {
+            ui.visuals_mut().weak_text_color = Some(faint);
             if !frame {
                 let h = ui.available_height().clamp(20.0, 34.0);
                 ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.min(h);
@@ -353,6 +357,23 @@ pub fn code_editor_gutter(
     code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, look)
 }
 
+/// [`code_editor_gutter`] whose lines do not wrap (the prototype's spec
+/// editor): the text scrolls sideways next to the line numbers.
+#[allow(clippy::too_many_arguments)]
+pub fn code_editor_gutter_nowrap(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+    vars: Option<&VarCtx>,
+    min_rows: usize,
+    readonly: bool,
+    completions: Option<CompletionFn<'_>>,
+) -> egui::Response {
+    let look = Look { gutter: true, line_h: Some(20.0), nowrap: true, ..Default::default() };
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, look)
+}
+
 /// Read-only code (`.code` without its gutter): highlighted, 20 px lines,
 /// no padding of its own (the frame around it has the prototype's 8 / 14).
 pub fn code_view(
@@ -392,6 +413,8 @@ struct Look {
     prose: Option<f32>,
     /// No frame and no padding.
     bare: bool,
+    /// Lines don't wrap; the text scrolls sideways (with `gutter`).
+    nowrap: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,6 +430,7 @@ fn code_editor_impl(
     look: Look,
 ) -> egui::Response {
     let gutter = look.gutter;
+    let wrap = !look.nowrap;
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
     let font_size = ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5);
@@ -436,7 +460,7 @@ fn code_editor_impl(
             ui.ctx(),
             HlKey { text: buf.as_str(), lang, dark, search: "", vars: names, font_size, wrap: true },
         );
-        job.wrap.max_width = wrap_width;
+        job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
         if gutter {
             // Long tokens (URLs, base64) wrap anywhere, like the prototype's editors.
             job.wrap.break_anywhere = true;
@@ -452,6 +476,7 @@ fn code_editor_impl(
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let lines = text.split('\n').count().max(1);
+    let longest = if wrap { 0 } else { text.split('\n').map(|l| l.chars().count()).max().unwrap_or(0) };
     let mut edit = TextEdit::multiline(text)
         .id(id)
         .code_editor()
@@ -482,7 +507,22 @@ fn code_editor_impl(
             egui::pos2(start.x + gutter_w, start.y),
             egui::pos2(start.x + full_w, ui.max_rect().bottom().max(start.y + 40.0)),
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+        if wrap {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+        } else {
+            // As wide as the longest line, scrolling sideways in its column.
+            let char_w = ui.fonts_mut(|f| f.glyph_width(&theme::mono(font_size), 'M'));
+            let width = (longest as f32 * char_w + 28.0 + char_w).max(rect.width());
+            edit = edit.desired_width(width);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt(id.with("sideways"))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| edit.show(ui))
+                    .inner
+            })
+            .inner
+        }
     } else if look.bare {
         // Exactly as high as its lines (not the default interact height).
         ui.scope(|ui| {

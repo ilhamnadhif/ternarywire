@@ -80,14 +80,15 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     let text_color = match kind {
         Kind::Primary => p.on_accent,
         Kind::Danger => p.err,
+        Kind::Secondary | Kind::Ghost if o.on => p.accent_text,
         Kind::Secondary => p.text,
-        Kind::Ghost if o.on => p.accent_text,
         Kind::Ghost => p.text_muted,
     };
     let galley = (!text.is_empty())
         .then(|| ui.painter().layout_no_wrap(text.to_string(), theme::medium(font_size), Color32::PLACEHOLDER));
     let icon_galley =
         o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(icon_size), Color32::PLACEHOLDER));
+    // The caret is an icon like the others (the prototype's `.btn .i`).
     let caret_galley = o.caret.then(|| {
         ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(icon_size), Color32::PLACEHOLDER)
     });
@@ -107,6 +108,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
         let pressed = enabled && resp.is_pointer_button_down_on();
         let (fill, stroke) = match kind {
             Kind::Primary => (if hovered || pressed { p.accent_hover } else { p.accent }, Stroke::NONE),
+            // On (its menu or popover is open): the prototype's `.btn.on`.
+            Kind::Secondary if o.on => (p.accent_soft, Stroke::NONE),
             Kind::Secondary | Kind::Danger => (
                 if pressed {
                     p.subtle
@@ -1116,9 +1119,10 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, body: &str, actions: im
     let top = ui.cursor().top();
     ui.vertical_centered(|ui| {
         // The prototype's `.empty`: 6 apart, text on 1.45 lines, the icon
-        // 8 more above the title and the actions 10 more under the body.
+        // 8 more above the title and the actions 10 more under the body;
+        // at least the 24 px padding above the icon.
         ui.spacing_mut().item_spacing.y = 0.0;
-        ui.add_space(((ui.available_height() - content_h) / 2.0).clamp(12.0, 400.0));
+        ui.add_space(((ui.available_height() - content_h) / 2.0).clamp(24.0, 400.0));
         let start = ui.cursor().top();
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
         ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
@@ -1525,6 +1529,8 @@ pub struct MenuItem<'a> {
     /// Some(true) draws a check in the icon column; Some(false) leaves it empty.
     pub checked: Option<bool>,
     pub label: &'a str,
+    /// Code after the label, in the mono font (`Copy {{name}}`).
+    pub code: Option<&'a str>,
     pub shortcut: Option<&'a str>,
     /// Muted text on the right (counts, paths).
     pub detail: Option<&'a str>,
@@ -1600,7 +1606,19 @@ pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
             ui.painter().galley(pos2(right - g.size().x, cy - g.size().y / 2.0), g.clone(), p.text_faint);
             right -= g.size().x + 8.0;
         }
-        let g = elide(ui, m.label, FontId::proportional(12.5), text_c, right - x);
+        let g = match m.code {
+            Some(code) => {
+                let mut job = egui::text::LayoutJob::default();
+                let label = egui::TextFormat::simple(FontId::proportional(12.5), text_c);
+                job.append(m.label, 0.0, label.clone());
+                let mono =
+                    egui::TextFormat { valign: Align::Center, ..egui::TextFormat::simple(theme::mono(11.5), text_c) };
+                job.append(code, 4.0, mono);
+                job.wrap = egui::text::TextWrapping::truncate_at_width((right - x).max(10.0));
+                ui.painter().layout_job(job)
+            }
+            None => elide(ui, m.label, FontId::proportional(12.5), text_c, right - x),
+        };
         ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, text_c);
     }
     if resp.clicked() && !m.submenu {
@@ -1609,17 +1627,16 @@ pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
     resp
 }
 
-/// A group header in a menu (`REQUESTS`).
+/// A group header in a menu (`REQUESTS`): 10.5 semibold, letter-spaced, on
+/// the prototype's 15 px line with 6 above and 3 below (24 high).
 pub fn menu_header(ui: &mut Ui, text: &str) {
     let p = theme::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
-    ui.painter().text(
-        pos2(rect.left() + 9.0, rect.bottom() - 4.0),
-        Align2::LEFT_BOTTOM,
-        text.to_uppercase(),
-        theme::semibold(10.5),
-        p.text_faint,
-    );
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    let mut f = egui::TextFormat::simple(theme::semibold(10.5), p.text_faint);
+    f.extra_letter_spacing = 0.63;
+    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_uppercase(), f));
+    let y = rect.top() + 6.0 + (15.2 - g.size().y) / 2.0 + 0.5;
+    ui.painter().galley(pos2(rect.left() + 9.0, y), g, p.text_faint);
 }
 
 /// A hairline between menu groups.

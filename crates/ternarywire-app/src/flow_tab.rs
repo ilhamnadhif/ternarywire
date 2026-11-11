@@ -171,7 +171,8 @@ pub struct FlowTab {
     renaming: Option<String>,
     /// Canvas position of the last right click ("Add block here").
     menu_at: Option<(f32, f32)>,
-    /// Automation: `validate`, `add-block` or `fit` on the next frame.
+    /// Automation: `validate`, `add-block`, `fit` or `view:<zoom>:<x>:<y>`
+    /// on the next frame.
     pub auto: Option<String>,
     /// Open the Add block menu on the next frame.
     open_add_menu: bool,
@@ -623,6 +624,17 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTa
         }
         Some("add-block") => tab.open_add_menu = true,
         Some("fit") => tab.fit = true,
+        // `view:<zoom>:<x>:<y>`: a fixed view, the canvas origin at (x, y)
+        // from the canvas's corner (the prototype's 78 % at 12, 64).
+        Some(v) if v.starts_with("view:") => {
+            let n: Vec<f32> = v[5..].split(':').filter_map(|t| t.parse().ok()).collect();
+            if let [zoom, x, y] = n[..] {
+                tab.zoom = zoom;
+                tab.pan = Vec2::new(x, y);
+                tab.fit = false;
+                tab.moved_view = true;
+            }
+        }
         _ => {}
     }
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -1925,8 +1937,9 @@ fn section<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let p = theme::pal(ui);
     let top = ui.cursor().top();
     ui.painter().hline(ui.max_rect().x_range(), top + 0.5, Stroke::new(1.0, p.border));
+    // 14 × 16 padding under the 1 px top border.
     egui::Frame::new()
-        .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 14 })
+        .inner_margin(egui::Margin { left: 16, right: 16, top: 15, bottom: 14 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 10.0;
@@ -2164,7 +2177,7 @@ fn block_inspector(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab, id:
     }
 
     section(ui, |ui| {
-        ui.label(kit::section_title(tr("Block")));
+        section_head(ui, tr("Block"), None);
         field(ui, tr("Label"), "", |ui| {
             let id = ui.make_persistent_id(("flow-label", &block.id));
             input_sm(ui, id, &mut block.label, tr(kind.label()), ui.available_width(), false, false);
@@ -2372,13 +2385,23 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
     let mut flow = tab.flow.clone();
 
     section(ui, |ui| {
-        ui.label(kit::section_title(tr("Description")));
+        section_head(ui, tr("Description"), None);
+        // The prototype's textarea: 13 px text on 19.5 px lines.
+        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+            let mut job = LayoutJob::simple(buf.as_str().to_owned(), FontId::proportional(13.0), p.text, wrap);
+            for s in &mut job.sections {
+                s.format.line_height = Some(19.5);
+            }
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        let hint = RichText::new(tr("What the flow does and what it needs")).size(13.0).line_height(Some(19.5));
         ui.add(
             egui::TextEdit::multiline(&mut flow.description)
-                .hint_text(RichText::new(tr("What the flow does and what it needs")).color(p.text_faint))
+                .hint_text(hint)
                 .margin(egui::Margin::symmetric(10, 8))
                 .desired_rows(3)
-                .desired_width(f32::INFINITY),
+                .desired_width(f32::INFINITY)
+                .layouter(&mut layouter),
         );
     });
 
@@ -2442,7 +2465,7 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
     });
 
     section(ui, |ui| {
-        ui.label(kit::section_title(tr("Run settings")));
+        section_head(ui, tr("Run settings"), None);
         setting_row(
             ui,
             tr("Limit steps"),
@@ -2519,7 +2542,7 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
     }
 
     section(ui, |ui| {
-        ui.label(kit::section_title(tr("Keyboard")));
+        section_head(ui, tr("Keyboard"), None);
         ui.spacing_mut().item_spacing.y = 0.0;
         for (keys, what) in [
             ("⌫", tr("Delete the selection")),
@@ -3408,6 +3431,8 @@ pub(crate) fn input_sm(
     let font = if mono { theme::mono(12.0) } else { FontId::proportional(12.0) };
     ui.scope(|ui| {
         ui.spacing_mut().interact_size.y = 26.0;
+        // egui paints placeholders in the weak text color; the prototype's are faint.
+        ui.visuals_mut().weak_text_color = Some(p.text_faint);
         let r = CornerRadius::same(RADIUS_SM);
         let w = &mut ui.visuals_mut().widgets;
         w.inactive.corner_radius = r;

@@ -384,11 +384,12 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
             let menu_open = row_menu_open(ui, popup_id);
             let count = e.variables.len().to_string();
             let row = TreeRow {
-                pad_left: 4.0,
-                // The active one has a check; the others their color dot,
+                // The name 30 px in: 8 padding, the 16 px slot, 6 gap.
+                pad_left: 5.0,
+                // The active one has a check, the others their color dot,
                 // painted over a clear icon that keeps the label in place.
-                icon: Some(if active { icons::CHECK_CIRCLE } else { icons::CIRCLE }),
-                icon_color: Some(if active { p.ok } else { Color32::TRANSPARENT }),
+                icon: Some(icons::CIRCLE),
+                icon_color: Some(Color32::TRANSPARENT),
                 label: &e.name,
                 meta: Some(count.as_str()),
                 selected,
@@ -402,23 +403,21 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
                 }
             });
             widgets::a11y_button(&resp, &e.name);
-            let lead = Rect::from_center_size(pos2(resp.rect.left() + 11.5, resp.rect.center().y), vec2(20.0, 20.0));
+            // A 16 px slot 8 px in from the row (the prototype's span):
+            // the check (12.5, the row's font size) or an 8 px dot.
+            let lead = Rect::from_center_size(pos2(resp.rect.left() + 16.0, resp.rect.center().y), vec2(20.0, 20.0));
             let d = ui.interact(lead, egui::Id::unique(("env-active", &e.id)), Sense::click());
             widgets::a11y_button(&d, if active { tr("Deactivate") } else { tr("Set active") });
-            if !active {
-                let (icon, color) = if d.hovered() {
-                    (Some(icons::CHECK_CIRCLE), p.ok)
-                } else {
-                    (None, env_color(ui, i).gamma_multiply(0.9))
-                };
-                match icon {
-                    Some(icon) => {
-                        ui.painter().text(lead.center(), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), color);
-                    }
-                    None => {
-                        ui.painter().circle_filled(lead.center(), 4.0, color);
-                    }
-                }
+            if active || d.hovered() {
+                ui.painter().text(
+                    lead.center(),
+                    Align2::CENTER_CENTER,
+                    icons::CHECK_CIRCLE,
+                    theme::icon_font(12.5),
+                    p.ok,
+                );
+            } else {
+                ui.painter().circle_filled(lead.center(), 4.0, env_color(ui, i).gamma_multiply(0.9));
             }
             if d.on_hover_text(if active { tr("Active — click to deactivate") } else { tr("Set active") }).clicked() {
                 acts.push(EnvAct::Activate(if active { None } else { Some(e.id.clone()) }));
@@ -577,18 +576,19 @@ fn bulk_editor(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, ctx: &VarC
     changed
 }
 
-/// A small upper-case tag in a column header (`SHARED`, `LOCAL`).
-fn header_tag(ui: &Ui, at: egui::Pos2, icon: &str, text: &str) -> Rect {
+/// A small upper-case tag in a column header (`SHARED`, `LOCAL`), painted
+/// with `painter` (clipped to its column).
+fn header_tag(ui: &Ui, painter: &egui::Painter, at: egui::Pos2, icon: &str, text: &str) -> Rect {
     let p = theme::pal(ui);
     let mut job = LayoutJob::default();
     job.append(icon, 0.0, TextFormat::simple(theme::icon_font(10.0), p.text_faint));
     let mut f = TextFormat::simple(theme::semibold(10.0), p.text_faint);
     f.extra_letter_spacing = 0.2;
     job.append(&format!(" {text}"), 0.0, f);
-    let g = ui.painter().layout_job(job);
+    let g = painter.layout_job(job);
     let rect = Rect::from_min_size(pos2(at.x, at.y - 8.0), vec2(g.size().x + 10.0, 16.0));
-    ui.painter().rect_filled(rect, CornerRadius::same(4), p.subtle);
-    ui.painter().galley(pos2(rect.left() + 5.0, rect.center().y - g.size().y / 2.0), g, p.text_faint);
+    painter.rect_filled(rect, CornerRadius::same(4), p.subtle);
+    painter.galley(pos2(rect.left() + 5.0, rect.center().y - g.size().y / 2.0), g, p.text_faint);
     rect
 }
 
@@ -634,7 +634,7 @@ fn secret_cell(ui: &mut Ui, salt: &str, text: &mut String, cell: Rect, fallback:
             .desired_width(edit_rect.width()),
     );
     if masked && (!text.is_empty() || fallback) {
-        paint_mask(ui, pos2(cell.left() + 10.0, cell.center().y), text.is_empty());
+        paint_mask(ui, pos2(cell.left() + 9.0, cell.center().y), text.is_empty());
     }
     let label = if reveal { tr("Hide value") } else { tr("Show value") };
     let e =
@@ -650,7 +650,9 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
     let p = theme::pal(ui);
     let mut changed = false;
     let mut remove = None;
-    // Columns 34 / 1fr / 128 / 1.25fr / 1.25fr / 64; header 30, rows 36.
+    // Inside the 1 px border: columns 34 / 1fr / 128 / 1.25fr / 1.25fr / 64,
+    // a header of 30 and rows of 36 (their 1 px top hairline included). A
+    // column starts with its left hairline (`xs`, the pixel's left edge).
     const CHECK: f32 = 34.0;
     const KIND: f32 = 128.0;
     const ACT: f32 = 64.0;
@@ -659,25 +661,20 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
     let width = ui.available_width().max(420.0);
     let left = ui.cursor().left();
     let top = ui.cursor().top();
-    let fr = (width - CHECK - KIND - ACT) / 3.5;
-    let xs = [
-        left + CHECK,
-        left + CHECK + fr,
-        left + CHECK + fr + KIND,
-        left + CHECK + fr + KIND + fr * 1.25,
-        left + width - ACT,
-    ];
     let right = left + width;
+    let fr = (width - 2.0 - CHECK - KIND - ACT) / 3.5;
+    let x0 = left + 1.0 + CHECK;
+    let xs = [x0, x0 + fr, x0 + fr + KIND, x0 + fr + KIND + fr * 1.25, right - 1.0 - ACT];
     let bg = ui.painter().add(egui::Shape::Noop);
     let mono = theme::mono(12.0);
 
     // Header: well fill, 11.5 medium muted labels.
-    let head = Rect::from_min_size(pos2(left, top), vec2(width, HEAD));
-    ui.painter().rect_filled(head, CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 }, p.well);
+    let head = Rect::from_min_size(pos2(left + 1.0, top + 1.0), vec2(width - 2.0, HEAD));
+    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.well);
     if !vars.is_empty() {
         let all = vars.iter().all(|v| v.enabled);
         let some = vars.iter().any(|v| v.enabled);
-        let c = Rect::from_center_size(pos2(left + CHECK / 2.0, head.center().y), vec2(15.0, 15.0));
+        let c = Rect::from_center_size(pos2(left + 1.0 + CHECK / 2.0, head.center().y), vec2(15.0, 15.0));
         let r = ui.interact(c, salt.with("all"), Sense::click());
         widgets::a11y_name(&r, tr("Enabled"));
         kit::paint_check(ui, c, all, some && !all, r.hovered(), ui.is_enabled());
@@ -707,18 +704,20 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
         ),
     ];
     for (i, (x0, x1, label, help, tag)) in heads.iter().enumerate() {
-        let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(11.5), p.text_muted);
+        // Clipped to the column, like the prototype's cells (overflow hidden).
+        let painter = ui.painter().with_clip_rect(Rect::from_min_max(pos2(*x0, head.top()), pos2(*x1, head.bottom())));
+        let g = painter.layout_no_wrap(label.to_string(), theme::medium(11.5), p.text_muted);
         let w = g.size().x;
-        ui.painter().galley(pos2(x0 + 10.0, head.center().y - g.size().y / 2.0), g, p.text_muted);
+        painter.galley(pos2(x0 + 11.0, head.center().y - g.size().y / 2.0), g, p.text_muted);
         if let Some((icon, text)) = tag {
-            header_tag(ui, pos2(x0 + 10.0 + w + 6.0, head.center().y), icon, text);
+            header_tag(ui, &painter, pos2(x0 + 11.0 + w + 6.0, head.center().y), icon, text);
         }
         if !help.is_empty() {
             let r = Rect::from_min_max(pos2(*x0, head.top()), pos2(*x1, head.bottom()));
             ui.interact(r, salt.with(("head", i)), Sense::hover()).on_hover_text(*help);
         }
     }
-    let opts = Rect::from_center_size(pos2(right - 6.0 - 11.0, head.center().y), vec2(22.0, 22.0));
+    let opts = Rect::from_center_size(pos2(right - 1.0 - 6.0 - 11.0, head.center().y), vec2(22.0, 22.0));
     let o = ui.put(opts, |ui: &mut Ui| kit::icon_button_sm(ui, icons::DOTS_THREE, tr("Table options")));
     egui::Popup::menu(&o).width(250.0).show(|ui| {
         if kit::menu_item(ui, Some(icons::TEXT_ALIGN_LEFT), tr("Bulk edit"), None).clicked() {
@@ -752,11 +751,12 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
     let needle = filter.to_lowercase();
     let mut shown = 0;
     let n = vars.len();
-    // The cell being edited: a 1.5 px accent ring on the surface, inset.
+    // The cell being edited: a 1.5 px accent ring on the surface, 4 px
+    // outside the cell's text box.
     let ring = |ui: &Ui, slot: egui::layers::ShapeIdx, cell: Rect| {
         let r = Rect::from_min_max(
-            pos2(cell.left() + 5.0, cell.top() + 3.0),
-            pos2(cell.right() - 5.0, cell.bottom() - 4.0),
+            pos2(cell.left() + 5.0, cell.top() + 3.5),
+            pos2(cell.right() - 6.0, cell.bottom() - 3.5),
         );
         ui.painter().set(slot, egui::Shape::rect_filled(r, CornerRadius::same(4), p.surface));
         ui.painter().rect_stroke(r, CornerRadius::same(4), Stroke::new(1.5, p.accent), StrokeKind::Inside);
@@ -772,7 +772,7 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
         let mut v = if is_new { Variable::new("", "") } else { vars[i].clone() };
         let mut row_changed = false;
         let row_rect = Rect::from_min_size(pos2(left, y), vec2(width, ROW));
-        ui.painter().hline(left..=right, y, Stroke::new(1.0, p.border));
+        ui.painter().hline(left..=right, y + 0.5, Stroke::new(1.0, p.border));
         let menu_id = salt.with(("row-menu", i));
         if !is_new && auto_menu.as_deref() == Some(v.key.as_str()) {
             egui::Popup::open_id(ui.ctx(), menu_id);
@@ -781,22 +781,24 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
         let menu_open = !is_new && egui::Popup::is_id_open(ui.ctx(), menu_id);
         let hovered = !is_new && (ui.rect_contains_pointer(row_rect) || menu_open);
         if hovered {
-            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.0)).with_min_y(y + 0.5), 0.0, p.well);
+            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.0)).with_min_y(y + 1.0), 0.0, p.well);
         }
-        // A cell spans its column between the hairlines.
-        let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 1.0, y + 1.0), pos2(x1, y + ROW));
+        // A cell's text box: 1 px of hairline and 1 px more, so editors with
+        // a 9 px margin put the text 11 px after the hairline (border +
+        // padding 10).
+        let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 2.0, y + 1.0), pos2(x1, y + ROW));
         let cy = row_rect.center().y + 0.5;
         ui.push_id(i, |ui| {
             if is_new {
                 ui.painter().text(
-                    pos2(left + CHECK / 2.0, cy),
+                    pos2(left + 1.0 + CHECK / 2.0, cy),
                     Align2::CENTER_CENTER,
                     icons::PLUS,
                     theme::icon_font(13.0),
                     p.text_faint,
                 );
             } else {
-                let c = Rect::from_center_size(pos2(left + CHECK / 2.0, cy), vec2(15.0, 15.0));
+                let c = Rect::from_center_size(pos2(left + 1.0 + CHECK / 2.0, cy), vec2(15.0, 15.0));
                 let r = ui.put(c, |ui: &mut Ui| kit::check(ui, &mut v.enabled, ""));
                 widgets::a11y_name(&r, &format!("{} {}", tr("Enabled"), v.key));
                 row_changed |= r.changed();
@@ -828,14 +830,23 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
                 row_changed |= variable_cells(ui, &mut v, &xs, y, faded, ctx);
                 // Row actions: more, delete.
                 if hovered {
-                    let trash = Rect::from_center_size(pos2(right - 6.0 - 11.0, cy - 0.5), vec2(22.0, 22.0));
+                    let trash = Rect::from_center_size(pos2(right - 1.0 - 6.0 - 11.0, cy - 0.5), vec2(22.0, 22.0));
                     let dots = trash.translate(vec2(-22.0, 0.0));
                     let m = ui.put(dots, |ui: &mut Ui| {
                         kit::icon_button_ex(ui, icons::DOTS_THREE, tr("More actions"), menu_open, 22.0)
                     });
-                    egui::Popup::menu(&m).id(menu_id).width(250.0).show(|ui| {
-                        row_changed |= variable_menu(ui, &mut v);
-                    });
+                    // Under the row, 8 px in from the table's right edge.
+                    let under = Rect::from_min_max(pos2(right - 9.0 - 250.0, y), pos2(right - 9.0, y + ROW + 2.0));
+                    egui::Popup::menu(&m)
+                        .id(menu_id)
+                        .width(250.0)
+                        .anchor(under)
+                        .align(egui::RectAlign::BOTTOM_END)
+                        .gap(0.0)
+                        .show(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            row_changed |= variable_menu(ui, &mut v);
+                        });
                     let d = ui.put(trash, |ui: &mut Ui| kit::icon_button_sm(ui, icons::TRASH, tr("Delete")));
                     if d.clicked() {
                         remove = Some(i);
@@ -855,10 +866,10 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
             }
         }
     }
-    let table = Rect::from_min_max(pos2(left, top), pos2(right, y));
+    let table = Rect::from_min_max(pos2(left, top), pos2(right, y + 1.0));
     ui.painter().set(bg, egui::Shape::rect_filled(table, CornerRadius::same(9), p.surface));
     for x in &xs[..4] {
-        ui.painter().vline(*x, table.y_range(), Stroke::new(1.0, p.border));
+        ui.painter().vline(*x + 0.5, table.y_range(), Stroke::new(1.0, p.border));
     }
     ui.painter().rect_stroke(table, CornerRadius::same(9), Stroke::new(1.0, p.border), StrokeKind::Inside);
     ui.advance_cursor_after_rect(table);
@@ -888,18 +899,18 @@ fn variable_cells(ui: &mut Ui, v: &mut Variable, xs: &[f32; 5], y: f32, faded: b
     let p = theme::pal(ui);
     const ROW: f32 = 36.0;
     let mut changed = false;
-    let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 1.0, y + 1.0), pos2(x1, y + ROW));
+    let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 2.0, y + 1.0), pos2(x1, y + ROW));
     let ring = |ui: &Ui, slot: egui::layers::ShapeIdx, cell: Rect| {
         let r = Rect::from_min_max(
-            pos2(cell.left() + 5.0, cell.top() + 3.0),
-            pos2(cell.right() - 5.0, cell.bottom() - 4.0),
+            pos2(cell.left() + 5.0, cell.top() + 3.5),
+            pos2(cell.right() - 6.0, cell.bottom() - 3.5),
         );
         ui.painter().set(slot, egui::Shape::rect_filled(r, CornerRadius::same(4), p.surface));
         ui.painter().rect_stroke(r, CornerRadius::same(4), Stroke::new(1.5, p.accent), StrokeKind::Inside);
     };
     // Type: a quiet select box filling the cell.
     let secret = v.kind == VarKind::Secret;
-    let kind_rect = Rect::from_min_max(pos2(xs[1] + 10.0, y), pos2(xs[2] - 10.0, y + ROW));
+    let kind_rect = Rect::from_min_max(pos2(xs[1] + 11.0, y + 1.0), pos2(xs[2] - 10.0, y + ROW));
     let (icon, label) = if secret { (icons::LOCK_SIMPLE, tr("secret")) } else { (icons::TEXT_AA, tr("default")) };
     let r = ui
         .scope_builder(UiBuilder::new().max_rect(kind_rect).layout(Layout::left_to_right(Align::Center)), |ui| {
@@ -1012,8 +1023,9 @@ fn variable_menu(ui: &mut Ui, v: &mut Variable) -> bool {
     });
     kit::menu_sep(ui);
     let reference = format!("{{{{{}}}}}", v.key);
-    if kit::menu_item(ui, Some(icons::COPY), &trf("Copy {}", &[&reference]), None).clicked() {
-        ui.ctx().copy_text(reference);
+    let copy = MenuItem { icon: Some(icons::COPY), label: tr("Copy"), code: Some(&reference), ..Default::default() };
+    if kit::menu_item_ex(ui, copy).clicked() {
+        ui.ctx().copy_text(reference.clone());
     }
     changed
 }
@@ -1040,22 +1052,25 @@ fn frameless<'t>(
 // Tab
 // ---------------------------------------------------------------------------
 
-/// A hint with a `{{name}}` chip in the secret style (info on info soft)
-/// in place of the `{}` of `text`.
+/// A hint (12 muted, 17.4 px lines) with a `{{name}}` chip in the secret
+/// style (info on info soft) in place of the `{}` of `text`.
 fn chip_hint(ui: &Ui, text: &str, chip: &str) -> LayoutJob {
     let p = theme::pal(ui);
     let (before, after) = text.split_once("{}").unwrap_or((text, ""));
     let mut job = LayoutJob::default();
-    let text = TextFormat::simple(FontId::proportional(12.0), p.text_muted);
+    let text = TextFormat { line_height: Some(17.4), ..TextFormat::simple(FontId::proportional(12.0), p.text_muted) };
     job.append(before, 0.0, text.clone());
-    let mut c = TextFormat::simple(theme::mono(11.5), p.info);
-    c.background = p.info_soft;
+    // The chip's fill covers its font box, not the whole line.
+    let c =
+        TextFormat { color: p.info, background: p.info_soft, line_height: None, valign: Align::Center, ..text.clone() };
     job.append(chip, 0.0, c);
     job.append(after, 0.0, text);
     job
 }
 
 /// The two help cards under the table: the vault, and switching quickly.
+/// Each is a card (12 × 14 padding) with a 13 px muted icon centered on its
+/// content, 10 before it; side by side they are centered on each other.
 fn help_cards(app: &mut TernaryWireApp, ui: &mut Ui) {
     let p = theme::pal(ui);
     let gap = 10.0;
@@ -1063,22 +1078,26 @@ fn help_cards(app: &mut TernaryWireApp, ui: &mut Ui) {
     let w = if side { ((ui.available_width() - gap) / 2.0).floor() } else { ui.available_width() };
     let h_id = ui.scope_id().with("env-help-h");
     let h: f32 = ui.data(|d| d.get_temp(h_id).unwrap_or(0.0));
-    // A card: its icon (14, muted) centered on the content, 10 before it.
+    let title = |ui: &mut Ui, text: &str| {
+        ui.label(RichText::new(text).font(theme::medium(13.0)).color(p.text).line_height(Some(18.85)));
+    };
     let card = |ui: &mut Ui, icon: &str, add: &mut dyn FnMut(&mut Ui)| -> f32 {
         kit::card(ui)
             .inner_margin(egui::Margin::symmetric(14, 12))
             .show(ui, |ui| {
                 ui.set_width(w - 30.0);
-                let row = ui
-                    .horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
-                        ui.add_space(24.0);
+                let at = ui.cursor().min;
+                let rect = Rect::from_min_size(pos2(at.x + 23.0, at.y), vec2(w - 30.0 - 23.0, 1000.0));
+                let content = ui
+                    .scope_builder(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)), |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         add(ui)
                     })
                     .response
                     .rect;
-                let at = pos2(row.left() + 7.0, row.center().y);
-                ui.painter().text(at, Align2::CENTER_CENTER, icon, theme::icon_font(14.0), p.text_muted);
+                let c = pos2(at.x + 6.5, content.center().y);
+                ui.painter().text(c, Align2::CENTER_CENTER, icon, theme::icon_font(13.0), p.text_muted);
+                ui.advance_cursor_after_rect(Rect::from_min_max(at, pos2(at.x + w - 30.0, content.bottom())));
             })
             .response
             .rect
@@ -1086,30 +1105,39 @@ fn help_cards(app: &mut TernaryWireApp, ui: &mut Ui) {
     };
     let mut open_vault = false;
     let mut vault = |ui: &mut Ui| {
-        let text_w = (ui.available_width() - 100.0).max(80.0);
-        ui.allocate_ui_with_layout(vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(tr("Secrets live in the Keychain")).font(theme::medium(13.0)).color(p.text));
-            let job = chip_hint(ui, tr("Use {} for values shared across environments."), "{{vault:name}}");
-            ui.add(egui::Label::new(job).wrap());
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Open vault"), Default::default()).clicked() {
-                open_vault = true;
-            }
-        });
+        let avail = ui.available_width();
+        let label = tr("Open vault");
+        let btn_w = ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 18.0;
+        let text_w = (avail - btn_w - 10.0).max(80.0);
+        let col = ui
+            .allocate_ui_with_layout(vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(text_w);
+                title(ui, tr("Secrets live in the Keychain"));
+                let job = chip_hint(ui, tr("Use {} for values shared across environments."), "{{vault:name}}");
+                ui.add(egui::Label::new(job).wrap());
+            })
+            .response
+            .rect;
+        let b = Rect::from_min_size(pos2(col.left() + avail - btn_w, col.center().y - 12.0), vec2(btn_w, 24.0));
+        let r =
+            ui.put(b, |ui: &mut Ui| kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, label, Default::default()));
+        if r.clicked() {
+            open_vault = true;
+        }
+        ui.advance_cursor_after_rect(col.union(b));
     };
     let mut switch = |ui: &mut Ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(tr("Switch quickly")).font(theme::medium(13.0)).color(p.text));
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                kit::kbd(ui, "⌘");
-                kit::kbd(ui, "E");
-                ui.add_space(2.0);
-                ui.label(kit::hint(ui, tr("anywhere, or double-click an environment in the sidebar.")));
-            });
+        title(ui, tr("Switch quickly"));
+        // The keys sit on the hint's 17.4 px line, as inline boxes do.
+        ui.spacing_mut().interact_size.y = 17.4;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+            kit::kbd(ui, "⌘");
+            kit::kbd(ui, "E");
+            ui.add_space(2.0);
+            ui.label(
+                kit::hint(ui, tr("anywhere, or double-click an environment in the sidebar.")).line_height(Some(17.4)),
+            );
         });
     };
     if side {
@@ -1209,21 +1237,40 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut EnvTab) {
     }
     // Filter, and where the values go (one line of help, always shown).
     kit::toolbar(ui, |ui| {
-        let w = (ui.available_width() * 0.4).clamp(140.0, 280.0);
-        let r = kit::search_field_sm(ui, "env-filter", &mut tab.search, tr("Filter variables"), w);
+        // The prototype's flex row: the search (280) and the hint (icon,
+        // 6, text on one line) share what is left after the two 8 px gaps,
+        // shrinking in proportion to their widths; the hint wraps to two
+        // 17.4 px lines, its icon centered on them.
+        let text = tr(
+            "Initial values are saved in the workspace and can be committed to Git; current values and secrets stay on this machine.",
+        );
+        let font = FontId::proportional(12.0);
+        let text_w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), p.text_muted).size().x;
+        let hint_w = 12.0 + 6.0 + text_w;
+        let avail = ui.available_width();
+        let over = (280.0 + hint_w + 16.0 - avail).max(0.0);
+        let search_w = (280.0 - over * 280.0 / (280.0 + hint_w)).max(140.0);
+        let r = kit::search_field_sm(ui, "env-filter", &mut tab.search, tr("Filter variables"), search_w);
         widgets::a11y_name(&r, tr("Filter variables"));
-        let mut job = LayoutJob::default();
-        let mut icon = TextFormat::simple(theme::icon_font(13.0), p.text_muted);
-        icon.valign = Align::Center;
-        job.append(icons::INFO, 0.0, icon);
-        job.append(
-            tr("Initial values are saved in the workspace and can be committed to Git; current values and secrets stay on this machine."),
-            6.0,
-            TextFormat::simple(FontId::proportional(12.0), p.text_muted),
+        let row = ui.available_rect_before_wrap();
+        let box_w = (hint_w - over * hint_w / (280.0 + hint_w)).min(row.width() - 8.0);
+        let left = row.right() - box_w;
+        let mut job = LayoutJob::single_section(
+            text.to_string(),
+            TextFormat { line_height: Some(17.4), ..TextFormat::simple(font, p.text_muted) },
         );
         job.wrap.max_rows = 2;
-        job.wrap.max_width = ui.available_width();
-        ui.add(egui::Label::new(job).wrap());
+        job.wrap.max_width = box_w - 18.0;
+        let g = ui.painter().layout_job(job);
+        let cy = row.center().y;
+        ui.painter().text(
+            pos2(left + 6.0, cy),
+            Align2::CENTER_CENTER,
+            icons::INFO,
+            theme::icon_font(12.0),
+            p.text_muted,
+        );
+        ui.put(Rect::from_min_size(pos2(left + 18.0, cy - g.size().y / 2.0), g.size()), egui::Label::new(g));
     });
     let ctx = app.var_ctx(None);
     egui::ScrollArea::vertical().id_salt("env-vars").auto_shrink([false; 2]).show(ui, |ui| {

@@ -6,6 +6,7 @@
   {"sidebar": "flows"},
   {"open_flow": "Catalog summary"},
   {"wait_ms": 500},
+  {"flow_action": "view:0.78:12:64"},
   {"run_flow": true},
   {"wait_ms": 5000},
   {"flow_select": "Books"},
