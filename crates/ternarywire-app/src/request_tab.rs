@@ -1293,12 +1293,15 @@ fn params_section(ui: &mut Ui, http: &mut HttpRequest, ectx: &EditCtx) {
             http.params = params;
             http.sync_url_from_params();
         }
-        ui.add_space(20.0);
-        let help = tr("Write :name in the URL path to add one; its value is filled in here.");
+        // 14 + 6 px under the table, and 8 under the title; 2 and 1 more for
+        // the prototype's line height (1.45) that egui's labels don't have.
+        ui.add_space(22.0);
+        let help =
+            kit::hint_code(ui, tr("Write {} in the URL path to add one; its value is filled in here."), &[":name"]);
         if http.path_vars.is_empty() {
             ui.label(kit::section_title(tr("Path variables")));
-            ui.add_space(8.0);
-            ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+            ui.add_space(9.0);
+            ui.add(egui::Label::new(help).wrap());
             return;
         }
         let mut vars = http.path_vars.clone();
@@ -1318,7 +1321,7 @@ fn params_section(ui: &mut Ui, http: &mut HttpRequest, ectx: &EditCtx) {
             http.path_vars = vars;
         }
         ui.add_space(8.0);
-        ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+        ui.add(egui::Label::new(help).wrap());
     });
 }
 

@@ -375,6 +375,9 @@ Mock server: {}	Server mock: {}
 Mode	Mode
 Model	Model
 More actions	Aksi lainnya
+Copy as text	Salin sebagai teks
+Remove disabled rows	Hapus baris nonaktif
+Remove all rows	Hapus semua baris
 Namespace	Namespace
 Never decrypt	Jangan pernah dekripsi
 New OpenAPI 3 spec in specs/	Spesifikasi OpenAPI 3 baru di specs/
@@ -401,7 +404,7 @@ No traffic captured yet.	Belum ada lalu lintas yang tertangkap.
 No variables	Tidak ada variabel
 Not trusted yet: HTTPS clients will reject the proxy	Belum dipercaya: klien HTTPS akan menolak proxy
 OAuth 2.0: {}	OAuth 2.0: {}
-One entry per line as key:value. Prefix with // to disable.	Satu entri per baris sebagai key:value. Awali dengan // untuk menonaktifkan.
+One entry per line as {}. Prefix with {} to disable.	Satu entri per baris sebagai {}. Awali dengan {} untuk menonaktifkan.
 Only hosts	Hanya host
 Only show incoming events listed here	Hanya tampilkan event masuk yang tercantum di sini
 Open	Buka
@@ -1990,7 +1993,7 @@ Auth	Auth
 Enter a URL or paste a cURL command	Masukkan URL atau tempel perintah cURL
 Custom…	Kustom…
 Custom method	Method kustom
-Write :name in the URL path to add one; its value is filled in here.	Tulis :nama di path URL untuk menambahkannya; nilainya diisi di sini.
+Write {} in the URL path to add one; its value is filled in here.	Tulis {} di path URL untuk menambahkannya; nilainya diisi di sini.
 From Settings › Requests	Dari Pengaturan › Request
 calculated	dihitung
 calculated when sent	dihitung saat dikirim

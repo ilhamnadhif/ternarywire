@@ -299,10 +299,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts.font_data.insert("Inter-Medium".into(), font(include_bytes!("../assets/fonts/Inter-Medium.ttf")));
     fonts.font_data.insert("Inter-SemiBold".into(), font(include_bytes!("../assets/fonts/Inter-SemiBold.ttf")));
     fonts.font_data.insert("JetBrainsMono".into(), font(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")));
-    let mut phosphor = egui::FontData::from_static(include_bytes!("../assets/fonts/Phosphor.ttf"));
-    // Icons sit a little high next to Inter's x-height.
+    let phosphor_bytes: &'static [u8] = include_bytes!("../assets/fonts/Phosphor.ttf");
+    let mut phosphor = egui::FontData::from_static(phosphor_bytes);
+    // Icons inside text sit a little high next to Inter's x-height.
     phosphor.tweak.y_offset_factor = 0.08;
     fonts.font_data.insert("Phosphor".into(), std::sync::Arc::new(phosphor));
+    // A standalone icon (`icon_font`) is centered in its box like the
+    // prototype's flex-centered `.i`, without that nudge.
+    fonts.font_data.insert("Phosphor-Icon".into(), font(phosphor_bytes));
 
     let fallbacks: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mono_fallbacks: Vec<String> = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
@@ -318,7 +322,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     mono.extend(mono_fallbacks);
     mono.push("Phosphor".into());
     fonts.families.insert(FontFamily::Monospace, mono);
-    fonts.families.insert(FontFamily::Name(ICONS.into()), vec!["Phosphor".into(), "Inter".into()]);
+    fonts.families.insert(FontFamily::Name(ICONS.into()), vec!["Phosphor-Icon".into(), "Inter".into()]);
     ctx.set_fonts(fonts);
 }
 
@@ -371,7 +375,8 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             v.warn_fg_color = p.warn;
             v.error_fg_color = p.err;
             v.override_text_color = None;
-            v.weak_text_color = Some(p.text_muted);
+            // Placeholders of text fields (`.input::placeholder`).
+            v.weak_text_color = Some(p.text_faint);
             v.selection.bg_fill = if dark { soft(p.accent, 0.32) } else { soft(p.accent, 0.18) };
             // Also the border of a focused text field: accent in both themes.
             v.selection.stroke = Stroke::new(1.0, if dark { p.accent } else { p.accent_text });
