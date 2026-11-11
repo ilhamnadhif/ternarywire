@@ -89,7 +89,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     let icon_galley =
         o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(icon_size), Color32::PLACEHOLDER));
     let caret_galley = o.caret.then(|| {
-        ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(12.0), Color32::PLACEHOLDER)
+        ui.painter().layout_no_wrap(crate::icons::CARET_DOWN.into(), theme::icon_font(icon_size), Color32::PLACEHOLDER)
     });
     let kbd_w = o.kbd.map(|k| kbd_size(ui, k).x + gap).unwrap_or(0.0);
     let parts = [
@@ -143,10 +143,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
             );
         }
         let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
-        let icon_color = match kind {
-            Kind::Secondary if galley.is_some() => p.text_muted,
-            _ => text_color,
-        };
+        // Icons and the caret take the color of the label (`.btn .i`).
+        let icon_color = text_color;
         let mut x = rect.center().x - content_w / 2.0 + (pad_l - pad_r) / 2.0;
         let put = |g: std::sync::Arc<egui::Galley>, color: Color32, x: &mut f32| {
             painter.galley(pos2(*x, rect.center().y - g.size().y / 2.0), g.clone(), fade(color));
@@ -164,8 +162,7 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
             x += s.x + gap;
         }
         if let Some(g) = caret_galley {
-            let c = if kind == Kind::Primary { text_color } else { p.text_faint };
-            put(g, c, &mut x);
+            put(g, text_color, &mut x);
         }
     }
     resp
@@ -502,6 +499,7 @@ pub fn segmented_ex<T: PartialEq + Copy>(
         .iter()
         .map(|(_, icon, label)| {
             let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(font), Color32::PLACEHOLDER);
+            // Icons take the size of the label (`.seg button`).
             let ig =
                 icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font), Color32::PLACEHOLDER));
             let w = g.size().x + ig.as_ref().map_or(0.0, |g| g.size().x + 5.0) + pad * 2.0;
@@ -611,8 +609,10 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
 fn paint_pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32, o: PillOpts<'_>) -> Response {
     let p = theme::pal(ui);
     let (h, pad, font) = if o.large { (24.0, 9.0, 12.0) } else { (20.0, 7.0, 11.5) };
+    // An outline is a 1 px border beside the padding; icons take the text's size.
+    let pad = if o.outline { pad + 1.0 } else { pad };
     let galley = ui.painter().layout_no_wrap(text.to_string(), theme::medium(font), fg);
-    let icon = o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font + 1.0), fg));
+    let icon = o.icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(font), fg));
     let lead = if o.dot { 11.0 } else { 0.0 } + icon.as_ref().map_or(0.0, |g| g.size().x + 5.0);
     // An outline adds its 1 px border on both sides (`.pill.outline`).
     let border = if o.outline { 1.0 } else { 0.0 };
@@ -677,7 +677,8 @@ pub fn metric_colored(ui: &mut Ui, icon: &str, text: &str, color: Option<Color32
     resp
 }
 
-/// The size of a key cap for `keys`.
+/// The size of a key cap for `keys`: the text, 5 px padding and a 1 px
+/// border on each side (`.kbd`).
 pub fn kbd_size(ui: &Ui, keys: &str) -> Vec2 {
     let g = ui.painter().layout_no_wrap(keys.to_string(), FontId::proportional(10.5), Color32::PLACEHOLDER);
     // 5 px padding inside a 1 px border.
@@ -988,10 +989,13 @@ fn search_field_ex(
         .desired_width(width)
         .min_size(vec2(0.0, h))
         .align(Align2::LEFT_CENTER)
-        // Room for the clear button only when there is text to clear.
-        .margin(egui::Margin { left: 30, right: if empty { 8 } else { 22 }, top: 0, bottom: 0 });
+        // Text after the 30 px padding and the 1 px border; room for the
+        // clear button only when there is text to clear.
+        .margin(egui::Margin { left: 31, right: if empty { 9 } else { 22 }, top: 0, bottom: 0 });
     let resp = ui
         .scope(|ui| {
+            // egui paints a hint in `weak_text_color`, whatever its own color.
+            ui.visuals_mut().weak_text_color = Some(p.text_faint);
             ui.spacing_mut().interact_size.y = h;
             // egui draws placeholders in the weak text color: faint, as `::placeholder`.
             ui.visuals_mut().weak_text_color = Some(p.text_faint);
@@ -1194,12 +1198,7 @@ impl GroupRows {
     /// control on the right; 11 px above and below.
     pub fn row<R>(&mut self, ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
         let p = theme::pal(ui);
-        if !self.first {
-            let y = ui.cursor().top();
-            let r = ui.max_rect();
-            ui.painter().hline(r.left()..=r.right(), y, Stroke::new(1.0, p.border));
-        }
-        self.first = false;
+        self.separator(ui);
         ui.add_space(11.0);
         let out = ui
             .horizontal(|ui| {
@@ -1208,9 +1207,12 @@ impl GroupRows {
                 ui.allocate_ui_with_layout(vec2(label_w, 0.0), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(label_w);
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(RichText::new(label).font(theme::medium(13.0)).color(p.text));
+                    ui.label(
+                        RichText::new(label).font(theme::medium(13.0)).color(p.text).line_height(Some(13.0 * 1.45)),
+                    );
                     if !help.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(help).size(12.0).color(p.text_muted)).wrap());
+                        let help = RichText::new(help).size(12.0).color(p.text_muted).line_height(Some(12.0 * 1.45));
+                        ui.add(egui::Label::new(help).wrap());
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| add(ui)).inner
@@ -1222,17 +1224,23 @@ impl GroupRows {
 
     /// A free-form row (lists, editors) with the same separators.
     pub fn block<R>(&mut self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-        let p = theme::pal(ui);
-        if !self.first {
-            let y = ui.cursor().top();
-            let r = ui.max_rect();
-            ui.painter().hline(r.left()..=r.right(), y, Stroke::new(1.0, p.border));
-        }
-        self.first = false;
+        self.separator(ui);
         ui.add_space(11.0);
         let out = add(ui);
         ui.add_space(11.0);
         out
+    }
+
+    /// The 1 px border on top of every row but the first (`.frow +
+    /// .frow`), which adds to the row's height.
+    fn separator(&mut self, ui: &mut Ui) {
+        if !std::mem::replace(&mut self.first, false) {
+            let p = theme::pal(ui);
+            let y = ui.cursor().top();
+            let r = ui.max_rect();
+            ui.painter().hline(r.left()..=r.right(), y + 0.5, Stroke::new(1.0, p.border));
+            ui.add_space(1.0);
+        }
     }
 }
 
@@ -1242,11 +1250,12 @@ pub fn group(ui: &mut Ui, title: &str, help: &str, add: impl FnOnce(&mut Ui, &mu
     let p = theme::pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
+        // Line boxes of 1.45 as in the prototype.
         if !title.is_empty() {
-            ui.label(section_title(title).color(p.text));
+            ui.label(section_title(title).color(p.text).line_height(Some(12.5 * 1.45)));
         }
         if !help.is_empty() {
-            ui.label(hint(ui, help));
+            ui.add(egui::Label::new(hint(ui, help).line_height(Some(12.0 * 1.45))).wrap());
         }
         egui::Frame::new()
             .fill(p.surface)

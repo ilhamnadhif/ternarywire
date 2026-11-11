@@ -4,9 +4,9 @@ Generated with the steps in `steps/`. For each approximate screen: the automatio
 `crates/ternarywire-app/src/automation.rs` would need (a proposal; the name is free), and what it
 should do. Add the step, then replace the stand-in steps of that screen.
 
-**Exact** (29): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`
+**Exact** (40): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`
 
-**Approximate** (35): `home`, `http-body`, `http-graphql`, `http-error`, `sio`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`, `mock`, `mock-routes`, `capture-cert`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`
+**Approximate** (24): `home`, `http-body`, `http-graphql`, `http-error`, `sio`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`, `mock`, `mock-routes`, `capture-cert`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`
 
 | Screen | Needed step | What it should do |
 | --- | --- | --- |
@@ -25,17 +25,6 @@ should do. Add the step, then replace the stand-in steps of that screen.
 | `mock` | `{"auto": "start"}` | start the mock server (port 3000); its log then needs traffic, e.g. {"_poke": "mock"}, and {"auto": "select:1"} |
 | `mock-routes` | `{"mock_section": "routes"}` | show the Routes tab (and {"auto": "start"}) |
 | `capture-cert` | `{"capture_cert": true}` | open the certificate panel of the capture proxy |
-| `dlg-palette-search` | `{"palette_query": "books"}` | type a query so the fuzzy results show |
-| `dlg-env-switch` | `{"dialog": "env-switch"}` | the environment switcher (⌘E); the command palette stands in |
-| `dlg-settings-requests` | `{"dialog": "settings:requests"}` | open Settings on the Requests page (opens on General) |
-| `dlg-settings-scripts` | `{"dialog": "settings:scripts"}` | open Settings on the Scripts page (opens on General) |
-| `dlg-settings-proxy` | `{"dialog": "settings:proxy"}` | open Settings on the Proxy page (opens on General) |
-| `dlg-settings-certs` | `{"dialog": "settings:certs"}` | open Settings on the Certificates page (opens on General) |
-| `dlg-settings-shortcuts` | `{"dialog": "settings:shortcuts"}` | open Settings on the Shortcuts page (opens on General) |
-| `dlg-settings-about` | `{"dialog": "settings:about"}` | open Settings on the About page (opens on General) |
-| `dlg-vault` | (fixture) | no external providers or linked secrets: linking them would make the app fetch them at start |
-| `dlg-vault-link` | `{"dialog": "vault:link"}` | the Vault with the Link external secret form open |
-| `dlg-vault-providers` | `{"dialog": "vault:providers"}` | the Vault on its External providers tab (and providers in the fixture) |
 | `dlg-import-ready` | `{"dialog": "import:<path>"}` | the Import dialog with a file already chosen and detected |
 | `dlg-snippet` | `{"dialog": "snippet"}` | the Code snippet dialog of the active request |
 | `dlg-save` | `{"dialog": "save"}` | the Save request dialog of the active (unsaved) request |
@@ -45,6 +34,13 @@ should do. Add the step, then replace the stand-in steps of that screen.
 | `dlg-name-prompt` | `{"dialog": "new-collection"}` | the name prompt for a new collection |
 | `dlg-new-ws` | `{"dialog": "new-workspace"}` | the New workspace dialog |
 | `dlg-update-progress` | `{"update_stage": "verify"}` | the pop-up while installing; update_install would download into ~/Downloads or open the browser |
+
+## States the fixture cannot produce
+
+- **Vault** (`dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`): the providers point at no real
+  secret manager, so linked secrets stay "not fetched yet" (no "cached · 42 s" or sign-in error),
+  the link form has no browse results or "Resolved (24 characters)", and Test connection has no
+  result. The fixture also has seven local secrets where the prototype has four.
 
 ## Everywhere
 

@@ -126,6 +126,12 @@ pub enum Step {
     /// `ternarywire_secrets::ProviderConfig` JSON:
     /// `{"id": "corp-vault", "name": "corp-vault", "kind": "hashicorp_vault", "address": "…"}`.
     VaultProvider(serde_json::Value),
+    /// Links a vault name to an external secret, as
+    /// `ternarywire_secrets::LinkedSecret` JSON (nothing is fetched):
+    /// `{"name": "db_password", "provider_id": "corp-vault", "reference": "path/to/db#password"}`.
+    VaultLink(serde_json::Value),
+    /// Stores a credential of an external provider: `["corp-vault", "token", "…"]`.
+    VaultCredential([String; 3]),
     /// Closes every tab (the start page shows).
     CloseAllTabs(bool),
     /// Opens the newest History entry whose URL contains the text, as a tab.
@@ -640,6 +646,22 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                 (_, None) => eprintln!("automation: vault_provider: external secrets are unavailable"),
             }
         }
+        Step::VaultLink(v) => {
+            app.attach_external_secrets(true);
+            match (serde_json::from_value::<ternarywire_secrets::LinkedSecret>(v), app.ws.external.clone()) {
+                (Ok(link), Some(ext)) => {
+                    if let Err(e) = ext.link(link) {
+                        eprintln!("automation: vault_link: {}", e.message);
+                    }
+                }
+                (Err(e), _) => eprintln!("automation: vault_link: {e}"),
+                (_, None) => eprintln!("automation: vault_link: external secrets are unavailable"),
+            }
+        }
+        Step::VaultCredential([provider, field, value]) => match app.ws.external.clone() {
+            Some(ext) => ext.set_credential(&provider, &field, &value),
+            None => eprintln!("automation: vault_credential: external secrets are unavailable"),
+        },
         Step::CloseAllTabs(_) => {
             while !app.tabs.is_empty() {
                 app.close_tab(app.tabs.len() - 1);

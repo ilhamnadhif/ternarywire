@@ -14,8 +14,8 @@ use ternarywire_secrets::{
 
 use crate::app::TernaryWireApp;
 use crate::dialogs::{
-    Modal, Outcome, Tone, add_input, banner, body_with, compact_empty, footer, inline_result, line_edit, line_galley,
-    number, secret_chip, secret_input, segmented_sm, small_input, tile, trailing, two_lines, vlist, vrow,
+    Modal, Outcome, Tone, add_input, banner, body_with, code_text, compact_empty, footer, inline_result, line_edit,
+    line_galley, number, secret_chip, secret_input, segmented_sm, small_input, tile, trailing, two_lines, vlist, vrow,
 };
 use crate::i18n::{tr, trf};
 use crate::{icons, kit, theme, widgets};
@@ -71,9 +71,11 @@ impl VaultDialog {
         VaultDialog { section: Section::Providers, ..Default::default() }
     }
 
-    /// The dialog with the link form open for `name` (automation).
-    pub fn linking(name: &str) -> VaultDialog {
-        let link = LinkForm { name: name.to_string(), ttl_secs: 300, ..Default::default() };
+    /// The dialog with the link form open for `name` and `reference`
+    /// (automation).
+    pub fn linking(name: &str, reference: &str) -> VaultDialog {
+        let link =
+            LinkForm { name: name.to_string(), reference: reference.to_string(), ttl_secs: 300, ..Default::default() };
         VaultDialog { link: Some(link), ..Default::default() }
     }
 }
@@ -115,7 +117,7 @@ fn kind_icon(kind: ProviderKind) -> &'static str {
 /// Width of a small button with an icon, to lay out fields beside it.
 fn small_button_w(ui: &Ui, icon: bool, text: &str) -> f32 {
     let g = ui.painter().layout_no_wrap(text.to_string(), theme::medium(12.0), egui::Color32::PLACEHOLDER);
-    g.size().x + 16.0 + if icon { 13.0 + 5.0 } else { 0.0 }
+    g.size().x + 18.0 + if icon { 13.0 + 5.0 } else { 0.0 }
 }
 
 /// Two columns 12 px apart (`.grid2`): equal, or the right one `right_w`
@@ -135,6 +137,13 @@ fn grid2(ui: &mut Ui, right_w: Option<f32>, mut add: impl FnMut(&mut Ui, usize))
             });
         }
     });
+}
+
+/// A row of controls `height` high, left to right and vertically centered
+/// (`.row`; `ui.horizontal` would make it at least 30 high).
+fn row<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let w = ui.available_width();
+    ui.allocate_ui_with_layout(vec2(w, height), Layout::left_to_right(Align::Center), add).inner
 }
 
 /// A small text field with its label above it, as wide as the column.
@@ -288,7 +297,6 @@ fn secrets(app: &mut TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: Opti
     let shown: Vec<&String> = names.iter().filter(|n| n.to_lowercase().contains(&needle)).collect();
     let mut remove = None;
     let mut unlink = None;
-    let editing = d.link.as_ref().map(|l| l.name.clone());
     vlist(ui, |ui| {
         if names.is_empty() {
             egui::Frame::new().inner_margin(Margin::symmetric(12, 20)).show(ui, |ui| {
@@ -306,8 +314,7 @@ fn secrets(app: &mut TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: Opti
         }
         for (i, n) in shown.iter().enumerate() {
             let linked = ext.and_then(|e| e.linked(n));
-            let selected = editing.as_deref() == Some(n.as_str());
-            vrow(ui, (i, shown.len()), 44.0, selected, |ui, hovered| {
+            vrow(ui, (i, shown.len()), 44.0, false, |ui, hovered| {
                 tile(ui, icons::KEY, false);
                 ui.label(RichText::new(format!("{{{{vault:{n}}}}}")).font(theme::mono(12.0)).color(p.text));
                 match (&linked, ext) {
@@ -369,23 +376,24 @@ fn add_secret(app: &mut TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog) {
     kit::card(ui).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 8.0;
-        ui.label(kit::section_title(tr("Add a secret")).color(theme::pal(ui).text));
-        ui.horizontal(|ui| {
+        ui.label(kit::section_title(tr("Add a secret")).color(theme::pal(ui).text).line_height(Some(12.5 * 1.45)));
+        row(ui, 26.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            small_input(ui, &mut d.new_name, tr("Name"), tr("Name"), 200.0, true);
+            let name = small_input(ui, &mut d.new_name, tr("Name"), tr("Name"), 200.0, true);
             let w = ui.available_width() - small_button_w(ui, true, tr("Add")) - 8.0;
             let v = secret_input(ui, "vault-new-value", &mut d.new_value, tr("Value"), w);
             widgets::a11y_name(&v, tr("Value"));
             let enter = v.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let ok = !d.new_name.trim().is_empty();
-            let add = ui
-                .add_enabled_ui(ok, |ui| kit::button_ex(ui, kit::Kind::Secondary, Some(icons::PLUS), tr("Add"), true))
-                .inner
-                .clicked();
-            if (add || enter) && ok {
-                app.ws.secrets.vault_set(d.new_name.trim(), &d.new_value);
-                d.new_name.clear();
-                d.new_value.clear();
+            let add = kit::button_ex(ui, kit::Kind::Secondary, Some(icons::PLUS), tr("Add"), true).clicked();
+            if add || enter {
+                if d.new_name.trim().is_empty() {
+                    // A secret needs a name first.
+                    name.request_focus();
+                } else {
+                    app.ws.secrets.vault_set(d.new_name.trim(), &d.new_value);
+                    d.new_name.clear();
+                    d.new_value.clear();
+                }
             }
         });
     });
@@ -417,7 +425,7 @@ fn link_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &Exter
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 10.0;
-            ui.horizontal(|ui| {
+            row(ui, 22.0, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.label(RichText::new(icons::LINK).font(theme::icon_font(13.0)).color(p.accent_text));
                 ui.label(kit::section_title(tr("Link a vault name to an external secret")).color(p.text));
@@ -461,7 +469,7 @@ fn link_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &Exter
                     return;
                 }
                 kit::field(ui, tr("Cache"), tr("0 fetches on every use"), |ui| {
-                    ui.horizontal(|ui| number(ui, tr("Cache"), &mut form.ttl_secs, 0..=86_400, "s", 80.0));
+                    row(ui, 26.0, |ui| number(ui, tr("Cache"), &mut form.ttl_secs, 0..=86_400, "s", 80.0));
                 });
             });
             if let Err(e) = provider.settings.check_reference(&form.reference)
@@ -509,7 +517,7 @@ fn link_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &Exter
                 });
             }
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
+            row(ui, 24.0, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if kit::button_ex(ui, kit::Kind::Secondary, Some(icons::FOLDER_OPEN), tr("Browse…"), true).clicked() {
                     browse = Some(form.browse_path.last().cloned().unwrap_or_default());
@@ -608,13 +616,10 @@ fn browse_row(ui: &mut Ui, icon: &str, label: &str, usable: bool) -> (egui::Resp
 }
 
 fn providers(app: &mut TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &ExternalSecrets) {
-    ui.add(
-        egui::Label::new(kit::hint(
-            ui,
-            tr("Providers keep their settings in .ternarywire/external-secrets.json; tokens and keys go to the secret store."),
-        ))
-        .wrap(),
-    );
+    let hint = tr("Providers keep their settings in {}; tokens and keys go to the secret store.");
+    let w = ui.available_width();
+    let p = theme::pal(ui);
+    ui.label(code_text(ui, hint, &[".ternarywire/external-secrets.json"], 12.0, p.text_muted, w));
     let list = ext.providers();
     // Master–detail: one provider is always open in the form.
     if d.provider.is_none()
@@ -860,7 +865,7 @@ fn provider_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &E
             banner(ui, Tone::Err, &e.message);
         }
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        row(ui, 24.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let o = kit::ButtonOpts { icon: Some(icons::PLUGS_CONNECTED), ..Default::default() };
             if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Test connection"), o).clicked() {

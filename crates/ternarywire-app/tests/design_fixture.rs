@@ -129,6 +129,7 @@ fn make_fixture() {
     write_specs(&root);
     write_flows(&root);
     write_data(&root);
+    write_packages(&root);
     write_history(&root);
     write_cookies(&root);
     write_session(&root);
@@ -1153,6 +1154,36 @@ fn write_data(root: &Path) {
         csv.push_str(&format!("{},{id},{title}\n", i + 1));
     }
     std::fs::write(dir.join("books.csv"), csv).unwrap();
+}
+
+/// The Package Library of Settings › Scripts: three modules of the
+/// workspace and a lockfile with two pinned packages.
+fn write_packages(root: &Path) {
+    let dir = root.join("packages");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, body) in [
+        ("my-helpers", "module.exports = {\n  isoNow: () => new Date().toISOString(),\n};\n"),
+        ("signing", "module.exports = {\n  sign: (body, key) => CryptoJS.HmacSHA256(body, key).toString(),\n};\n"),
+        ("fixtures", "module.exports = {\n  book: { title: 'Bumi Manusia', price: 15.5 },\n};\n"),
+    ] {
+        std::fs::write(dir.join(format!("{name}.js")), body).unwrap();
+    }
+    let pin = |n: u8| format!("sha256-{}=", String::from_utf8(vec![b'A' + n; 43]).unwrap());
+    let lock = json!({
+        "lockfileVersion": 1,
+        "packages": {
+            "npm:lodash-es@4": "https://esm.sh/lodash-es@4.17.21",
+            "jsr:@std/encoding": "https://esm.sh/jsr/@std/encoding@1.0.5",
+        },
+        "modules": {
+            "https://esm.sh/lodash-es@4.17.21": pin(0),
+            "https://esm.sh/lodash-es@4.17.21/es2022/lodash-es.mjs": pin(1),
+            "https://esm.sh/jsr/@std/encoding@1.0.5": pin(2),
+            "https://esm.sh/jsr/@std/encoding@1.0.5/es2022/base64.mjs": pin(3),
+            "https://esm.sh/jsr/@std/encoding@1.0.5/es2022/hex.mjs": pin(4),
+        },
+    });
+    std::fs::write(root.join("packages.lock.json"), serde_json::to_string_pretty(&lock).unwrap()).unwrap();
 }
 
 /// Unix milliseconds of `day` (days after REFERENCE_DAY, negative = before)
