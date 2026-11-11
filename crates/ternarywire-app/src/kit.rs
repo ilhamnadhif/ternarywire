@@ -1577,6 +1577,8 @@ pub fn menu_item(ui: &mut Ui, icon: Option<&str>, label: &str, shortcut: Option<
 
 pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
     let p = theme::pal(ui);
+    // Menu rows touch (the prototype's `.mi`): no item spacing under them.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let width = ui.available_width().max(ui.spacing().menu_width - 10.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
     let enabled = ui.is_enabled();
@@ -1661,6 +1663,7 @@ pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
 /// the prototype's 15 px line with 6 above and 3 below (24 high).
 pub fn menu_header(ui: &mut Ui, text: &str) {
     let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.y = 0.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let mut f = egui::TextFormat::simple(theme::semibold(10.5), p.text_faint);
     f.extra_letter_spacing = 0.63;
@@ -1672,6 +1675,7 @@ pub fn menu_header(ui: &mut Ui, text: &str) {
 /// A hairline between menu groups.
 pub fn menu_sep(ui: &mut Ui) {
     let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.y = 0.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
     ui.painter().hline(rect.x_range().shrink(2.0), rect.center().y, Stroke::new(1.0, p.border));
 }
@@ -1704,6 +1708,8 @@ pub struct TreeRow<'a> {
     /// Muted text on the right, hidden while hover actions show.
     pub meta: Option<&'a str>,
     pub meta_color: Option<Color32>,
+    /// The meta in the mono font (status codes).
+    pub meta_mono: bool,
     /// An accent dot after the label (unsaved).
     pub unsaved: bool,
     pub selected: bool,
@@ -1798,11 +1804,8 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
             actions = Some(Rect::from_min_max(pos2(right - row.actions_width, rect.top()), pos2(right, rect.bottom())));
             right -= row.actions_width + 4.0;
         } else if let Some(meta) = row.meta {
-            let g = painter.layout_no_wrap(
-                meta.to_string(),
-                FontId::proportional(11.0),
-                row.meta_color.unwrap_or(p.text_faint),
-            );
+            let font = if row.meta_mono { theme::mono(11.0) } else { FontId::proportional(11.0) };
+            let g = painter.layout_no_wrap(meta.to_string(), font, row.meta_color.unwrap_or(p.text_faint));
             painter.galley(pos2(right - g.size().x, cy - g.size().y / 2.0), g.clone(), Color32::PLACEHOLDER);
             right -= g.size().x + 8.0;
         }

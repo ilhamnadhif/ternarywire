@@ -1080,6 +1080,7 @@ fn history(app: &mut TernaryWireApp, ui: &mut Ui) {
                     mono: true,
                     meta: Some(&status),
                     meta_color: Some(color),
+                    meta_mono: true,
                     selected: selected.as_deref() == Some(h.id.as_str()),
                     actions_width: 22.0,
                     ..Default::default()

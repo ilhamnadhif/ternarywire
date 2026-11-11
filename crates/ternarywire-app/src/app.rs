@@ -1982,6 +1982,58 @@ impl TernaryWireApp {
         ui.painter().rect_filled(bar, top_r, p.well);
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, egui::Stroke::new(1.0, p.border));
         let strip = egui::Rect::from_min_max(bar.min + egui::vec2(6.0, 0.0), bar.max - egui::vec2(6.0, 0.0));
+        // Each tab's title, method or icon, unsaved state and width: its
+        // content (1 px border, 11 px padding, lead, 7, title, 7, close 18,
+        // 8 px padding, border) within 110–220, and when the tabs don't fit,
+        // narrower in proportion down to 110 (the prototype's `.dtab` shrinks).
+        let unsaved: std::collections::HashSet<u64> =
+            (0..self.tabs.len()).filter(|&i| self.tab_has_unsaved_work(i)).map(|i| self.tabs[i].id).collect();
+        let specs: Vec<_> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let (mut title, badge, mut dirty) = crate::dialogs::tab_title(tab, &self.ws);
+                // A request opened from History is named by its path and is
+                // unsaved only once edited.
+                if let TabKind::Request(t) = &tab.kind
+                    && t.from_history.is_some()
+                {
+                    title = url_path(&title).to_string();
+                    dirty = unsaved.contains(&tab.id);
+                }
+                let lead = match &badge {
+                    Some(b) => (
+                        crate::widgets::method_short(b).to_string(),
+                        theme::semibold(10.5),
+                        theme::method_color(b, dark),
+                    ),
+                    None => (crate::dialogs::tab_icon(tab).to_string(), theme::icon_font(14.0), p.text_faint),
+                };
+                let lead_g = ui.painter().layout_no_wrap(lead.0, lead.1, lead.2);
+                let font = if i == self.active { theme::medium(12.5) } else { egui::FontId::proportional(12.5) };
+                let text_w =
+                    ui.painter().layout_no_wrap(title.clone(), font.clone(), egui::Color32::PLACEHOLDER).size().x;
+                let w = (1.0 + 11.0 + lead_g.size().x + 7.0 + text_w + 7.0 + 18.0 + 8.0 + 1.0).clamp(110.0, 220.0);
+                (title, badge, dirty, lead_g, lead.2, font, w)
+            })
+            .collect();
+        let mut widths: Vec<f32> = specs.iter().map(|s| s.6).collect();
+        let room = strip.width() - 30.0 - 22.0 - 2.0 * 2.0 - 2.0 * widths.len().saturating_sub(1) as f32;
+        let mut over = widths.iter().sum::<f32>() - room;
+        while over > 0.5 {
+            let free: f32 = widths.iter().filter(|w| **w > 110.0).sum();
+            if free <= 0.0 {
+                break;
+            }
+            let mut left = 0.0;
+            for w in widths.iter_mut().filter(|w| **w > 110.0) {
+                let next = *w - over * *w / free;
+                left += (110.0 - next).max(0.0);
+                *w = next.max(110.0);
+            }
+            over = left;
+        }
         ui.scope_builder(
             egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::left_to_right(egui::Align::Min)),
             |ui| {
@@ -2003,39 +2055,12 @@ impl TernaryWireApp {
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
                                 for (i, tab) in self.tabs.iter().enumerate() {
-                                    let (title, badge, dirty) = crate::dialogs::tab_title(tab, &self.ws);
+                                    let (title, _, dirty, lead_g, lead_color, font, _) = &specs[i];
+                                    let (title, dirty, w) = (title.clone(), *dirty, widths[i]);
                                     let selected = i == self.active;
-                                    let lead = match &badge {
-                                        Some(b) => (
-                                            crate::widgets::method_short(b).to_string(),
-                                            theme::semibold(10.5),
-                                            theme::method_color(b, dark),
-                                        ),
-                                        None => (
-                                            crate::dialogs::tab_icon(tab).to_string(),
-                                            theme::icon_font(14.0),
-                                            p.text_faint,
-                                        ),
-                                    };
-                                    let lead_g = ui.painter().layout_no_wrap(lead.0, lead.1, lead.2);
-                                    let font =
-                                        if selected { theme::medium(12.5) } else { egui::FontId::proportional(12.5) };
-                                    // 1 px border, 11 px padding, lead, 7, title, 7, close 18, 8 px padding, border.
-                                    let full_w = 1.0
-                                        + 11.0
-                                        + lead_g.size().x
-                                        + 7.0
-                                        + ui.painter()
-                                            .layout_no_wrap(title.clone(), font.clone(), egui::Color32::PLACEHOLDER)
-                                            .size()
-                                            .x
-                                        + 7.0
-                                        + 18.0
-                                        + 8.0
-                                        + 1.0;
-                                    let w = full_w.clamp(110.0, 220.0);
                                     let title_w = w - 2.0 - 11.0 - lead_g.size().x - 7.0 - 7.0 - 18.0 - 8.0;
-                                    let title_g = kit::elide(ui, &title, font, egui::Color32::PLACEHOLDER, title_w);
+                                    let title_g =
+                                        kit::elide(ui, &title, font.clone(), egui::Color32::PLACEHOLDER, title_w);
                                     let (slot, r) =
                                         ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
                                     // The tab stands on the strip's bottom hairline.
@@ -2082,7 +2107,11 @@ impl TernaryWireApp {
                                         painter.rect_filled(rect, radius, p.hover);
                                     }
                                     let mut x = rect.left() + 12.0;
-                                    painter.galley(egui::pos2(x, cy - lead_g.size().y / 2.0), lead_g.clone(), lead.2);
+                                    painter.galley(
+                                        egui::pos2(x, cy - lead_g.size().y / 2.0),
+                                        lead_g.clone(),
+                                        *lead_color,
+                                    );
                                     x += lead_g.size().x + 7.0;
                                     let text_color = if selected || hovered { p.text } else { p.text_muted };
                                     painter.galley(egui::pos2(x, cy - title_g.size().y / 2.0), title_g, text_color);
@@ -2921,6 +2950,17 @@ pub fn tilde_path(path: &std::path::Path) -> String {
 
 /// A 38 px rail button: on = raised surface with an accent icon; `dot` marks
 /// state (a running server, console errors).
+/// The path of a URL (`{{baseUrl}}/books?…` or `https://host/books?…` →
+/// `/books?…`); other text as it is.
+fn url_path(url: &str) -> &str {
+    let rest = if let Some(r) = url.strip_prefix("{{") {
+        r.find("}}").map(|i| &r[i + 2..])
+    } else {
+        url.split_once("://").and_then(|(_, r)| r.find('/').map(|i| &r[i..]))
+    };
+    rest.filter(|r| r.starts_with('/')).unwrap_or(url)
+}
+
 /// The 1 px divider between groups of the title bar (18 high).
 fn title_divider(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), egui::Sense::hover());
