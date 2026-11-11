@@ -223,6 +223,8 @@ impl Modal {
             .show(ctx, |ui| {
                 ui.set_width(width - 2.0);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
+                // The prototype's lists end without egui's fade-out at the edges.
+                ui.spacing_mut().scroll.fade.strength = 0.0;
                 let top = ui.cursor().top();
                 ui.data_mut(|d| d.insert_temp(geometry_id(), Geometry { bottom: top + max_h - 2.0 }));
                 if let Some(title) = &self.title {
@@ -249,7 +251,7 @@ pub(crate) fn room(ui: &Ui) -> f32 {
 /// CSS line boxes (line-height 1.45): text laid out like the prototype's,
 /// one row (`…` when cut) or wrapped at `max_w`.
 pub(crate) fn text_box(ui: &Ui, text: &str, font: FontId, color: Color32, max_w: f32, wrap: bool) -> Arc<Galley> {
-    let line = (font.size * 1.45).round();
+    let line = font.size * 1.45;
     let format = TextFormat { font_id: font, color, line_height: Some(line), ..Default::default() };
     let mut job = LayoutJob::single_section(text.to_string(), format);
     job.wrap = if wrap {
@@ -257,6 +259,29 @@ pub(crate) fn text_box(ui: &Ui, text: &str, font: FontId, color: Color32, max_w:
     } else {
         TextWrapping { max_width: max_w.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') }
     };
+    ui.painter().layout_job(job)
+}
+
+/// Text with code spans (`<span class=mono>`, 12.5 px) wrapped at `max_w`:
+/// `template` (already translated) with its `{}` filled in by `code`, in
+/// CSS line boxes of `size` × 1.45.
+pub(crate) fn code_text(ui: &Ui, template: &str, code: &[&str], size: f32, color: Color32, max_w: f32) -> Arc<Galley> {
+    // A code span's own line box (12.5 × 1.45) makes its line taller.
+    let line = Some((size * 1.45).max(12.5 * 1.45));
+    let plain = TextFormat { font_id: FontId::proportional(size), color, line_height: line, ..Default::default() };
+    let mono = TextFormat { font_id: theme::mono(12.5), color, line_height: line, ..Default::default() };
+    let mut job = LayoutJob::default();
+    for (i, part) in template.split("{}").enumerate() {
+        if i > 0
+            && let Some(c) = code.get(i - 1)
+        {
+            job.append(c, 0.0, mono.clone());
+        }
+        if !part.is_empty() {
+            job.append(part, 0.0, plain.clone());
+        }
+    }
+    job.wrap = TextWrapping::wrap_at_width(max_w.max(1.0));
     ui.painter().layout_job(job)
 }
 
@@ -430,8 +455,9 @@ fn key_hints(ui: &mut Ui, hints: &[(&[&str], &str)]) {
     let p = theme::pal(ui);
     ui.spacing_mut().item_spacing.x = 5.0;
     for (i, (keys, what)) in hints.iter().enumerate() {
+        // `gap: 5px` around an 8 px spacer between pairs.
         if i > 0 {
-            ui.add_space(8.0);
+            ui.add_space(13.0);
         }
         for k in *keys {
             kit::kbd(ui, k);
@@ -448,10 +474,11 @@ fn icon_hint(ui: &mut Ui, icon: &str, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).size(12.0).color(p.text_muted)).truncate());
 }
 
-/// A single-line text input as tall as a button (30, 10 px padding).
+/// A single-line text input as tall as a button (30, 10 px padding inside
+/// a 1 px border).
 pub(crate) fn input(text: &mut String) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(text)
-        .margin(Margin::symmetric(10, 0))
+        .margin(Margin::symmetric(11, 0))
         .min_size(vec2(0.0, 30.0))
         .align(Align2::LEFT_CENTER)
 }
@@ -467,13 +494,21 @@ pub(crate) fn line_edit<'t>(ui: &Ui, text: &'t mut String, hint: &str, small: bo
         (false, true) => theme::mono(12.5),
         (false, false) => FontId::proportional(13.0),
     };
-    let (h, pad) = if small { (26.0, 8) } else { (30.0, 10) };
+    // The padding plus the 1 px border.
+    let (h, pad) = if small { (26.0, 9) } else { (30.0, 11) };
     egui::TextEdit::singleline(text)
         .font(font.clone())
         .hint_text(RichText::new(hint).font(font).color(p.text_faint))
         .margin(Margin::symmetric(pad, 0))
         .min_size(vec2(0.0, h))
         .align(Align2::LEFT_CENTER)
+}
+
+/// Placeholders of the text fields added to `ui` in the faint text color
+/// (`::placeholder`): egui paints a hint in `weak_text_color`, whatever
+/// color its text has.
+pub(crate) fn faint_hints(ui: &mut Ui) {
+    ui.visuals_mut().weak_text_color = Some(theme::pal(ui).text_faint);
 }
 
 /// Adds an input made with [`line_edit`]: rounded to its size, with the
@@ -483,6 +518,7 @@ pub(crate) fn add_input(ui: &mut Ui, edit: egui::TextEdit<'_>, small: bool) -> R
     let r = ui
         .scope(|ui| {
             let cr = CornerRadius::same(radius);
+            faint_hints(ui);
             let w = &mut ui.visuals_mut().widgets;
             w.inactive.corner_radius = cr;
             w.hovered.corner_radius = cr;
@@ -518,7 +554,7 @@ pub(crate) fn secret_input(
     let mut reveal: bool = ui.data(|d| d.get_temp(id).unwrap_or(false));
     let edit = line_edit(ui, text, hint, true, false)
         .password(!reveal)
-        .margin(Margin { left: 8, right: 30, top: 0, bottom: 0 })
+        .margin(Margin { left: 9, right: 30, top: 0, bottom: 0 })
         .desired_width(width);
     let r = add_input(ui, edit, true);
     let (icon, name) = if reveal { (icons::EYE_SLASH, tr("Hide")) } else { (icons::EYE, tr("Show")) };
@@ -742,10 +778,11 @@ pub(crate) fn secret_chip(ui: &mut Ui, text: &str) {
 /// makes it 24 high instead of 30.
 pub(crate) fn danger_button(ui: &mut Ui, solid: bool, small: bool, icon: Option<&str>, text: &str) -> Response {
     let p = theme::pal(ui);
+    // Padding plus the 1 px border of `.btn`, as in `kit::button`.
     let (h, font, icon_size, pad, gap, radius) = if small {
-        (24.0, 12.0, 13.0, 8.0, 5.0, theme::RADIUS_SM)
+        (24.0, 12.0, 13.0, 9.0, 5.0, theme::RADIUS_SM)
     } else {
-        (30.0, 12.5, 15.0, 12.0, 6.0, theme::RADIUS)
+        (30.0, 12.5, 15.0, 13.0, 6.0, theme::RADIUS)
     };
     let g = ui.painter().layout_no_wrap(text.to_string(), theme::medium(font), Color32::PLACEHOLDER);
     let ig =
@@ -1716,7 +1753,7 @@ pub fn show(app: &mut TernaryWireApp, ctx: &egui::Context) {
 
 /// Opens a dialog by the name automation scripts use: `settings:<page>`,
 /// `palette:<query>`, `requests:<query>`, `env-switch`, `vault:providers`,
-/// `vault:link:<name>`, `import:<file>`, `snippet`, `save`, `new-ws[:<name>|<folder>]`,
+/// `vault:link:<name>|<reference>`, `import:<file>`, `snippet`, `save`, `new-ws[:<name>|<folder>]`,
 /// `name-prompt`, `confirm:<request or collection>`, `unsaved`,
 /// `update[:progress]`. Returns false for other names.
 pub fn open_named(app: &mut TernaryWireApp, name: &str) -> bool {
@@ -1731,9 +1768,11 @@ pub fn open_named(app: &mut TernaryWireApp, name: &str) -> bool {
         }
         "env-switch" => Dialog::env_switcher(),
         "vault" if arg == "providers" => Dialog::Vault(Box::new(crate::vault_ui::VaultDialog::providers())),
+        // `vault:link:<name>|<reference>`, both optional.
         "vault" if arg.starts_with("link") => {
-            let name = arg.strip_prefix("link").unwrap_or("").trim_start_matches(':');
-            Dialog::Vault(Box::new(crate::vault_ui::VaultDialog::linking(name)))
+            let rest = arg.strip_prefix("link").unwrap_or("").trim_start_matches(':');
+            let (name, reference) = rest.split_once('|').unwrap_or((rest, ""));
+            Dialog::Vault(Box::new(crate::vault_ui::VaultDialog::linking(name, reference)))
         }
         "import" if !arg.is_empty() => match read_import(std::path::Path::new(arg)) {
             Ok(text) => Dialog::Import { text, error: None, preview: None, source: arg.to_string() },
@@ -1940,7 +1979,14 @@ fn fuzzy(hay: &str, needle: &str) -> Option<i32> {
     let h = hay.to_lowercase();
     let n = needle.to_lowercase();
     if let Some(p) = h.find(&n) {
-        return Some(1000 - p as i32);
+        // The start of the text beats the start of a word, which beats the
+        // inside of a word; equal matches keep the order of the list.
+        let word_start = !h[..p].chars().next_back().is_some_and(char::is_alphanumeric);
+        return Some(match (p, word_start) {
+            (0, _) => 1000,
+            (_, true) => 900,
+            _ => 800,
+        });
     }
     let mut it = h.chars();
     let mut score = 0;
@@ -2142,23 +2188,28 @@ fn search_header(ui: &mut Ui, id: &str, query: &mut String, hint: &str, icon: &s
     ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
     let cy = rect.center().y;
     let ig = ui.painter().layout_no_wrap(icon.to_string(), theme::icon_font(18.0), p.text_faint);
-    let iw = ig.size().x;
     ui.painter().galley(pos2(rect.left() + 16.0, cy - ig.size().y / 2.0), ig, p.text_faint);
-    let kbd_w = ui.painter().layout_no_wrap("esc".into(), FontId::proportional(10.5), p.text_muted).size().x + 10.0;
+    let kbd_w = kit::kbd_size(ui, "esc").x;
     let kbd = Rect::from_min_size(pos2(rect.right() - 16.0 - kbd_w, cy - 9.0), vec2(kbd_w, 18.0));
     place(ui, kbd, |ui: &mut Ui| kit::kbd(ui, "esc"));
-    let field =
-        Rect::from_min_max(pos2(rect.left() + 16.0 + iw + 10.0, rect.top()), pos2(kbd.left() - 10.0, rect.bottom()));
+    // The icon is 18 wide, 10 px before the field, whose text starts after
+    // the 2 px padding of an `<input>`. Its 15 px text sits 1 px above the
+    // center of the row, where the browser puts it.
+    let left = rect.left() + 16.0 + 18.0 + 10.0 + 2.0;
+    let field = Rect::from_min_max(pos2(left, rect.top()), pos2(kbd.left() - 10.0, rect.bottom() - 2.0));
     let edit = egui::TextEdit::singleline(query)
         .id(egui::Id::unique(id))
         .hint_text(RichText::new(hint).font(FontId::proportional(15.0)).color(p.text_faint))
         .font(FontId::proportional(15.0))
         .frame(egui::Frame::NONE)
         .margin(Margin::ZERO)
-        .min_size(vec2(0.0, 54.0))
+        .min_size(vec2(0.0, field.height()))
         .align(Align2::LEFT_CENTER)
         .desired_width(field.width());
-    let r = place(ui, field, edit);
+    let r = in_rect(ui, field, Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+        faint_hints(ui);
+        ui.add(edit)
+    });
     r.request_focus();
     widgets::a11y_name(&r, hint);
     r
@@ -2493,7 +2544,11 @@ fn env_switcher(
     }
     let q = query.trim().to_string();
     let order = rank(&entries, &q);
-    let mut sel = selected.unwrap_or_else(|| order.iter().position(|i| entries[*i].current).unwrap_or(0));
+    // It opens on the environment after the active one, the likely switch.
+    let mut sel = selected.unwrap_or_else(|| {
+        let active = order.iter().position(|i| entries[*i].current).unwrap_or(0);
+        (active + 1) % order.len().max(1)
+    });
     let max_h = fit_height(ctx, 260.0, 440.0);
     let mut chosen = None;
     let mut edit = false;
@@ -2702,6 +2757,8 @@ enum Help<'a> {
     Text(&'a str),
     /// A header or a path, in the code font.
     Mono(&'a str),
+    /// A translated template whose `{}` are filled with code spans.
+    Code(&'a str, &'a [&'a str]),
 }
 
 /// Heights of the controls of settings rows, which set the row's height.
@@ -2740,7 +2797,8 @@ fn frow(
         let hg = match help {
             Help::None => None,
             Help::Text(t) => Some(text_box(ui, t, FontId::proportional(12.0), p.text_muted, label_w, true)),
-            Help::Mono(t) => Some(text_box(ui, t, theme::mono(12.0), p.text_muted, label_w, true)),
+            Help::Mono(t) => Some(text_box(ui, t, theme::mono(12.5), p.text_muted, label_w, true)),
+            Help::Code(t, code) => Some(code_text(ui, t, code, 12.0, p.text_muted, label_w)),
         };
         let text_h = lg.size().y + hg.as_ref().map_or(0.0, |g| g.size().y + 1.0);
         let (rect, _) = ui.allocate_exact_size(vec2(w, text_h.max(ctrl_h)), Sense::hover());
@@ -2903,7 +2961,7 @@ fn path_input(ui: &mut Ui, value: &mut String, name: &str, width: f32) -> Respon
         .font(theme::mono(12.0))
         .hint_text(RichText::new(tr("No file")).size(12.0).color(p.text_faint))
         .background_color(p.well)
-        .margin(Margin::symmetric(10, 0))
+        .margin(Margin::symmetric(11, 0))
         .min_size(vec2(0.0, 30.0))
         .align(Align2::LEFT_CENTER)
         .desired_width(width);
@@ -2922,8 +2980,8 @@ fn path_input(ui: &mut Ui, value: &mut String, name: &str, width: f32) -> Respon
 /// A file path field with a Choose button after it, laid out left to right.
 fn path_field(ui: &mut Ui, value: &mut String, name: &str, width: f32) {
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        path_input(ui, value, name, width - 28.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        path_input(ui, value, name, width - 30.0);
         if kit::icon_button_sm(ui, icons::FOLDER_OPEN, tr("Choose file…")).clicked()
             && let Some(p) = rfd::FileDialog::new().pick_file()
         {
@@ -2943,8 +3001,9 @@ fn settings(
     let current = *page;
     let out =
         Modal::new("settings", 860.0).title(tr("Settings")).icon(icons::GEAR_SIX).sticky().center().show(ctx, |ui| {
-            // The header is 58 high: the content keeps the dialog at 640.
-            let height = room(ui).min(SETTINGS_H - 58.0 - FOOTER_H);
+            // The header is 58 high and the border 1 px at the top and the
+            // bottom: the content keeps the dialog at 640.
+            let height = room(ui).min(SETTINGS_H - 2.0 - 58.0 - FOOTER_H);
             split(
                 ui,
                 height,
@@ -3185,11 +3244,12 @@ fn scripts_page(app: &TernaryWireApp, ui: &mut Ui, draft: &mut AppSettings) {
             number(ui, tr("Script memory limit"), &mut draft.script_memory_mb, 0..=65_536, "MB", 72.0);
         });
         frow(g, ui, true, tr("Script engine"), Help::None, ctl::TEXT, |ui| {
-            ui.label(RichText::new(app.scripts.name().to_string()).size(12.0).color(theme::pal(ui).text_muted));
+            ui.label(RichText::new(engine_label(app.scripts.name())).size(12.0).color(theme::pal(ui).text_muted));
         });
     });
     kit::group(ui, tr("Package registry"), "", |ui, g| {
-        let help = Help::Text(tr("esm.sh-compatible; serves pm.require('npm:…') and pm.require('jsr:…')"));
+        let code = ["pm.require('npm:…')", "pm.require('jsr:…')"];
+        let help = Help::Code(tr("esm.sh-compatible; serves {} and {}."), &code);
         frow(g, ui, true, tr("Registry URL"), help, ctl::SMALL, |ui| {
             small_input(ui, &mut draft.package_registry, "https://esm.sh", tr("Registry URL"), 240.0, true);
         });
@@ -3231,7 +3291,9 @@ fn scripts_page(app: &TernaryWireApp, ui: &mut Ui, draft: &mut AppSettings) {
     };
     section(ui, tr("Package Library"), buttons, |ui| {
         let p = theme::pal(ui);
-        ui.label(kit::hint(ui, tr("Your own modules in packages/, shared by every script in the workspace.")));
+        let w = ui.available_width();
+        let template = tr("Your own modules in {}, shared by every script in the workspace.");
+        ui.label(code_text(ui, template, &["packages/"], 12.0, p.text_muted, w));
         vlist(ui, |ui| {
             if files.is_empty() {
                 vrow(ui, (0, 1), 38.0, false, |ui, _| {
@@ -3399,7 +3461,11 @@ fn client_certificates(ui: &mut Ui, certs: &mut Vec<ClientCertificate>) {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let w = ui.available_width();
-                ui.horizontal(|ui| {
+                // Rows as tall as their controls (`ui.horizontal` would make them 30).
+                let row = |ui: &mut Ui, h: f32, add: &mut dyn FnMut(&mut Ui)| {
+                    ui.allocate_ui_with_layout(vec2(w, h), Layout::left_to_right(Align::Center), |ui| add(ui));
+                };
+                row(ui, 26.0, &mut |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     toggle(ui, &mut c.enabled, tr("Enabled"));
                     trailing(ui, |ui| {
@@ -3417,16 +3483,19 @@ fn client_certificates(ui: &mut Ui, certs: &mut Vec<ClientCertificate>) {
                 for (label, value) in
                     [("CRT (PEM)", &mut c.cert_path), ("KEY (PEM)", &mut c.key_path), ("PFX / P12", &mut c.pfx_path)]
                 {
-                    ui.horizontal(|ui| {
+                    row(ui, 30.0, &mut |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        cell_label(ui, label, label_w);
+                        cell_label(ui, label, label_w, 30.0);
                         path_field(ui, value, label, w - label_w - 8.0);
                     });
                 }
-                ui.horizontal(|ui| {
+                // As tall as the control: the pill and its button, or an input.
+                let stored_pass = ternarywire_core::variables::is_pure_reference(&c.passphrase);
+                let h = if stored_pass { 24.0 } else { 26.0 };
+                row(ui, h, &mut |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    cell_label(ui, tr("Passphrase"), label_w);
-                    if ternarywire_core::variables::is_pure_reference(&c.passphrase) {
+                    cell_label(ui, tr("Passphrase"), label_w, h);
+                    if stored_pass {
                         if stored(ui) {
                             c.passphrase.clear();
                         }
@@ -3436,13 +3505,10 @@ fn client_certificates(ui: &mut Ui, certs: &mut Vec<ClientCertificate>) {
                     }
                 });
                 ui.add_space(2.0);
-                ui.add(
-                    egui::Label::new(kit::hint(
-                        ui,
-                        tr("A PKCS#12 bundle replaces the PEM files. The passphrase is stored in the Keychain, not in the settings file."),
-                    ))
-                    .wrap(),
+                let hint = tr(
+                    "A PKCS#12 bundle replaces the PEM files. The passphrase is stored in the Keychain, not in the settings file.",
                 );
+                ui.add(egui::Label::new(kit::hint(ui, hint).line_height(Some(12.0 * 1.45))).wrap());
             });
         });
     }
@@ -3451,10 +3517,10 @@ fn client_certificates(ui: &mut Ui, certs: &mut Vec<ClientCertificate>) {
     }
 }
 
-/// A muted 12 px label in a fixed-width column, for small forms.
-fn cell_label(ui: &mut Ui, text: &str, width: f32) {
+/// A muted 12 px label in a fixed-width column, `height` high, for small forms.
+fn cell_label(ui: &mut Ui, text: &str, width: f32, height: f32) {
     let p = theme::pal(ui);
-    ui.allocate_ui_with_layout(vec2(width, 30.0), Layout::left_to_right(Align::Center), |ui| {
+    ui.allocate_ui_with_layout(vec2(width, height), Layout::left_to_right(Align::Center), |ui| {
         ui.set_min_width(width);
         ui.add(egui::Label::new(RichText::new(text).size(12.0).color(p.text_muted)).truncate());
     });
@@ -3503,27 +3569,46 @@ fn shortcuts_page(ui: &mut Ui) {
             }
         });
     }
-    ui.label(kit::hint(ui, tr("⌘ is Ctrl on Windows and Linux.")));
+    ui.label(kit::hint(ui, tr("⌘ is Ctrl on Windows and Linux.")).line_height(Some(12.0 * 1.45)));
 }
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
+/// What runs scripts, for people: the engine and where it runs.
+fn engine_label(name: &str) -> String {
+    match name {
+        "boa (isolated)" => tr("Boa · separate worker process").to_string(),
+        "boa" => tr("Boa · in the app process").to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The license as words: `MIT or Apache-2.0` for the SPDX `MIT OR Apache-2.0`.
+fn license() -> String {
+    match env!("CARGO_PKG_LICENSE").split_once(" OR ") {
+        Some((a, b)) => trf("{} or {}", &[&a, &b]),
+        None => env!("CARGO_PKG_LICENSE").to_string(),
+    }
+}
+
 fn about_page(app: &TernaryWireApp, ui: &mut Ui) {
     let p = theme::pal(ui);
+    // A centered column (gap 8, padding 12 0 4) with line boxes of 1.45.
     ui.vertical_centered(|ui| {
-        ui.spacing_mut().item_spacing.y = 10.0;
+        ui.spacing_mut().item_spacing.y = 8.0;
         ui.add_space(12.0);
         ui.add(
             egui::Image::new(egui::include_image!("../assets/icon-256.png"))
                 .fit_to_exact_size(vec2(76.0, 76.0))
                 .corner_radius(18),
         );
-        ui.label(RichText::new("TernaryWire").font(theme::semibold(20.0)).color(p.text));
+        ui.label(RichText::new("TernaryWire").font(theme::semibold(20.0)).color(p.text).line_height(Some(29.0)));
         kit::tone_pill(ui, &trf("Version {}", &[&crate::update::CURRENT]), kit::Tone::Accent);
         ui.scope(|ui| {
             ui.set_max_width(420.0);
+            let blurb = tr("A lightweight API client written in Rust. No account, no telemetry: data stays in your workspace folder.");
             ui.add(
-                egui::Label::new(RichText::new(tr("A lightweight API client written in Rust. No account, no telemetry: data stays in your workspace folder.")).color(p.text_muted))
+                egui::Label::new(RichText::new(blurb).color(p.text_muted).line_height(Some(13.0 * 1.45)))
                     .halign(Align::Center)
                     .wrap(),
             );
@@ -3537,7 +3622,8 @@ fn about_page(app: &TernaryWireApp, ui: &mut Ui) {
         let id = ui.scope_id().with("about-links");
         let row_w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(330.0));
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 24.0), Layout::left_to_right(Align::Center), |ui| {
             ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
             let start = ui.cursor().left();
             for (icon, label, url) in &links {
@@ -3551,11 +3637,13 @@ fn about_page(app: &TernaryWireApp, ui: &mut Ui) {
                 ui.data_mut(|d| d.insert_temp(id, w));
             }
         });
-        ui.add_space(4.0);
     });
+    // The column's bottom padding, before the page's gap.
+    ui.add_space(4.0);
     kit::group(ui, tr("System"), "", |ui, g| {
         let path = app.settings_path.display().to_string();
-        frow(g, ui, true, tr("Settings file"), Help::Mono(&path), ctl::BUTTON_SM, |ui| {
+        let shown = crate::app::tilde_path(&app.settings_path);
+        frow(g, ui, true, tr("Settings file"), Help::Mono(&shown), ctl::BUTTON_SM, |ui| {
             if kit::ghost(ui, Some(icons::COPY), tr("Copy path")).clicked() {
                 ui.ctx().copy_text(path.clone());
             }
@@ -3565,8 +3653,8 @@ fn about_page(app: &TernaryWireApp, ui: &mut Ui) {
             ui.add(label).on_hover_text(text);
         };
         frow(g, ui, true, tr("Secrets"), Help::None, ctl::TEXT, |ui| muted(ui, app.ws.secrets.backend_description()));
-        frow(g, ui, true, tr("Script engine"), Help::None, ctl::TEXT, |ui| muted(ui, app.scripts.name().to_string()));
-        frow(g, ui, true, tr("License"), Help::None, ctl::TEXT, |ui| muted(ui, env!("CARGO_PKG_LICENSE").to_string()));
+        frow(g, ui, true, tr("Script engine"), Help::None, ctl::TEXT, |ui| muted(ui, engine_label(app.scripts.name())));
+        frow(g, ui, true, tr("License"), Help::None, ctl::TEXT, |ui| muted(ui, license()));
     });
 }
 
