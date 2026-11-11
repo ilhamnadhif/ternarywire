@@ -4,15 +4,13 @@ Generated with the steps in `steps/`. For each approximate screen: the automatio
 `crates/ternarywire-app/src/automation.rs` would need (a proposal; the name is free), and what it
 should do. Add the step, then replace the stand-in steps of that screen.
 
-**Exact** (59): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`, `mock`, `mock-routes`, `capture-cert`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`
+**Exact** (61): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `home`, `http-graphql`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`, `mock`, `mock-routes`, `capture-cert`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`
 
-**Approximate** (5): `home`, `http-body`, `http-graphql`, `http-error`, `sio`
+**Approximate** (3): `http-body`, `http-error`, `sio`
 
 | Screen | Needed step | What it should do |
 | --- | --- | --- |
-| `home` | `{"close_all_tabs": true}` | the start page shows only without tabs; the app opens an empty request tab when none is restored |
 | `http-body` | `{"edit": {"request": "Create book", "body_raw": "…"}}` | the tab of Create book is unsaved (dot) in the prototype |
-| `http-graphql` | `{"graphql_schema": "fetch"}` | fetch the schema (server.py answers introspection) and open the schema explorer |
 | `http-error` | (none) | the refused port is 18794 instead of 18795, since server.py listens on 18795 |
 | `sio` | (server) | the pending-ack card needs a server event that asks for an ack, which server.py never sends; the prototype's second argument (a file) is not in the saved message that `{"auto": "load:Say hello"}` puts in the composer; `{"auto": "select:5"}` selects the row |
 
