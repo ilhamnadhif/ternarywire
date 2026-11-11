@@ -1258,7 +1258,8 @@ fn url_bar(
         kit::fade(ui.painter(), fade, p.surface, true);
     }
     if focused {
-        kit::focus_ring(ui, rect, 9);
+        // `.urlbar.focus`: an accent border, no halo.
+        ui.painter().rect_stroke(rect, CornerRadius::same(9), Stroke::new(1.0, p.accent), StrokeKind::Inside);
     } else {
         ui.painter().rect_stroke(rect, CornerRadius::same(9), Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
     }
@@ -3510,10 +3511,12 @@ fn center_v<R>(ui: &mut Ui, id: egui::Id, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
-/// An empty state (`.empty`): an icon in a 52 px soft square, a title, a
-/// line of explanation and actions, centered horizontally.
+/// An empty state (`.empty`): 24 px padding, an icon in a 52 px soft
+/// square, 14, a title, 6, a line of explanation, 16, actions, 24 px
+/// padding; text on 1.45 lines, centered horizontally.
 fn empty_block(ui: &mut Ui, icon: &str, spinning: bool, title: &str, body: &str, actions: impl FnOnce(&mut Ui)) {
     let p = theme::pal(ui);
+    ui.add_space(24.0);
     let (rect, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
     ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
     if spinning {
@@ -3522,30 +3525,36 @@ fn empty_block(ui: &mut Ui, icon: &str, spinning: bool, title: &str, body: &str,
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(24.0), p.text_muted);
     }
     ui.add_space(14.0);
-    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text).line_height(Some(14.0 * 1.45)));
     if !body.is_empty() {
         ui.add_space(6.0);
         ui.scope(|ui| {
             ui.set_max_width(320.0);
-            ui.add(egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap());
+            let text = RichText::new(body).size(12.5).color(p.text_muted).line_height(Some(12.5 * 1.45));
+            ui.add(egui::Label::new(text).halign(Align::Center).wrap());
         });
     }
-    // Actions are centered by measuring them on the previous frame.
+    // Actions are centered (and their 16 px gap kept only when there are
+    // some) by measuring them on the previous frame.
     let id = ui.make_persistent_id(("empty-actions", title));
-    let w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
-    ui.add_space(16.0);
+    let (w, h): (f32, f32) = ui.data(|d| d.get_temp(id).unwrap_or((0.0, 0.0)));
+    if h > 0.0 {
+        ui.add_space(16.0);
+    }
     let r = ui
-        .allocate_ui_with_layout(vec2(w.max(1.0), 30.0), Layout::left_to_right(Align::Center), |ui| {
+        .allocate_ui_with_layout(vec2(w.max(1.0), h), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            let start = ui.cursor().left();
+            let start = ui.min_rect().left_top();
             actions(ui);
-            ui.min_rect().right() - start
+            let used = ui.min_rect();
+            (used.right() - start.x, used.bottom() - start.y)
         })
         .inner;
-    if (r - w).abs() > 0.5 {
-        ui.data_mut(|d| d.insert_temp(id, r.max(0.0)));
+    if (r.0 - w).abs() > 0.5 || (r.1 - h).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, (r.0.max(0.0), r.1.max(0.0))));
         ui.ctx().request_repaint();
     }
+    ui.add_space(24.0);
 }
 
 /// Nothing sent yet: the shortcut and the last requests from History.
@@ -3569,12 +3578,12 @@ fn empty_response(ui: &mut Ui, ectx: &EditCtx, actions: &mut Actions) {
         if ectx.recent.is_empty() {
             return;
         }
-        // The empty state's 24 px padding, then 18.
-        ui.add_space(42.0);
+        // The column's 8 px gap, then 18.
+        ui.add_space(26.0);
         let w = (ui.available_width() * 0.8).min(360.0);
         ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.set_width(w);
-            ui.label(kit::eyebrow(ui, tr("Last sent from History")));
+            ui.label(kit::eyebrow(ui, tr("Last sent from History")).line_height(Some(10.5 * 1.45)));
             ui.add_space(6.0);
             for r in &ectx.recent {
                 let (row, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());

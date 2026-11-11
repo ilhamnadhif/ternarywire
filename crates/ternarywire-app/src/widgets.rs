@@ -202,7 +202,7 @@ pub fn var_line(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, true, false, None)
+    var_line_ex(ui, id, text, vars, hint, width, true, false, None, None)
 }
 
 /// Text in a table cell starts 9 px in and may run to the cell's edge
@@ -218,7 +218,19 @@ pub fn var_cell(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, false, false, None)
+    var_line_ex(ui, id, text, vars, hint, width, false, false, None, None)
+}
+
+/// [`var_cell`] whose placeholder is in the body font (a table's empty row).
+fn var_cell_plain_hint(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    vars: &VarCtx,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    var_line_ex(ui, id, text, vars, hint, width, false, false, None, Some(egui::FontId::proportional(13.0)))
 }
 
 /// [`var_cell`] with text of `size` (12 in small inputs, `.input.sm`).
@@ -231,7 +243,7 @@ pub fn var_cell_sized(
     width: f32,
     size: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, false, false, Some(size))
+    var_line_ex(ui, id, text, vars, hint, width, false, false, Some(size), None)
 }
 
 /// [`var_cell`] for a URL: the `?`, `=` and `&` of its query are muted.
@@ -243,7 +255,7 @@ pub fn url_cell(
     hint: &str,
     width: f32,
 ) -> egui::Response {
-    var_line_ex(ui, id, text, vars, hint, width, false, true, None)
+    var_line_ex(ui, id, text, vars, hint, width, false, true, None, Some(egui::FontId::proportional(12.5)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,6 +269,7 @@ fn var_line_ex(
     frame: bool,
     url: bool,
     size: Option<f32>,
+    hint_font: Option<egui::FontId>,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
@@ -319,10 +332,15 @@ fn var_line_ex(
         ui.fonts_mut(|f| f.layout_job(job))
     };
     // The placeholder in the field's font (the prototype's placeholders are
-    // in the input's font, faint; see the weak color below).
+    // in the input's font, faint; see the weak color below); the URL bar's
+    // and a table's empty row are in the body font.
+    let hint_font = match hint_font {
+        Some(f) => f,
+        None => theme::mono(font_size),
+    };
     let mut edit = TextEdit::singleline(text)
         .id(id)
-        .hint_text(RichText::new(hint).font(theme::mono(font_size)))
+        .hint_text(RichText::new(hint).font(hint_font))
         .desired_width(width)
         .font(egui::FontId::monospace(font_size))
         .margin(if frame { egui::Margin::symmetric(10, 0) } else { egui::Margin::symmetric(9, 0) })
@@ -973,7 +991,11 @@ fn kv_table_inner(
     ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.well);
     let check_x = left + 1.0 + CHECK / 2.0;
     // Header checkbox: all rows on, some on (dash) or none; clicking sets all.
-    if !rows.is_empty() {
+    // An empty table shows it unchecked, as the prototype.
+    if rows.is_empty() {
+        let c = Rect::from_center_size(pos2(check_x, top + 1.0 + head_h / 2.0), vec2(15.0, 15.0));
+        crate::kit::paint_check(ui, c, false, false, false, ui.is_enabled());
+    } else {
         let all = rows.iter().all(|r| r.enabled);
         let some = rows.iter().any(|r| r.enabled);
         let c = Rect::from_center_size(pos2(check_x, top + 1.0 + head_h / 2.0), vec2(15.0, 15.0));
@@ -1074,7 +1096,14 @@ fn kv_table_inner(
                     }
                     // Values are 12 px mono like the keys (`.kv .kr .mono`).
                     ui.style_mut().text_styles.insert(egui::TextStyle::Monospace, theme::mono(12.0));
-                    var_cell(ui, "v", &mut row.value, vars, if is_new { opts.value_hint } else { "" }, val_rect.width())
+                    var_cell_plain_hint(
+                        ui,
+                        "v",
+                        &mut row.value,
+                        vars,
+                        if is_new { opts.value_hint } else { "" },
+                        val_rect.width(),
+                    )
                 })
                 .inner;
             a11y_name(&val_resp, &format!("{} {}", tr("Value"), i + 1));

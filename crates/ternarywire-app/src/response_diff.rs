@@ -513,7 +513,8 @@ fn summary(ui: &mut Ui, prev: &Snapshot, cur: &Snapshot, headers_changed: usize)
                     row.push(i);
                 }
             }
-            let line_h = galleys.iter().map(|g| g.size().y).fold(0.0, f32::max);
+            // Lines 1.45 high (12 px text), the text centered in them.
+            let line_h = 12.0 * 1.45;
             for (n, row) in rows.into_iter().enumerate() {
                 if n > 0 {
                     ui.add_space(GAP);
@@ -523,7 +524,7 @@ fn summary(ui: &mut Ui, prev: &Snapshot, cur: &Snapshot, headers_changed: usize)
                 for i in row {
                     let g = galleys[i].clone();
                     let w = g.size().x;
-                    ui.painter().galley(pos2(x, rect.top()), g, p.text);
+                    ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, p.text);
                     x += w + GAP;
                 }
             }
@@ -550,7 +551,8 @@ fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
         .fill(p.surface)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
-        .inner_margin(egui::Margin::same(1))
+        // egui counts the stroke in the frame: rows start right inside it.
+        .inner_margin(egui::Margin::ZERO)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
