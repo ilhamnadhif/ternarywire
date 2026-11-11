@@ -97,7 +97,8 @@ pub fn button(ui: &mut Ui, kind: Kind, size: Size, text: &str, o: ButtonOpts<'_>
     ];
     let n = parts.iter().flatten().count();
     let content_w = parts.iter().flatten().sum::<f32>() + gap * n.saturating_sub(1) as f32 + kbd_w;
-    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad * 2.0 };
+    // The padding plus the 1 px border on each side (CSS `border-box`).
+    let width = if galley.is_none() && caret_galley.is_none() { height } else { content_w + pad * 2.0 + 2.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(width.max(height).max(o.min_width), height), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, text));
     if ui.is_rect_visible(rect) {
@@ -1062,24 +1063,26 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, body: &str, actions: im
     let content_h: f32 = ui.data(|d| d.get_temp(id).unwrap_or(150.0));
     let top = ui.cursor().top();
     ui.vertical_centered(|ui| {
+        // The prototype's `.empty`: 6 apart, text on 1.45 lines, the icon
+        // 8 more above the title and the actions 10 more under the body.
+        ui.spacing_mut().item_spacing.y = 0.0;
         ui.add_space(((ui.available_height() - content_h) / 2.0).clamp(12.0, 400.0));
         let start = ui.cursor().top();
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
         ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(24.0), p.text_muted);
         ui.add_space(14.0);
-        ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+        ui.label(RichText::new(title).font(theme::semibold(14.0)).line_height(Some(14.0 * 1.45)).color(p.text));
         if !body.is_empty() {
             ui.add_space(6.0);
             ui.scope(|ui| {
                 // Never wider than the space there is (a sidebar would grow).
                 ui.set_max_width(ui.available_width().min(320.0));
-                ui.add(
-                    egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap(),
-                );
+                let text = RichText::new(body).size(12.5).line_height(Some(12.5 * 1.45)).color(p.text_muted);
+                ui.add(egui::Label::new(text).halign(Align::Center).wrap());
             });
         }
-        ui.add_space(10.0);
+        ui.add_space(16.0);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             actions(ui);
@@ -1117,7 +1120,11 @@ pub fn banner_with(ui: &mut Ui, tone: Tone, icon: &str, text: &str, actions: imp
                 let aw: f32 = ui.data(|d| d.get_temp(wid).unwrap_or(0.0));
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - aw - if aw > 0.0 { 10.0 } else { 0.0 }).max(80.0));
-                    ui.add(egui::Label::new(RichText::new(text).size(12.5).color(p.text)).wrap());
+                    // 12.5 px on the body's 1.45 line height, like the prototype.
+                    ui.add(
+                        egui::Label::new(RichText::new(text).size(12.5).line_height(Some(12.5 * 1.45)).color(p.text))
+                            .wrap(),
+                    );
                 });
                 let before = ui.cursor().left();
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -1323,11 +1330,27 @@ pub fn pane_body<R>(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, add
 /// Each pane gets a clipped `Ui` filling its rect, laid out top-down with no
 /// padding: panes draw their own bars.
 pub fn panes(ui: &mut Ui, id: Id, side: bool, default: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
+    panes_ex(ui, id, side, default, false, left, right);
+}
+
+/// [`panes`]; with `thin_stack` stacked panes are parted by only the lower
+/// pane's 1 px top border (the prototype's `.panes` in a column, as the
+/// local servers use them), dragged 4 px around it.
+pub fn panes_ex(
+    ui: &mut Ui,
+    id: Id,
+    side: bool,
+    default: f32,
+    thin_stack: bool,
+    left: impl FnOnce(&mut Ui),
+    right: impl FnOnce(&mut Ui),
+) {
     let p = theme::pal(ui);
     let rect = ui.available_rect_before_wrap();
     let key = id.with(if side { "split-side" } else { "split-stack" });
     let mut split: f32 = ui.data_mut(|d| *d.get_persisted_mut_or(key, default));
-    let g = size::GUTTER;
+    let thin = thin_stack && !side;
+    let g = if thin { 1.0 } else { size::GUTTER };
     let (len, min_a, min_b): (f32, f32, f32) =
         if side { (rect.width() - g, 340.0, 300.0) } else { (rect.height() - g, 120.0, 140.0) };
     let a = (len * split).clamp(min_a.min(len * 0.5), (len - min_b).max(len * 0.5));
@@ -1355,7 +1378,8 @@ pub fn panes(ui: &mut Ui, id: Id, side: bool, default: f32, left: impl FnOnce(&m
     pane(ui, ra, Box::new(left), "a");
     pane(ui, rb, Box::new(right), "b");
     // Gutter: a hairline in its middle and a grip on hover.
-    let resp = ui.interact(rg, id.with("gutter"), Sense::click_and_drag());
+    let grab = if thin { rg.expand2(vec2(0.0, 4.0)) } else { rg };
+    let resp = ui.interact(grab, id.with("gutter"), Sense::click_and_drag());
     let painter = ui.painter();
     if side {
         painter.vline(rg.center().x, rg.y_range(), Stroke::new(1.0, p.border));
