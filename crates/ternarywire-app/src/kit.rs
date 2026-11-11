@@ -1322,7 +1322,9 @@ pub fn panes(ui: &mut Ui, id: Id, side: bool, default: f32, left: impl FnOnce(&m
     let rect = ui.available_rect_before_wrap();
     let key = id.with(if side { "split-side" } else { "split-stack" });
     let mut split: f32 = ui.data_mut(|d| *d.get_persisted_mut_or(key, default));
-    let g = size::GUTTER;
+    // Side by side: a 9 px gutter; stacked: only the hairline on top of the
+    // second pane (as the prototype), grabbed a few px around it.
+    let g = if side { size::GUTTER } else { 1.0 };
     let (len, min_a, min_b): (f32, f32, f32) =
         if side { (rect.width() - g, 340.0, 300.0) } else { (rect.height() - g, 120.0, 140.0) };
     let a = (len * split).clamp(min_a.min(len * 0.5), (len - min_b).max(len * 0.5));
@@ -1350,7 +1352,8 @@ pub fn panes(ui: &mut Ui, id: Id, side: bool, default: f32, left: impl FnOnce(&m
     pane(ui, ra, Box::new(left), "a");
     pane(ui, rb, Box::new(right), "b");
     // Gutter: a hairline in its middle and a grip on hover.
-    let resp = ui.interact(rg, id.with("gutter"), Sense::click_and_drag());
+    let hit = if side { rg } else { rg.expand2(vec2(0.0, 4.0)) };
+    let resp = ui.interact(hit, id.with("gutter"), Sense::click_and_drag());
     let painter = ui.painter();
     if side {
         painter.vline(rg.center().x, rg.y_range(), Stroke::new(1.0, p.border));
