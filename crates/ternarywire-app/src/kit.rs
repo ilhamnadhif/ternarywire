@@ -240,7 +240,12 @@ pub fn icon_button_ex(ui: &mut Ui, icon: &str, tooltip: &str, on: bool, side: f3
             23..=30 => 16.0,
             _ => (side * 0.5).round(),
         };
-        painter.text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(icon_size), color);
+        // Like the prototype's `<button>`: its 6 px side padding leaves a
+        // 22 px button 10 px for the 13 px icon, which then starts at the
+        // padding instead of centering (1.5 px right of the middle).
+        let x =
+            if side <= 22.0 && icon_size > side - 12.0 { rect.left() + 6.0 + icon_size / 2.0 } else { rect.center().x };
+        painter.text(pos2(x, rect.center().y), Align2::CENTER_CENTER, icon, theme::icon_font(icon_size), color);
     }
     resp
 }
@@ -645,6 +650,46 @@ pub fn metric_colored(ui: &mut Ui, icon: &str, text: &str, color: Option<Color32
     resp
 }
 
+/// `text` laid out like CSS `font-variant-numeric: tabular-nums` with Inter
+/// (`.rmeta` metrics): digits and `-+×` take one fixed width, `.,:` and
+/// spaces another, so numbers that change keep their place. Returns the
+/// galley (paint it with a color; it is laid out with the placeholder color)
+/// and its advance width.
+pub fn tabular_text(ui: &Ui, text: &str, font: FontId) -> (std::sync::Arc<egui::Galley>, f32) {
+    let plain = egui::TextFormat::simple(font.clone(), Color32::PLACEHOLDER);
+    let mut job = egui::text::LayoutJob::default();
+    // Each tabular glyph is centered in its fixed width: half of the
+    // difference goes before it, half before whatever follows.
+    let mut carry = 0.0;
+    let mut run = String::new();
+    for c in text.chars() {
+        // Advance widths (em) of Inter's `tnum` glyphs.
+        let em = match c {
+            '0'..='9' | '-' | '+' | '×' => 0.6484,
+            '.' | ',' | ':' | ' ' => 0.2686,
+            '(' | ')' => 0.3906,
+            _ => {
+                run.push(c);
+                continue;
+            }
+        };
+        if !run.is_empty() {
+            job.append(&std::mem::take(&mut run), carry, plain.clone());
+            carry = 0.0;
+        }
+        let pad = em * font.size - ui.ctx().fonts_mut(|f| f.glyph_width(&font, c));
+        job.append(c.encode_utf8(&mut [0; 4]), carry + pad / 2.0, plain.clone());
+        carry = pad / 2.0;
+    }
+    if !run.is_empty() {
+        job.append(&run, carry, plain);
+        carry = 0.0;
+    }
+    let g = ui.painter().layout_job(job);
+    let w = g.size().x + carry;
+    (g, w)
+}
+
 /// The size of a key cap for `keys`.
 pub fn kbd_size(ui: &Ui, keys: &str) -> Vec2 {
     let g = ui.painter().layout_no_wrap(keys.to_string(), FontId::proportional(10.5), Color32::PLACEHOLDER);
@@ -943,7 +988,7 @@ fn search_field_ex(
     let font = if small { 12.0 } else { 12.5 };
     let edit = egui::TextEdit::singleline(text)
         .id_salt(id)
-        .hint_text(RichText::new(hint_text).color(p.text_faint))
+        .hint_text(RichText::new(hint_text).font(FontId::proportional(font)))
         .font(FontId::proportional(font))
         .desired_width(width)
         .min_size(vec2(0.0, h))
@@ -953,6 +998,8 @@ fn search_field_ex(
     let resp = ui
         .scope(|ui| {
             ui.spacing_mut().interact_size.y = h;
+            // egui paints the hint in the weak text color: faint, like a placeholder.
+            ui.visuals_mut().weak_text_color = Some(p.text_faint);
             let radius = CornerRadius::same(if small { RADIUS_SM } else { RADIUS });
             ui.visuals_mut().widgets.inactive.corner_radius = radius;
             ui.visuals_mut().widgets.hovered.corner_radius = radius;
@@ -1025,7 +1072,8 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, body: &str, actions: im
         if !body.is_empty() {
             ui.add_space(6.0);
             ui.scope(|ui| {
-                ui.set_max_width(320.0);
+                // Never wider than the space there is (a sidebar would grow).
+                ui.set_max_width(ui.available_width().min(320.0));
                 ui.add(
                     egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap(),
                 );
