@@ -1990,6 +1990,7 @@ one file per request	satu berkas per request
 Copy {}	Salin {}
 Differs from the initial value	Berbeda dari nilai awal
 Double-click an environment to make it active. Initial values are committed; current values stay on this machine.	Klik dua kali sebuah environment untuk mengaktifkannya. Nilai awal di-commit; nilai saat ini tetap di mesin ini.
+Double-click an environment to make it active. Initial values are committed; current values stay on this Mac.	Klik dua kali sebuah environment untuk mengaktifkannya. Nilai awal di-commit; nilai saat ini tetap di Mac ini.
 Filter environments	Saring environment
 LOCAL	LOKAL
 No environments match “{}”	Tidak ada environment yang cocok dengan “{}”

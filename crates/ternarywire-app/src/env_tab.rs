@@ -322,9 +322,15 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
     let q = filter.trim().to_lowercase();
-    let foot = tr(
-        "Double-click an environment to make it active. Initial values are committed; current values stay on this machine.",
-    );
+    let foot = if cfg!(target_os = "macos") {
+        tr(
+            "Double-click an environment to make it active. Initial values are committed; current values stay on this Mac.",
+        )
+    } else {
+        tr(
+            "Double-click an environment to make it active. Initial values are committed; current values stay on this machine.",
+        )
+    };
     let list_h =
         (ui.available_height() - crate::sidebar::sidebar_footer_height(ui, foot, ui.available_width())).max(40.0);
     let mut new_env = false;
