@@ -3,6 +3,7 @@
   {"theme": "@THEME"},
   {"expand": "Bookstore API"},
   {"expand": "Realtime & AI"},
+  {"sidebar": "servers"},
   {"new_webhook": 8787},
   {"auto": "start"},
   {"wait_ms": 600},
