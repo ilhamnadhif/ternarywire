@@ -4,9 +4,9 @@ Generated with the steps in `steps/`. For each approximate screen: the automatio
 `crates/ternarywire-app/src/automation.rs` would need (a proposal; the name is free), and what it
 should do. Add the step, then replace the stand-in steps of that screen.
 
-**Exact** (29): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`
+**Exact** (36): `http`, `http-auth`, `http-scripts`, `http-filter`, `http-compare`, `http-empty`, `http-loading`, `http-stacked`, `mcp`, `mcp-elicit`, `ai`, `container`, `spec`, `webhook`, `webhook-empty`, `capture`, `dlg-palette`, `dlg-quicklook`, `dlg-settings`, `dlg-cookies`, `dlg-import`, `dlg-gen-tests`, `dlg-set-var`, `dlg-update`, `console`, `ws`, `mqtt`, `grpc`, `grpc-picker`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`
 
-**Approximate** (35): `home`, `http-body`, `http-graphql`, `http-error`, `sio`, `env`, `history`, `spec-sync`, `flow`, `flow-settings`, `runner`, `runner-perf`, `mock`, `mock-routes`, `capture-cert`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`
+**Approximate** (28): `home`, `http-body`, `http-graphql`, `http-error`, `sio`, `mock`, `mock-routes`, `capture-cert`, `dlg-palette-search`, `dlg-env-switch`, `dlg-settings-requests`, `dlg-settings-scripts`, `dlg-settings-proxy`, `dlg-settings-certs`, `dlg-settings-shortcuts`, `dlg-settings-about`, `dlg-vault`, `dlg-vault-link`, `dlg-vault-providers`, `dlg-import-ready`, `dlg-snippet`, `dlg-save`, `dlg-fork-merge`, `dlg-confirm`, `dlg-unsaved`, `dlg-name-prompt`, `dlg-new-ws`, `dlg-update-progress`
 
 | Screen | Needed step | What it should do |
 | --- | --- | --- |
@@ -15,13 +15,6 @@ should do. Add the step, then replace the stand-in steps of that screen.
 | `http-graphql` | `{"graphql_schema": "fetch"}` | fetch the schema (server.py answers introspection) and open the schema explorer |
 | `http-error` | (none) | the refused port is 18794 instead of 18795, since server.py listens on 18795 |
 | `sio` | (server) | the pending-ack card needs a server event that asks for an ack, which echo_server.rs never sends; `{"auto": "select:5"}` selects the row |
-| `env` | `{"env_row_menu": "pageSize"}` | the hover menu of a variable row (Persist / Reset current value) |
-| `history` | `{"open_history": "hist-11"}` | open a history entry as a tab (with its "Opened from History" bar); a scratch tab with the same request stands in |
-| `spec-sync` | `{"spec_sync": "Bookstore API"}` | run Sync spec → collection and open the Sync popover; also an unsaved edit and a warning |
-| `flow` | `{"flow_select": "Books"}` | select a block so the inspector shows it |
-| `flow-settings` | `{"flow_menu": "add-block"}` | open the Add block menu |
-| `runner` | `{"runner_options": {"iterations": 12, "data_file": "data/books.csv"}}` | 12 iterations from the data file (iteration 3 asks for book 9 → the 404 failure); then {"runner_select": "Get book#3"} |
-| `runner-perf` | `{"runner_mode": "performance"}` | switch the runner to Performance (25 users, 30 s), then runner_start |
 | `mock` | `{"auto": "start"}` | start the mock server (port 3000); its log then needs traffic, e.g. {"_poke": "mock"}, and {"auto": "select:1"} |
 | `mock-routes` | `{"mock_section": "routes"}` | show the Routes tab (and {"auto": "start"}) |
 | `capture-cert` | `{"capture_cert": true}` | open the certificate panel of the capture proxy |

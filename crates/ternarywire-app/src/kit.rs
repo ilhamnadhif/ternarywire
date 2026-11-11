@@ -1363,6 +1363,8 @@ pub struct MenuItem<'a> {
     /// Some(true) draws a check in the icon column; Some(false) leaves it empty.
     pub checked: Option<bool>,
     pub label: &'a str,
+    /// Code after the label, in the mono font (`Copy {{name}}`).
+    pub code: Option<&'a str>,
     pub shortcut: Option<&'a str>,
     /// Muted text on the right (counts, paths).
     pub detail: Option<&'a str>,
@@ -1438,7 +1440,19 @@ pub fn menu_item_ex(ui: &mut Ui, m: MenuItem<'_>) -> Response {
             ui.painter().galley(pos2(right - g.size().x, cy - g.size().y / 2.0), g.clone(), p.text_faint);
             right -= g.size().x + 8.0;
         }
-        let g = elide(ui, m.label, FontId::proportional(12.5), text_c, right - x);
+        let g = match m.code {
+            Some(code) => {
+                let mut job = egui::text::LayoutJob::default();
+                let label = egui::TextFormat::simple(FontId::proportional(12.5), text_c);
+                job.append(m.label, 0.0, label.clone());
+                let mono =
+                    egui::TextFormat { valign: Align::Center, ..egui::TextFormat::simple(theme::mono(11.5), text_c) };
+                job.append(code, 4.0, mono);
+                job.wrap = egui::text::TextWrapping::truncate_at_width((right - x).max(10.0));
+                ui.painter().layout_job(job)
+            }
+            None => elide(ui, m.label, FontId::proportional(12.5), text_c, right - x),
+        };
         ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, text_c);
     }
     if resp.clicked() && !m.submenu {

@@ -576,18 +576,19 @@ fn bulk_editor(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, ctx: &VarC
     changed
 }
 
-/// A small upper-case tag in a column header (`SHARED`, `LOCAL`).
-fn header_tag(ui: &Ui, at: egui::Pos2, icon: &str, text: &str) -> Rect {
+/// A small upper-case tag in a column header (`SHARED`, `LOCAL`), painted
+/// with `painter` (clipped to its column).
+fn header_tag(ui: &Ui, painter: &egui::Painter, at: egui::Pos2, icon: &str, text: &str) -> Rect {
     let p = theme::pal(ui);
     let mut job = LayoutJob::default();
     job.append(icon, 0.0, TextFormat::simple(theme::icon_font(10.0), p.text_faint));
     let mut f = TextFormat::simple(theme::semibold(10.0), p.text_faint);
     f.extra_letter_spacing = 0.2;
     job.append(&format!(" {text}"), 0.0, f);
-    let g = ui.painter().layout_job(job);
+    let g = painter.layout_job(job);
     let rect = Rect::from_min_size(pos2(at.x, at.y - 8.0), vec2(g.size().x + 10.0, 16.0));
-    ui.painter().rect_filled(rect, CornerRadius::same(4), p.subtle);
-    ui.painter().galley(pos2(rect.left() + 5.0, rect.center().y - g.size().y / 2.0), g, p.text_faint);
+    painter.rect_filled(rect, CornerRadius::same(4), p.subtle);
+    painter.galley(pos2(rect.left() + 5.0, rect.center().y - g.size().y / 2.0), g, p.text_faint);
     rect
 }
 
@@ -703,11 +704,13 @@ fn variables_grid(ui: &mut Ui, salt: egui::Id, vars: &mut Vec<Variable>, filter:
         ),
     ];
     for (i, (x0, x1, label, help, tag)) in heads.iter().enumerate() {
-        let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(11.5), p.text_muted);
+        // Clipped to the column, like the prototype's cells (overflow hidden).
+        let painter = ui.painter().with_clip_rect(Rect::from_min_max(pos2(*x0, head.top()), pos2(*x1, head.bottom())));
+        let g = painter.layout_no_wrap(label.to_string(), theme::medium(11.5), p.text_muted);
         let w = g.size().x;
-        ui.painter().galley(pos2(x0 + 11.0, head.center().y - g.size().y / 2.0), g, p.text_muted);
+        painter.galley(pos2(x0 + 11.0, head.center().y - g.size().y / 2.0), g, p.text_muted);
         if let Some((icon, text)) = tag {
-            header_tag(ui, pos2(x0 + 11.0 + w + 6.0, head.center().y), icon, text);
+            header_tag(ui, &painter, pos2(x0 + 11.0 + w + 6.0, head.center().y), icon, text);
         }
         if !help.is_empty() {
             let r = Rect::from_min_max(pos2(*x0, head.top()), pos2(*x1, head.bottom()));
@@ -1020,8 +1023,9 @@ fn variable_menu(ui: &mut Ui, v: &mut Variable) -> bool {
     });
     kit::menu_sep(ui);
     let reference = format!("{{{{{}}}}}", v.key);
-    if kit::menu_item(ui, Some(icons::COPY), &trf("Copy {}", &[&reference]), None).clicked() {
-        ui.ctx().copy_text(reference);
+    let copy = MenuItem { icon: Some(icons::COPY), label: tr("Copy"), code: Some(&reference), ..Default::default() };
+    if kit::menu_item_ex(ui, copy).clicked() {
+        ui.ctx().copy_text(reference.clone());
     }
     changed
 }
