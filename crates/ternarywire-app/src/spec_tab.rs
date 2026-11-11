@@ -28,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime};
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
-    UiBuilder, Vec2, vec2,
+    UiBuilder, Vec2, pos2, vec2,
 };
 
 use ternarywire_convert::smithy::{self, SourceFile};
@@ -37,7 +37,8 @@ use ternarywire_core::model::{Collection, Id, Item, RequestItem};
 use crate::app::{TabKind, TernaryWireApp};
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
-use crate::theme::{self, Palette, RADIUS};
+use crate::kit::Tone;
+use crate::theme::{self, Palette};
 use crate::widgets;
 use crate::{icons, kit};
 
@@ -106,6 +107,14 @@ impl SpecKind {
             SpecKind::GraphQl => icons::GRAPH,
             SpecKind::Smithy => icons::TREE_STRUCTURE,
             SpecKind::Other => icons::FILE_TEXT,
+        }
+    }
+
+    /// The icon of a file of this kind in the APIs list.
+    fn file_icon(self) -> &'static str {
+        match self {
+            SpecKind::OpenApi => icons::FILE_CODE,
+            k => k.icon(),
         }
     }
 
@@ -215,11 +224,20 @@ pub struct SpecTab {
     check: Option<Check>,
     last_edit: Option<Instant>,
     target: Option<Id>,
+    /// The result of the last sync, shown under the toolbar until closed.
     last_sync: Option<String>,
+    /// The collection of the last sync (named in the note, opened by it).
+    last_sync_with: Option<Id>,
+    /// Automation: open the Sync popover in the next frame.
+    open_sync: bool,
+    /// Automation: an action for the next frame (see [`SpecTab::automation`]).
+    pub auto: Option<String>,
     view: View,
     /// Live documentation preview (FR-D1): the spec as a collection, rebuilt
     /// after edits.
     docs: Option<Result<Collection, String>>,
+    /// `info.version` of an OpenAPI spec, for the docs preview.
+    docs_version: Option<String>,
     /// A problem was clicked: put the cursor on this line and column.
     jump: Option<(usize, usize)>,
     /// An endpoint of the docs index was clicked: scroll to this request.
@@ -360,6 +378,65 @@ impl SpecTab {
         self.view = View::Split;
         self.rebuild_docs();
     }
+
+    /// Automation: `editor`, `split`, `docs` (the view), `sync` (opens the
+    /// Sync popover), `sync:<collection>` (chooses it in the popover),
+    /// `synced:<collection>` (syncs the spec into it, as "Spec → collection")
+    /// and `spec_sync:<collection>` (all of that plus an unsaved edit).
+    fn automation(&mut self, app: &mut TernaryWireApp, action: &str) {
+        let find = |name: &str| app.ws.data.collections.iter().find(|c| c.name == name).map(|c| c.id.clone());
+        match action.split_once(':') {
+            Some(("sync", name)) => {
+                self.target = find(name);
+                self.open_sync = true;
+            }
+            Some(("synced", name)) => {
+                if let Some(id) = find(name) {
+                    self.target = Some(id.clone());
+                    self.sync_into(app, &id);
+                }
+            }
+            Some(("spec_sync", name)) => {
+                // The fixture's Sync screen: synced, the popover open, and
+                // an unsaved edit that gives a warning (a second server).
+                if let Some(id) = find(name) {
+                    self.target = Some(id.clone());
+                    self.sync_into(app, &id);
+                    self.open_sync = true;
+                }
+                if let Some(at) = self.text.find("servers:\n") {
+                    let line = "  - url: https://api.staging.bookstore.dev\n";
+                    let end = self.text[at..].find("\npaths:").map(|i| at + i + 1).unwrap_or(at + 9);
+                    self.text.insert_str(end, line);
+                    self.validate();
+                }
+                self.view = View::Split;
+            }
+            _ => match action {
+                "editor" => self.view = View::Editor,
+                "docs" => self.view = View::Docs,
+                "sync" => self.open_sync = true,
+                _ => self.view = View::Split,
+            },
+        }
+        self.rebuild_docs();
+    }
+
+    /// Updates the collection `id` from the spec (Spec → collection) and
+    /// notes the result.
+    fn sync_into(&mut self, app: &mut TernaryWireApp, id: &Id) {
+        match self.import() {
+            Ok(spec) => {
+                if let Some(c) = app.ws.data.collection_mut(id) {
+                    let report = sync_collection(c, &spec);
+                    app.ws.mark_collection(id);
+                    self.last_sync = Some(report);
+                    self.last_sync_with = Some(id.clone());
+                }
+            }
+            Err(e) => app.toast(e, true),
+        }
+    }
 }
 
 /// Spec files in the workspace's `specs/` folder.
@@ -389,8 +466,12 @@ impl SpecTab {
             last_edit: None,
             target: None,
             last_sync: None,
+            last_sync_with: None,
+            open_sync: false,
+            auto: None,
             view: View::Editor,
             docs: None,
+            docs_version: None,
             jump: None,
             docs_target: None,
             editor_id: None,
@@ -618,6 +699,17 @@ impl SpecTab {
             return;
         }
         self.docs = Some(self.import());
+        self.docs_version = (self.kind == SpecKind::OpenApi)
+            .then(|| {
+                let v: serde_json::Value = if self.text.trim_start().starts_with('{') {
+                    serde_json::from_str(&self.text).ok()?
+                } else {
+                    serde_yaml_ng::from_str(&self.text).ok()?
+                };
+                let version = v.get("info")?.get("version")?;
+                Some(version.as_str().map(str::to_string).unwrap_or_else(|| version.to_string()))
+            })
+            .flatten();
     }
 
     pub fn save(&mut self) -> Result<(), String> {
@@ -842,46 +934,40 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
         tab.validate();
         tab.rebuild_docs();
     }
+    if let Some(a) = tab.auto.take() {
+        tab.automation(app, &a);
+    }
+    ui.spacing_mut().item_spacing.y = 0.0;
     let narrow = ui.available_width() < 760.0;
-    header(app, ui, tab, narrow);
-    ui.add_space(10.0);
-    toolbar(app, ui, tab, narrow);
-    ui.add_space(10.0);
+    header(app, ui, tab);
+    toolbar(app, ui, tab);
     if let Some(report) = tab.last_sync.clone()
-        && sync_note(ui, &report)
+        && sync_note(app, ui, tab, &report)
     {
         tab.last_sync = None;
     }
     let convertible = tab.convertible();
     match tab.view {
-        View::Docs if convertible => docs_view(ui, tab),
-        View::Split if convertible && ui.available_width() < 680.0 => {
-            // Too narrow for side by side: the docs go under the editor.
-            let avail = ui.available_rect_before_wrap();
-            let mid = avail.top() + avail.height() * 0.5;
-            let top = Rect::from_min_max(avail.min, Pos2::new(avail.right(), mid - 8.0));
-            let bottom = Rect::from_min_max(Pos2::new(avail.left(), mid + 8.0), avail.max);
-            editor_area(app, ui, tab, top);
-            ui.painter().hline(avail.x_range(), mid, Stroke::new(1.0, theme::pal(ui).border));
-            let mut child = ui.new_child(UiBuilder::new().max_rect(bottom).layout(Layout::top_down(Align::Min)));
-            docs_view(&mut child, tab);
-            ui.allocate_rect(avail, Sense::hover());
+        View::Docs if convertible => docs_view(ui, tab, true),
+        View::Split if convertible => {
+            // The editor (54 %) and the docs on the well fill, side by side
+            // or, when narrow, stacked.
+            let id = egui::Id::unique(("spec-split", &tab.path));
+            let tab = std::cell::RefCell::new(&mut *tab);
+            kit::panes(
+                ui,
+                id,
+                !narrow,
+                0.54,
+                |ui| editor_area(app, ui, &mut tab.borrow_mut()),
+                |ui| {
+                    let r = ui.max_rect();
+                    ui.painter().rect_filled(r, 0.0, theme::pal(ui).well);
+                    docs_view(ui, &mut tab.borrow_mut(), false);
+                },
+            );
         }
-        view => {
-            if view == View::Split && convertible {
-                let w = ui.available_width();
-                egui::Panel::right(egui::Id::unique(("spec-docs", &tab.path)))
-                    .resizable(true)
-                    .default_size((w * 0.46).max(300.0))
-                    .min_size(280.0)
-                    .max_size((w * 0.7).max(300.0))
-                    .frame(egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 0, top: 0, bottom: 0 }))
-                    .show(ui, |ui| docs_view(ui, tab));
-            }
-            let avail = ui.available_rect_before_wrap();
-            editor_area(app, ui, tab, avail);
-            ui.allocate_rect(avail, Sense::hover());
-        }
+        _ => editor_area(app, ui, tab),
     }
     // Re-validate shortly after typing stops.
     if let Some(t) = tab.last_edit {
@@ -893,19 +979,22 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
             ui.ctx().request_repaint_after(Duration::from_millis(450));
         }
     }
+    delete_confirm(app, ui);
 }
 
-/// The editor in `rect`, with the problems under it (their height follows
-/// their count).
-fn editor_area(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
+/// The editor filling the space left, with the problems docked under it
+/// (their height follows their count, at most 5 rows).
+fn editor_area(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
     let rows = problem_rows(tab);
     let shown = rows.len().min(5) as f32;
-    let height = if rows.is_empty() { 26.0 } else { 26.0 + 2.0 + shown * 28.0 };
-    let problems = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - height), rect.right_bottom());
-    let editor_rect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), problems.top() - 8.0));
+    let height = 32.0 + 1.0 + shown * 28.0;
+    let rect = ui.available_rect_before_wrap();
+    let problems = Rect::from_min_max(Pos2::new(rect.left(), (rect.bottom() - height).max(rect.top())), rect.max);
+    let editor_rect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), problems.top()));
     editor(ui, tab, editor_rect);
     let mut child = ui.new_child(UiBuilder::new().max_rect(problems).layout(Layout::top_down(Align::Min)));
     problems_panel(app, &mut child, tab, &rows);
+    ui.advance_cursor_after_rect(rect);
 }
 
 /// The path of the file shown above its name: its folders inside the
@@ -918,31 +1007,47 @@ fn breadcrumb(app: &TernaryWireApp, path: &Path) -> Vec<String> {
     }
 }
 
-fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, narrow: bool) {
+/// The 46 px title row: `specs › file`, unsaved dot, kind and validity
+/// pills; Save and more on the right.
+fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
     let crumbs = breadcrumb(app, &tab.path);
-    ui.horizontal(|ui| {
-        ui.set_height(30.0);
+    kit::bar(ui, kit::size::VIEW_TITLE, true, |ui| {
+        ui.add_space(4.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = 10.0;
             let more = kit::icon_button(ui, icons::DOTS_THREE, tr("More actions"));
-            egui::Popup::menu(&more).show(|ui| {
+            egui::Popup::menu(&more).width(220.0).align(egui::RectAlign::BOTTOM_END).show(|ui| {
                 if tab.convertible()
-                    && ui.button(kit::with_icon(icons::ARROW_SQUARE_OUT, tr("Open docs in browser"))).clicked()
+                    && kit::menu_item(ui, Some(icons::ARROW_SQUARE_OUT), tr("Open docs in browser"), None).clicked()
                 {
                     match tab.import() {
                         Ok(c) => crate::dialogs::preview_docs(app, &c),
                         Err(e) => app.toast(e, true),
                     }
-                    ui.close();
                 }
-                if ui.button(kit::with_icon(icons::COPY, tr("Copy file path"))).clicked() {
+                if kit::menu_item(ui, Some(icons::COPY), tr("Copy file path"), None).clicked() {
                     ui.ctx().copy_text(tab.path.display().to_string());
-                    ui.close();
+                }
+                kit::menu_sep(ui);
+                let delete = kit::MenuItem {
+                    icon: Some(icons::TRASH),
+                    label: tr("Delete…"),
+                    danger: true,
+                    ..Default::default()
+                };
+                if kit::menu_item_ex(ui, delete).clicked() {
+                    ui.data_mut(|d| d.insert_temp(delete_id(), tab.path.clone()));
                 }
             });
-            let save = kit::secondary(ui, Some(icons::FLOPPY_DISK), tr("Save")).on_hover_text("⌘S");
+            let save = kit::button(
+                ui,
+                kit::Kind::Secondary,
+                kit::Size::Sm,
+                tr("Save"),
+                kit::ButtonOpts { icon: Some(icons::FLOPPY_DISK), ..Default::default() },
+            )
+            .on_hover_text(format!("{} (⌘S)", tr("Save")));
             if save.clicked() {
                 match tab.save() {
                     Ok(()) => app.toast(tr("Saved"), false),
@@ -951,29 +1056,35 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, narrow: bool
             }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new(tab.kind.icon()).font(theme::icon_font(17.0)).color(tab.kind.color(dark)));
+                let narrow = ui.available_width() < 420.0;
+                ui.label(RichText::new(tab.kind.icon()).font(theme::icon_font(13.0)).color(p.text_faint));
                 if !narrow {
                     for c in &crumbs {
-                        ui.label(RichText::new(c).color(p.text_muted));
+                        ui.label(RichText::new(c).size(12.5).color(p.text_muted));
                         ui.label(RichText::new(icons::CARET_RIGHT).font(theme::icon_font(11.0)).color(p.text_faint));
                     }
                 }
-                let title_w = (ui.available_width() - if narrow { 150.0 } else { 260.0 }).max(80.0);
+                let pills_w = if narrow { 110.0 } else { 190.0 };
+                let title_w = (ui.available_width() - pills_w).max(60.0);
                 ui.allocate_ui_with_layout(vec2(title_w, 30.0), Layout::left_to_right(Align::Center), |ui| {
                     ui.add(
-                        egui::Label::new(RichText::new(tab.title()).font(theme::semibold(15.0)).color(p.text))
+                        egui::Label::new(RichText::new(tab.title()).font(theme::semibold(14.0)).color(p.text))
                             .truncate(),
                     )
                     .on_hover_text(tab.path.display().to_string());
                 });
                 if tab.dirty() {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
                     ui.painter().circle_filled(r.center(), 3.5, p.accent);
-                    ui.interact(r, ui.scope_id().with("spec-dirty"), Sense::hover())
-                        .on_hover_text(tr("Unsaved changes"));
+                    resp.on_hover_text(tr("Unsaved changes"));
                 }
-                kit::pill(ui, &format!("{} {}", tab.kind.icon(), tab.kind.short()), tab.kind.color(dark))
-                    .on_hover_text(tab.kind.label());
+                kit::pill_ex(
+                    ui,
+                    tab.kind.short(),
+                    Tone::Info,
+                    kit::PillOpts { icon: Some(tab.kind.icon()), ..Default::default() },
+                )
+                .on_hover_text(tab.kind.label());
                 validity_pill(ui, tab);
             });
         });
@@ -982,57 +1093,50 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, narrow: bool
 
 /// `Valid`, `2 warnings` or `3 errors`, with the summary as tooltip.
 fn validity_pill(ui: &mut Ui, tab: &SpecTab) {
-    let p = theme::pal(ui);
     let Some(c) = &tab.check else { return };
     let errors = c.problems.iter().filter(|x| x.level == Level::Error && x.file.is_none()).count();
     let warnings = c.problems.iter().filter(|x| x.level == Level::Warning && x.file.is_none()).count();
-    let (text, color) = if tab.kind == SpecKind::Other {
-        (format!("{} {}", icons::QUESTION, tr("Not validated")), p.text_muted)
+    let (icon, text, tone) = if tab.kind == SpecKind::Other {
+        (icons::QUESTION, tr("Not validated").to_string(), Tone::Neutral)
     } else if !c.ok {
         let n = errors.max(1);
-        (
-            format!("{} {}", icons::X_CIRCLE, if n == 1 { tr("1 error").to_string() } else { trf("{} errors", &[&n]) }),
-            p.err,
-        )
+        (icons::X_CIRCLE, if n == 1 { tr("1 error").to_string() } else { trf("{} errors", &[&n]) }, Tone::Err)
     } else if warnings > 0 {
         let text = if warnings == 1 { tr("1 warning").to_string() } else { trf("{} warnings", &[&warnings]) };
-        (format!("{} {}", icons::WARNING, text), p.warn)
+        (icons::WARNING, text, Tone::Warn)
     } else {
-        (format!("{} {}", icons::CHECK_CIRCLE, tr("Valid")), p.ok)
+        (icons::CHECK, tr("Valid").to_string(), Tone::Ok)
     };
-    kit::pill(ui, &text, color).on_hover_text(&c.summary);
+    kit::pill_ex(ui, &text, tone, kit::PillOpts { icon: Some(icon), ..Default::default() }).on_hover_text(&c.summary);
 }
 
-fn toolbar(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, narrow: bool) {
+/// The 46 px toolbar: Editor / Split / Docs on the left; Validate, Sync and
+/// Generate collection on the right.
+fn toolbar(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
     let p = theme::pal(ui);
     let convertible = tab.convertible();
-    ui.horizontal(|ui| {
-        ui.set_height(30.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
+    kit::bar(ui, kit::size::VIEW_TITLE, true, |ui| {
         if convertible {
             let mut view = tab.view;
             let items = [
-                (View::Editor, format!("{} {}", icons::CODE, tr("Editor"))),
-                (View::Split, format!("{} {}", icons::COLUMNS, tr("Split"))),
-                (View::Docs, format!("{} {}", icons::BOOK_OPEN, tr("Docs"))),
+                (View::Editor, Some(icons::CODE), tr("Editor")),
+                (View::Split, Some(icons::COLUMNS), tr("Split")),
+                (View::Docs, Some(icons::BOOK_OPEN), tr("Docs")),
             ];
-            let items: Vec<(View, &str)> = items.iter().map(|(v, s)| (*v, s.as_str())).collect();
-            if kit::segmented(ui, &mut view, &items) {
+            if kit::segmented_ex(ui, &mut view, &items, true) {
                 tab.view = view;
                 tab.rebuild_docs();
             }
         } else if let Some(c) = &tab.check {
-            ui.label(RichText::new(&c.summary).color(p.text_muted))
+            ui.add(egui::Label::new(RichText::new(&c.summary).size(12.5).color(p.text_muted)).truncate())
                 .on_hover_text(tr("Documentation and collections are made from OpenAPI and Smithy specs."));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            let small = |icon: &'static str| kit::ButtonOpts { icon: Some(icon), ..Default::default() };
             if convertible {
-                let generate = if narrow {
-                    kit::primary_icon(ui, icons::STACK, tr("Generate"))
-                } else {
-                    kit::primary_icon(ui, icons::STACK, tr("Generate collection"))
-                };
+                let label = if ui.available_width() < 340.0 { tr("Generate") } else { tr("Generate collection") };
+                let generate = kit::button(ui, kit::Kind::Primary, kit::Size::Sm, label, small(icons::STACK));
                 if generate.on_hover_text(tr("Create a collection with a request for every operation")).clicked() {
                     match tab.import() {
                         Ok(mut c) => {
@@ -1046,22 +1150,41 @@ fn toolbar(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, narrow: boo
                         Err(e) => app.toast(e, true),
                     }
                 }
-                let sync = if narrow {
-                    kit::icon_button(ui, icons::ARROWS_LEFT_RIGHT, tr("Sync with a collection"))
-                } else {
-                    kit::secondary(ui, Some(icons::ARROWS_LEFT_RIGHT), tr("Sync"))
-                };
+                let popup_id = egui::Id::unique(("spec-sync-popover", &tab.path));
+                if std::mem::take(&mut tab.open_sync) {
+                    egui::Popup::open_id(ui.ctx(), popup_id);
+                }
+                let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+                let sync = kit::button(
+                    ui,
+                    kit::Kind::Secondary,
+                    kit::Size::Sm,
+                    tr("Sync"),
+                    kit::ButtonOpts {
+                        icon: Some(icons::ARROWS_LEFT_RIGHT),
+                        caret: true,
+                        on: open,
+                        ..Default::default()
+                    },
+                );
                 let sync = sync.on_hover_text(tr("Update a collection from this spec, or the spec from a collection"));
+                let style = ui.style().clone();
                 egui::Popup::menu(&sync)
-                    .width(300.0)
+                    .id(popup_id)
+                    .width(312.0)
+                    .align(egui::RectAlign::BOTTOM_END)
+                    .gap(6.0)
+                    .frame(
+                        egui::Frame::menu(&style)
+                            .inner_margin(egui::Margin::same(12))
+                            .corner_radius(CornerRadius::same(11)),
+                    )
+                    .layout(Layout::top_down(Align::Min))
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show(|ui| sync_menu(app, ui, tab));
             }
-            let validate = if narrow {
-                kit::icon_button(ui, icons::SHIELD_CHECK, tr("Validate"))
-            } else {
-                kit::secondary(ui, Some(icons::SHIELD_CHECK), tr("Validate"))
-            };
+            let validate =
+                kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Validate"), small(icons::SHIELD_CHECK));
             if validate.on_hover_text(tr("Check the spec again, with the files it uses")).clicked() {
                 tab.validate();
                 tab.rebuild_docs();
@@ -1076,112 +1199,203 @@ fn toolbar(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, narrow: boo
     });
 }
 
+/// A collection to sync with, in the Sync popover: a check when chosen.
+fn sync_option(ui: &mut Ui, name: &str, detail: &str, on: bool) -> egui::Response {
+    let p = theme::pal(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+    widgets::a11y_tab(&resp, name, on);
+    if on || resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(7), p.hover);
+    }
+    let cy = rect.center().y;
+    let mut x = rect.left() + 8.0;
+    if on {
+        ui.painter().text(
+            pos2(x + 8.0, cy),
+            Align2::CENTER_CENTER,
+            icons::CHECK,
+            theme::icon_font(13.0),
+            p.accent_text,
+        );
+    }
+    x += 16.0 + 9.0;
+    ui.painter().text(pos2(x, cy), Align2::LEFT_CENTER, icons::STACK, theme::icon_font(13.0), p.text_faint);
+    x += 13.0 + 9.0;
+    let d = ui.painter().layout_no_wrap(detail.to_string(), FontId::proportional(11.0), p.text_faint);
+    let right = rect.right() - 8.0 - d.size().x;
+    ui.painter().galley(pos2(right, cy - d.size().y / 2.0), d, p.text_faint);
+    let g = kit::elide(ui, name, FontId::proportional(12.5), p.text, right - 9.0 - x);
+    ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
+    resp
+}
+
+/// One of the two sync actions: a tile, a title and what it does.
+fn sync_action(ui: &mut Ui, icon: &str, primary: bool, title: &str, hint: &str) -> egui::Response {
+    let p = theme::pal(ui);
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 9)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (t, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+            let (fill, fg) = if primary { (p.accent_soft, p.accent_text) } else { (p.subtle, p.text_muted) };
+            ui.painter().rect_filled(t, CornerRadius::same(7), fill);
+            ui.painter().text(t.center(), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), fg);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new(title).font(theme::medium(13.0)).color(p.text));
+                ui.add(egui::Label::new(RichText::new(hint).size(12.0).color(p.text_muted)).wrap());
+            });
+        });
+    });
+    let rect = inner.response.rect;
+    let resp = ui.interact(rect, ui.make_persistent_id(("sync-action", title)), Sense::click());
+    widgets::a11y_button(&resp, title);
+    let hovered = resp.hovered();
+    ui.painter().set(
+        bg,
+        egui::Shape::rect_filled(rect, CornerRadius::same(8), if hovered { p.well } else { Color32::TRANSPARENT }),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(8),
+        Stroke::new(1.0, if hovered { p.border_strong } else { p.border }),
+        StrokeKind::Inside,
+    );
+    resp
+}
+
 /// The Sync popover: choose a collection, then update it from the spec (or
 /// the spec from it).
 fn sync_menu(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab) {
     let p = theme::pal(ui);
-    ui.label(kit::section_title(tr("Sync with a collection")));
-    ui.label(kit::hint(ui, tr("Matching operations get the spec's URL, parameters and description; new ones are added. Scripts, examples and auth you added are kept.")));
-    ui.add_space(8.0);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.label(RichText::new(tr("Sync with a collection")).font(theme::semibold(13.0)).color(p.text));
+    ui.add_space(2.0);
+    ui.add(
+        egui::Label::new(kit::hint(
+            ui,
+            tr("Operations match by method and path. Your scripts, auth and examples are kept."),
+        ))
+        .wrap(),
+    );
+    ui.add_space(10.0);
     if app.ws.data.collections.is_empty() {
         ui.label(RichText::new(tr("No collections yet: generate one from the spec first.")).color(p.text_muted));
         return;
     }
+    ui.label(kit::eyebrow(ui, tr("Collection")));
+    ui.add_space(4.0);
+    let forks: Vec<&str> = app.ws.forks.iter().map(|f| f.fork.as_str()).collect();
     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
         for c in &app.ws.data.collections {
             let on = tab.target.as_deref() == Some(c.id.as_str());
-            let text = kit::with_icon(if on { icons::CHECK_CIRCLE } else { icons::STACK }, &c.name);
-            if ui.selectable_label(on, text).clicked() {
+            let detail = if forks.contains(&c.id.as_str()) {
+                tr("fork").to_string()
+            } else {
+                trf("{} requests", &[&c.request_count()])
+            };
+            if sync_option(ui, &c.name, &detail, on).clicked() {
                 tab.target = Some(c.id.clone());
             }
         }
     });
-    ui.add_space(8.0);
+    ui.add_space(10.0);
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.border));
+    ui.add_space(11.0);
     let Some(target) = tab.target.clone() else {
         ui.label(kit::hint(ui, tr("Choose the collection to sync with.")));
         return;
     };
-    ui.horizontal(|ui| {
-        if kit::secondary(ui, Some(icons::ARROW_DOWN), tr("Spec → collection"))
-            .on_hover_text(tr("Update the collection from this spec"))
-            .clicked()
-        {
-            match tab.import() {
-                Ok(spec) => {
-                    if let Some(c) = app.ws.data.collection_mut(&target) {
-                        let report = sync_collection(c, &spec);
-                        app.ws.mark_collection(&target);
-                        tab.last_sync = Some(report);
-                    }
-                    ui.close();
-                }
-                Err(e) => app.toast(e, true),
-            }
-        }
-        if tab.kind == SpecKind::OpenApi
-            && kit::secondary(ui, Some(icons::ARROW_UP), tr("Collection → spec"))
-                .on_hover_text(tr("Replace this spec with one generated from the collection"))
-                .clicked()
-            && let Some(c) = app.ws.data.collection(&target)
-        {
-            let v = ternarywire_convert::openapi::export(c);
-            let is_json = tab.path.extension().map(|e| e == "json").unwrap_or(false);
-            tab.text = if is_json {
-                serde_json::to_string_pretty(&v).unwrap_or_default()
-            } else {
-                serde_yaml_ng::to_string(&v).unwrap_or_default()
-            };
-            tab.last_edit = Some(Instant::now() - Duration::from_secs(1));
-            tab.last_sync = Some(tr("Spec regenerated from the collection (not saved yet)").into());
-            ui.close();
-        }
-    });
+    ui.spacing_mut().item_spacing.y = 6.0;
+    if sync_action(ui, icons::ARROW_RIGHT, true, tr("Spec → collection"), tr("Update the collection from this spec"))
+        .clicked()
+    {
+        tab.sync_into(app, &target);
+        ui.close();
+    }
+    if tab.kind == SpecKind::OpenApi
+        && sync_action(
+            ui,
+            icons::ARROW_LEFT,
+            false,
+            tr("Collection → spec"),
+            tr("Replace this spec with one generated from the collection (not saved until you press Save)"),
+        )
+        .clicked()
+        && let Some(c) = app.ws.data.collection(&target)
+    {
+        let v = ternarywire_convert::openapi::export(c);
+        let is_json = tab.path.extension().map(|e| e == "json").unwrap_or(false);
+        tab.text = if is_json {
+            serde_json::to_string_pretty(&v).unwrap_or_default()
+        } else {
+            serde_yaml_ng::to_string(&v).unwrap_or_default()
+        };
+        tab.last_edit = Some(Instant::now() - Duration::from_secs(1));
+        tab.last_sync = Some(tr("Spec regenerated from the collection (not saved yet)").into());
+        tab.last_sync_with = Some(target.clone());
+        ui.close();
+    }
 }
 
-/// The result of the last sync, with a close button. Returns true when
-/// closed.
-fn sync_note(ui: &mut Ui, text: &str) -> bool {
+/// The result of the last sync: a 36 px info bar under the toolbar with
+/// "Open collection" and a close button. Returns true when closed.
+fn sync_note(app: &mut TernaryWireApp, ui: &mut Ui, tab: &SpecTab, report: &str) -> bool {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
+    let with =
+        tab.last_sync_with.as_ref().and_then(|id| app.ws.data.collection(id)).map(|c| (c.id.clone(), c.name.clone()));
+    let full = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(Rect::from_min_size(full.min, vec2(full.width(), 36.0)), 0.0, p.info_soft);
     let mut close = false;
-    egui::Frame::new()
-        .fill(theme::soft(p.info, if dark { 0.12 } else { 0.07 }))
-        .stroke(Stroke::new(1.0, theme::soft(p.info, 0.25)))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin { left: 12, right: 4, top: 4, bottom: 4 })
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::INFO).font(theme::icon_font(15.0)).color(p.info));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    close = kit::icon_button_ex(ui, icons::X, tr("Close"), false, 24.0).clicked();
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.add(egui::Label::new(RichText::new(text).color(p.text)).truncate());
-                    });
-                });
+    let mut open = None;
+    kit::bar(ui, 36.0, true, |ui| {
+        ui.add_space(4.0);
+        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(14.0)).color(p.info));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            close = kit::icon_button_sm(ui, icons::X, tr("Dismiss")).clicked();
+            if let Some((id, _)) = &with
+                && kit::ghost(ui, None, tr("Open collection")).clicked()
+            {
+                open = Some(id.clone());
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let text = TextFormat::simple(FontId::proportional(12.5), p.text);
+                let mut job = LayoutJob::default();
+                match &with {
+                    Some((_, name)) if report != tr("Spec regenerated from the collection (not saved yet)") => {
+                        let s = tr("Synced with {}: {}");
+                        let mut parts = s.splitn(3, "{}");
+                        job.append(parts.next().unwrap_or(""), 0.0, text.clone());
+                        job.append(name, 0.0, TextFormat::simple(theme::medium(12.5), p.text));
+                        job.append(parts.next().unwrap_or(""), 0.0, text.clone());
+                        job.append(report, 0.0, text.clone());
+                        job.append(parts.next().unwrap_or(""), 0.0, text);
+                    }
+                    _ => job.append(report, 0.0, text),
+                }
+                job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
+                ui.add(egui::Label::new(job).truncate()).on_hover_text(report);
             });
         });
-    ui.add_space(8.0);
+    });
+    if let Some(id) = open {
+        app.open_container(id, None);
+    }
     close
 }
 
-/// The editor in a card that fills the space left.
+/// The editor: frameless with its line-number gutter, filling `rect`.
 fn editor(ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
     let p = theme::pal(ui);
-    let focused = tab.editor_id.is_some_and(|id| ui.ctx().memory(|m| m.has_focus(id)));
-    let stroke = if focused { Stroke::new(1.0, p.accent) } else { Stroke::new(1.0, p.border) };
-    ui.painter().rect(rect, CornerRadius::same(8), p.surface, Stroke::NONE, StrokeKind::Inside);
+    ui.painter().rect_filled(rect, 0.0, p.surface);
     let lang = tab.kind.lang(&tab.path);
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink(1.0)).layout(Layout::top_down(Align::Min)));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
     egui::ScrollArea::vertical().id_salt("spec-editor").auto_shrink([false; 2]).show(&mut child, |ui| {
-        // The card is the editor's frame.
-        let v = ui.visuals_mut();
-        for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-            w.bg_stroke = Stroke::NONE;
-        }
-        // No focus outline (the card shows focus); the color stays for
-        // selected text.
-        v.selection.stroke.width = 0.0;
-        v.text_edit_bg_color = Some(p.surface);
         let editor_id = ui.make_persistent_id(("spec", &tab.path));
         let mut scroll_to = None;
         if tab.editor_id == Some(editor_id)
@@ -1191,9 +1405,9 @@ fn editor(ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
             ui.memory_mut(|m| m.request_focus(editor_id));
             scroll_to = Some(line);
         }
-        let row_h = ui.fonts_mut(|f| f.row_height(&FontId::monospace(mono_size(ui))));
-        let rows = ((rect.height() - 12.0) / row_h).floor().max(4.0) as usize;
-        let r = widgets::code_editor(ui, ("spec", &tab.path), &mut tab.text, lang, None, rows, false);
+        let rows = crate::env_tab::editor_rows(ui, rect.height());
+        let r = widgets::code_editor_gutter(ui, ("spec", &tab.path), &mut tab.text, lang, None, rows, false, None);
+        widgets::a11y_name(&r, &tab.title());
         if r.changed() {
             tab.last_edit = Some(Instant::now());
         }
@@ -1202,30 +1416,30 @@ fn editor(ui: &mut Ui, tab: &mut SpecTab, rect: Rect) {
         }
         tab.editor_id = Some(editor_id);
         if let Some(line) = scroll_to {
-            let y = line_offset(ui, &tab.text, line, r.rect.width() - 20.0);
+            let y = line_offset(ui, &tab.text, line, r.rect.width() - 60.0);
             let target =
-                Rect::from_min_size(Pos2::new(r.rect.left(), r.rect.top() + 4.0 + y), vec2(r.rect.width(), row_h));
+                Rect::from_min_size(Pos2::new(r.rect.left(), r.rect.top() + 8.0 + y), vec2(r.rect.width(), 20.0));
             ui.scroll_to_rect(target, Some(Align::Center));
         }
     });
-    ui.painter().rect_stroke(rect, CornerRadius::same(8), stroke, StrokeKind::Inside);
-    if focused {
-        crate::kit::focus_ring(ui, rect, 8);
-    }
 }
 
 fn mono_size(ui: &Ui) -> f32 {
     ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5)
 }
 
-/// Height of the text above `line` (1-based) when wrapped at `width`.
+/// Height of the text above `line` (1-based) when wrapped at `width`, in
+/// the editor's 20 px lines.
 fn line_offset(ui: &Ui, text: &str, line: usize, width: f32) -> f32 {
     if line <= 1 {
         return 0.0;
     }
     let before: String = text.split('\n').take(line - 1).collect::<Vec<_>>().join("\n");
-    let g = ui.painter().layout(before, FontId::monospace(mono_size(ui)), Color32::PLACEHOLDER, width.max(50.0));
-    g.size().y
+    let mut job = LayoutJob::simple(before, FontId::monospace(mono_size(ui)), Color32::PLACEHOLDER, width.max(50.0));
+    for s in &mut job.sections {
+        s.format.line_height = Some(20.0);
+    }
+    ui.painter().layout_job(job).size().y
 }
 
 /// Puts the editor's cursor on `line` and selects the line from `col`.
@@ -1277,31 +1491,41 @@ fn problem_rows(tab: &SpecTab) -> Vec<Problem> {
     rows
 }
 
+/// The problems under the editor (the prototype's `.w-prob`): a 32 px
+/// header with the counts and the cursor position, then a 28 px row per
+/// problem (click: jump to it).
 fn problems_panel(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, rows: &[Problem]) {
     let p = theme::pal(ui);
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, p.well);
+    ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.horizontal(|ui| {
-        ui.set_height(26.0);
+    ui.add_space(1.0);
+    let errors = rows.iter().filter(|r| r.level == Level::Error).count();
+    let warnings = rows.len() - errors;
+    kit::bar(ui, 32.0, false, |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let errors = rows.iter().filter(|r| r.level == Level::Error).count();
-        let warnings = rows.len() - errors;
-        if rows.is_empty() {
-            ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(15.0)).color(p.ok));
-            let text =
-                if tab.kind == SpecKind::Other { tr("Not an API spec: nothing to check") } else { tr("No problems") };
-            ui.label(RichText::new(text).color(p.text_muted));
+        let (icon, color, title) = if errors > 0 {
+            (icons::X_CIRCLE, p.err, tr("Problems"))
+        } else if warnings > 0 {
+            (icons::WARNING, p.warn, tr("Problems"))
+        } else if tab.kind == SpecKind::Other {
+            (icons::CHECK_CIRCLE, p.ok, tr("Not an API spec: nothing to check"))
         } else {
-            ui.label(kit::section_title(tr("Problems")));
-            if errors > 0 {
-                kit::pill(ui, &format!("{} {errors}", icons::X_CIRCLE), p.err);
-            }
-            if warnings > 0 {
-                kit::pill(ui, &format!("{} {warnings}", icons::WARNING), p.warn);
-            }
+            (icons::CHECK_CIRCLE, p.ok, tr("No problems"))
+        };
+        ui.label(RichText::new(icon).font(theme::icon_font(13.0)).color(color));
+        ui.label(RichText::new(title).font(theme::medium(12.0)).color(p.text));
+        if !rows.is_empty() {
+            let text = if errors == 1 { tr("1 error").to_string() } else { trf("{} errors", &[&errors]) };
+            kit::tone_pill(ui, &text, if errors > 0 { Tone::Err } else { Tone::Neutral });
+            let text = if warnings == 1 { tr("1 warning").to_string() } else { trf("{} warnings", &[&warnings]) };
+            kit::tone_pill(ui, &text, if warnings > 0 { Tone::Warn } else { Tone::Neutral });
         }
         if let Some(m) = tab.smithy_model.as_ref().filter(|m| tab.kind == SpecKind::Smithy && !m.files.is_empty()) {
             let why = tr("Smithy files of this folder that use this file or are used by it form one model.");
-            kit::pill(ui, &format!("{} {}", icons::FILES, trf("Model of {} files", &[&(m.files.len() + 1)])), p.info)
+            let text = trf("Model of {} files", &[&(m.files.len() + 1)]);
+            kit::pill_ex(ui, &text, Tone::Info, kit::PillOpts { icon: Some(icons::FILES), ..Default::default() })
                 .on_hover_text(format!("{why}\n\n{}", m.files.join("\n")));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1310,16 +1534,15 @@ fn problems_panel(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, rows
             if let Some((l, c)) = cursor_position(ui.ctx(), tab.editor_id, &tab.text) {
                 status = format!("{} · {status}", trf("Ln {}, Col {}", &[&l, &c]));
             }
-            let g = ui.painter().layout_no_wrap(status.clone(), FontId::proportional(12.0), p.text_faint);
+            let g = ui.painter().layout_no_wrap(status.clone(), theme::mono(11.0), p.text_faint);
             if ui.available_width() > g.size().x + 16.0 {
-                ui.label(RichText::new(status).small().color(p.text_faint));
+                ui.label(RichText::new(status).font(theme::mono(11.0)).color(p.text_faint));
             }
         });
     });
     if rows.is_empty() {
         return;
     }
-    ui.add_space(2.0);
     let mut open_file: Option<(PathBuf, Option<(usize, usize)>)> = None;
     egui::ScrollArea::vertical().id_salt("spec-problems").auto_shrink([false; 2]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -1355,6 +1578,7 @@ fn problems_panel(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut SpecTab, rows
     }
 }
 
+/// A problem: its icon, its position as an outlined pill, the message.
 fn problem_line(ui: &mut Ui, prob: &Problem) -> egui::Response {
     let p = theme::pal(ui);
     let w = ui.available_width();
@@ -1364,16 +1588,18 @@ fn problem_line(ui: &mut Ui, prob: &Problem) -> egui::Response {
     widgets::a11y_button(&resp, &prob.message);
     let painter = ui.painter();
     if clickable && resp.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(RADIUS), p.hover);
+        painter.rect_filled(rect, 0.0, p.hover);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
     let (icon, color) = match prob.level {
         Level::Error => (icons::X_CIRCLE, p.err),
         Level::Warning => (icons::WARNING, p.warn),
     };
-    let mut x = rect.left() + 8.0;
-    painter.text(Pos2::new(x + 7.0, rect.center().y), Align2::CENTER_CENTER, icon, theme::icon_font(14.5), color);
-    x += 24.0;
+    let cy = rect.center().y + 0.5;
+    let mut x = rect.left() + 12.0;
+    painter.text(Pos2::new(x, cy), Align2::LEFT_CENTER, icon, theme::icon_font(13.0), color);
+    x += 13.0 + 8.0;
     let loc = match (&prob.file, prob.line, prob.col) {
         (Some(f), Some(l), Some(c)) => Some(format!("{f}:{l}:{c}")),
         (Some(f), Some(l), None) => Some(format!("{f}:{l}")),
@@ -1383,19 +1609,19 @@ fn problem_line(ui: &mut Ui, prob: &Problem) -> egui::Response {
         (None, None, _) => None,
     };
     if let Some(loc) = loc {
-        let g = painter.layout_no_wrap(loc, theme::mono(11.5), p.text_muted);
-        let pill = Rect::from_min_size(Pos2::new(x, rect.center().y - 9.5), vec2(g.size().x + 12.0, 19.0));
-        painter.rect(pill, CornerRadius::same(5), p.subtle, Stroke::new(1.0, p.border), StrokeKind::Inside);
+        let g = painter.layout_no_wrap(loc, theme::mono(11.0), p.text_muted);
+        let pill = Rect::from_min_size(Pos2::new(x, cy - 10.0), vec2(g.size().x + 14.0, 20.0));
+        painter.rect_stroke(pill, CornerRadius::same(10), Stroke::new(1.0, p.border), StrokeKind::Inside);
         painter.galley(pill.center() - g.size() / 2.0, g, p.text_muted);
-        x = pill.right() + 10.0;
+        x = pill.right() + 8.0;
     }
     let mut job = LayoutJob::single_section(
         prob.message.replace('\n', " "),
-        TextFormat::simple(FontId::proportional(13.0), p.text),
+        TextFormat::simple(FontId::proportional(12.0), p.text),
     );
-    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - 8.0 - x).max(10.0));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - 12.0 - x).max(10.0));
     let g = painter.layout_job(job);
-    painter.galley(Pos2::new(x, rect.center().y - g.size().y / 2.0), g, p.text);
+    painter.galley(Pos2::new(x, cy - g.size().y / 2.0), g, p.text);
     resp
 }
 
@@ -1403,7 +1629,9 @@ fn problem_line(ui: &mut Ui, prob: &Problem) -> egui::Response {
 // Documentation preview
 // ---------------------------------------------------------------------------
 
-fn docs_view(ui: &mut Ui, tab: &mut SpecTab) {
+/// The docs preview: on the well beside the editor (split), or centered,
+/// at most 780 wide, on the canvas (`page`).
+fn docs_view(ui: &mut Ui, tab: &mut SpecTab, page: bool) {
     let p = theme::pal(ui);
     if !tab.convertible() {
         kit::empty_state(
@@ -1433,25 +1661,27 @@ fn docs_view(ui: &mut Ui, tab: &mut SpecTab) {
             let e = e.clone();
             ui.add_space((ui.available_height() * 0.2).clamp(12.0, 120.0));
             ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 26.0, theme::soft(p.err, 0.12));
+                ui.painter().rect(rect, CornerRadius::same(14), p.err_soft, Stroke::NONE, StrokeKind::Inside);
                 ui.painter().text(
                     rect.center(),
                     Align2::CENTER_CENTER,
                     icons::WARNING_CIRCLE,
-                    theme::icon_font(25.0),
+                    theme::icon_font(24.0),
                     p.err,
                 );
-                ui.add_space(8.0);
-                ui.label(RichText::new(tr("The preview could not be built")).font(theme::semibold(15.0)).color(p.text));
-                ui.add_space(2.0);
+                ui.add_space(14.0);
+                ui.label(RichText::new(tr("The preview could not be built")).font(theme::semibold(14.0)).color(p.text));
+                ui.add_space(4.0);
                 ui.label(
                     RichText::new(tr("Fix the problems under the editor; the preview follows as you type."))
+                        .size(12.5)
                         .color(p.text_muted),
                 );
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 egui::Frame::new()
-                    .fill(theme::soft(p.err, 0.07))
+                    .fill(p.err_soft)
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
@@ -1461,12 +1691,28 @@ fn docs_view(ui: &mut Ui, tab: &mut SpecTab) {
         }
         Some(Ok(c)) => {
             let c = Arc::new(c.clone());
+            let version = tab.docs_version.clone();
             let mut target = tab.docs_target.take();
             egui::ScrollArea::vertical().id_salt(("spec-docs-scroll", &tab.path)).auto_shrink([false; 2]).show(
                 ui,
                 |ui| {
-                    ui.set_width(ui.available_width());
-                    docs_page(ui, &c, &mut target);
+                    // 22 26 40 padding; on the page, at most 780 wide and centered.
+                    let avail = ui.available_width();
+                    let outer = if page { avail.min(780.0) } else { avail };
+                    let side = ((avail - outer) / 2.0).max(0.0);
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.add_space(side);
+                        ui.allocate_ui_with_layout(vec2(outer, 0.0), Layout::top_down(Align::Min), |ui| {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin { left: 26, right: 26, top: 22, bottom: 40 })
+                                .show(ui, |ui| {
+                                    ui.set_width((outer - 52.0).max(120.0));
+                                    ui.spacing_mut().item_spacing.y = 14.0;
+                                    docs_page(ui, &c, version.as_deref(), &mut target);
+                                });
+                        });
+                    });
                 },
             );
             tab.docs_target = target;
@@ -1474,67 +1720,88 @@ fn docs_view(ui: &mut Ui, tab: &mut SpecTab) {
     }
 }
 
-fn docs_page(ui: &mut Ui, c: &Collection, target: &mut Option<Id>) {
+fn docs_page(ui: &mut Ui, c: &Collection, version: Option<&str>, target: &mut Option<Id>) {
     let p = theme::pal(ui);
-    ui.add_space(4.0);
-    ui.label(RichText::new(&c.name).font(theme::semibold(21.0)).color(p.text));
-    if !c.description.trim().is_empty() {
-        ui.add_space(4.0);
-        ui.label(RichText::new(c.description.trim()).color(p.text_muted));
-    }
-    ui.add_space(10.0);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.label(RichText::new(&c.name).font(theme::semibold(21.0)).color(p.text));
+        if !c.description.trim().is_empty() {
+            ui.add(egui::Label::new(RichText::new(c.description.trim()).color(p.text_muted)).wrap());
+        }
+    });
     let requests = c.requests();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         let ops =
             if requests.len() == 1 { tr("1 operation").to_string() } else { trf("{} operations", &[&requests.len()]) };
-        kit::pill(ui, &format!("{} {ops}", icons::LIST), p.info);
+        kit::pill_ex(ui, &ops, Tone::Info, kit::PillOpts { icon: Some(icons::LIST), ..Default::default() });
+        if let Some(v) = version {
+            kit::pill_ex(ui, &format!("v{v}"), Tone::Neutral, kit::PillOpts { outline: true, ..Default::default() });
+        }
         for v in c.variables.iter().filter(|v| !v.key.is_empty() && !v.is_secret()) {
-            egui::Frame::new()
-                .fill(p.subtle)
-                .corner_radius(CornerRadius::same(RADIUS))
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    let mut job = LayoutJob::default();
-                    job.append(&v.key, 0.0, TextFormat::simple(theme::medium(12.0), p.text_muted));
-                    job.append("  ", 0.0, TextFormat::simple(theme::medium(12.0), p.text_muted));
-                    job.append(&v.value, 0.0, TextFormat::simple(theme::mono(12.0), p.text));
-                    ui.label(job);
-                });
+            variable_chip(ui, &v.key, &v.value);
         }
     });
-
     if requests.is_empty() {
-        ui.add_space(24.0);
         ui.label(RichText::new(tr("The spec has no operations yet.")).color(p.text_muted));
         return;
     }
     // Index of the endpoints; a click scrolls to one.
-    ui.add_space(18.0);
-    docs_label(ui, tr("Endpoints"));
-    egui::Frame::new()
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(4))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for r in &requests {
-                if index_row(ui, r).clicked() {
-                    *target = Some(r.id.clone());
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        ui.label(kit::eyebrow(ui, tr("Endpoints")));
+        egui::Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (i, r) in requests.iter().enumerate() {
+                    if index_row(ui, r, i == 0, i + 1 == requests.len()).clicked() {
+                        *target = Some(r.id.clone());
+                    }
                 }
-            }
-        });
-    ui.add_space(8.0);
+            });
+    });
     docs_items(ui, &c.items, 0, target);
-    ui.add_space(24.0);
 }
 
-/// A small, muted label above a docs block.
-fn docs_label(ui: &mut Ui, text: &str) {
+/// `name value` in a small rounded chip (a variable of the spec).
+fn variable_chip(ui: &mut Ui, key: &str, value: &str) {
     let p = theme::pal(ui);
-    ui.label(RichText::new(text).font(theme::medium(12.0)).color(p.text_muted));
-    ui.add_space(4.0);
+    let mut job = LayoutJob::default();
+    job.append(key, 0.0, TextFormat::simple(FontId::proportional(11.5), p.text_faint));
+    job.append(value, 6.0, TextFormat::simple(theme::mono(11.5), p.text_muted));
+    let g = ui.painter().layout_job(job);
+    let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 22.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(11), p.surface, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+    resp.on_hover_text(format!("{{{{{key}}}}} = {value}"));
+}
+
+/// A small upper-case label above a docs block.
+fn docs_label(ui: &mut Ui, text: &str) {
+    ui.label(kit::eyebrow(ui, text));
+}
+
+/// A read-only block of code (a request body or an example) in a well.
+fn code_block(ui: &mut Ui, text: &str) {
+    let dark = ui.visuals().dark_mode;
+    let start = text.trim_start();
+    let is_json = (start.starts_with('{') || start.starts_with('['))
+        && (text.len() > 64 * 1024 || serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok());
+    let lang = if is_json { Lang::Json } else { Lang::Text };
+    let key = crate::highlight::HlKey { text, lang, dark, search: "", vars: None, font_size: 12.5, wrap: true };
+    let mut job = crate::highlight::cached(ui.ctx(), key);
+    for s in &mut job.sections {
+        s.format.line_height = Some(20.0);
+    }
+    kit::well(ui).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        job.wrap.max_width = ui.available_width();
+        ui.add(egui::Label::new(job).wrap());
+    });
 }
 
 /// `GET /books/:id` without the `{{baseUrl}}`, scheme, host and query.
@@ -1567,31 +1834,42 @@ fn method_of(r: &RequestItem) -> String {
     r.http().map(|h| h.method.to_uppercase()).unwrap_or_else(|| r.request.badge())
 }
 
-fn index_row(ui: &mut Ui, r: &RequestItem) -> egui::Response {
+/// A row of the Endpoints index (32 high): method, path, name.
+fn index_row(ui: &mut Ui, r: &RequestItem, first: bool, last: bool) -> egui::Response {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click());
     widgets::a11y_button(&resp, &r.name);
     let painter = ui.painter();
     if resp.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(RADIUS), p.hover);
+        let radius = CornerRadius {
+            nw: if first { 8 } else { 0 },
+            ne: if first { 8 } else { 0 },
+            sw: if last { 8 } else { 0 },
+            se: if last { 8 } else { 0 },
+        };
+        painter.rect_filled(rect, radius, p.well);
+    }
+    if !first {
+        painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
     }
     let method = method_of(r);
     let mc = theme::method_color(&method, dark);
-    painter.text(Pos2::new(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, &method, theme::medium(11.5), mc);
-    let x = rect.left() + 70.0;
+    let cy = rect.center().y;
+    painter.text(Pos2::new(rect.left() + 12.0, cy), Align2::LEFT_CENTER, &method, theme::semibold(11.0), mc);
+    let x = rect.left() + 12.0 + 64.0 + 8.0;
     let name = painter.layout_no_wrap(r.name.clone(), FontId::proportional(12.5), p.text_muted);
     let name_w = name.size().x.min(w * 0.4);
     let mut job = path_job(&docs_path(r.request.url()), &p, 12.0);
-    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - 16.0 - name_w - x).max(30.0));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - 12.0 - 8.0 - name_w - x).max(30.0));
     let g = painter.layout_job(job);
-    painter.galley(Pos2::new(x, rect.center().y - g.size().y / 2.0), g, p.text);
+    painter.galley(Pos2::new(x, cy - g.size().y / 2.0), g, p.text);
     let mut job =
         LayoutJob::single_section(r.name.clone(), TextFormat::simple(FontId::proportional(12.5), p.text_muted));
     job.wrap = egui::text::TextWrapping::truncate_at_width(name_w);
     let g = painter.layout_job(job);
-    painter.galley(Pos2::new(rect.right() - 8.0 - g.size().x, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+    painter.galley(Pos2::new(rect.right() - 12.0 - g.size().x, cy - g.size().y / 2.0), g, p.text_muted);
     resp
 }
 
@@ -1601,20 +1879,23 @@ fn docs_items(ui: &mut Ui, items: &[Item], depth: usize, target: &mut Option<Id>
         match item {
             Item::Request(r) => request_card(ui, r, target),
             Item::Folder(f) => {
-                ui.add_space(if depth == 0 { 18.0 } else { 10.0 });
-                ui.horizontal(|ui| {
-                    let size = if depth == 0 { 17.0 } else { 15.0 };
-                    ui.label(RichText::new(&f.name).font(theme::semibold(size)).color(p.text));
-                    let n = count_requests(&f.items);
-                    kit::pill(ui, &n.to_string(), p.text_muted);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let size = if depth == 0 { 17.0 } else { 15.0 };
+                        ui.label(RichText::new(&f.name).font(theme::semibold(size)).color(p.text));
+                        kit::tone_pill(ui, &count_requests(&f.items).to_string(), Tone::Neutral);
+                    });
+                    if !f.description.trim().is_empty() {
+                        ui.add(egui::Label::new(RichText::new(f.description.trim()).color(p.text_muted)).wrap());
+                    }
                 });
-                if !f.description.trim().is_empty() {
-                    ui.label(RichText::new(f.description.trim()).color(p.text_muted));
-                }
+                // A hairline, 14 above the operations of the folder.
                 let r = ui.available_rect_before_wrap();
-                ui.add_space(6.0);
-                ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, p.border));
-                ui.add_space(8.0);
+                ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.border));
+                ui.add_space(15.0);
                 docs_items(ui, &f.items, depth + 1, target);
             }
         }
@@ -1639,22 +1920,22 @@ struct Param<'a> {
     description: &'a str,
 }
 
+/// An operation: name, method and path, parameters, body and responses.
 fn request_card(ui: &mut Ui, r: &RequestItem, target: &mut Option<Id>) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
     let resp = kit::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(&r.name).font(theme::semibold(14.5)).color(p.text));
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        ui.label(RichText::new(&r.name).font(theme::semibold(14.0)).color(p.text));
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let method = method_of(r);
             kit::pill(ui, &method, theme::method_color(&method, dark));
-            ui.label(path_job(&docs_path(r.request.url()), &p, 13.0));
+            ui.label(path_job(&docs_path(r.request.url()), &p, 12.5));
         });
         if !r.description.trim().is_empty() {
-            ui.add_space(6.0);
-            ui.label(RichText::new(r.description.trim()).color(p.text_muted));
+            ui.add(egui::Label::new(RichText::new(r.description.trim()).color(p.text_muted)).wrap());
         }
         if let Some(h) = r.http() {
             let mut params: Vec<Param> = Vec::new();
@@ -1668,112 +1949,130 @@ fn request_card(ui: &mut Ui, r: &RequestItem, target: &mut Option<Id>) {
                 params.push(Param { name: &kv.key, place: "header", value: &kv.value, description: &kv.description });
             }
             if !params.is_empty() {
-                ui.add_space(12.0);
-                docs_label(ui, tr("Parameters"));
-                param_table(ui, &params);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    docs_label(ui, tr("Parameters"));
+                    param_table(ui, &params);
+                });
             }
             let body = h.body.raw.trim();
             if !body.is_empty() && h.body.mode != ternarywire_core::model::BodyMode::None {
-                ui.add_space(12.0);
-                docs_label(ui, tr("Request body"));
-                let pretty = serde_json::from_str::<serde_json::Value>(body)
-                    .ok()
-                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                    .unwrap_or_else(|| body.to_string());
-                crate::proto_common::text_view(ui, ("docs-body", &r.id), &crate::dialogs::ellipsize(&pretty, 4000));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    docs_label(ui, tr("Request body"));
+                    let pretty = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                        .unwrap_or_else(|| body.to_string());
+                    code_block(ui, &crate::dialogs::ellipsize(&pretty, 4000));
+                });
             }
         }
         if !r.examples.is_empty() {
-            ui.add_space(12.0);
-            docs_label(ui, tr("Responses"));
-            for e in &r.examples {
-                ui.horizontal(|ui| {
-                    kit::status_pill(ui, e.status, "");
-                    let name = if e.name.trim().is_empty() { e.status_text.as_str() } else { e.name.as_str() };
-                    ui.label(RichText::new(name).color(p.text));
-                });
-                if !e.body.trim().is_empty() {
-                    egui::CollapsingHeader::new(RichText::new(tr("Example")).small().color(p.text_muted))
-                        .id_salt(("docs-example", &r.id, &e.id))
-                        .show(ui, |ui| {
-                            crate::proto_common::text_view(
-                                ui,
-                                ("docs-example-body", &e.id),
-                                &crate::dialogs::ellipsize(&e.body, 4000),
-                            );
-                        });
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                docs_label(ui, tr("Responses"));
+                for e in &r.examples {
+                    let open_id = ui.make_persistent_id(("docs-example", &r.id, &e.id));
+                    let mut open: bool = ui.data(|d| d.get_temp(open_id).unwrap_or(false));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        kit::tone_pill(ui, &e.status.to_string(), theme::status_tone(e.status));
+                        let name = if e.name.trim().is_empty() { e.status_text.as_str() } else { e.name.as_str() };
+                        ui.label(RichText::new(name).color(p.text));
+                        if !e.body.trim().is_empty() {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let icon = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+                                if kit::ghost(ui, Some(icon), tr("Example")).clicked() {
+                                    open = !open;
+                                    ui.data_mut(|d| d.insert_temp(open_id, open));
+                                }
+                            });
+                        }
+                    });
+                    if open && !e.body.trim().is_empty() {
+                        code_block(ui, &crate::dialogs::ellipsize(&e.body, 4000));
+                    }
                 }
-                ui.add_space(2.0);
-            }
+            });
         }
     });
     if target.as_deref() == Some(r.id.as_str()) {
         ui.scroll_to_rect(resp.response.rect, Some(Align::TOP));
         *target = None;
     }
-    ui.add_space(10.0);
 }
 
-/// Parameters as a bordered table: name, where, example, and the
-/// description under them.
+/// Parameters as a table (the prototype's `.tbl`): name with its
+/// description under it, where it goes, an example.
 fn param_table(ui: &mut Ui, rows: &[Param]) {
     let p = theme::pal(ui);
-    egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(CornerRadius::same(6)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let w = ui.available_width();
-        let name_w = (w * 0.36).clamp(90.0, 220.0);
-        let place_w = 70.0;
-        let head = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover()).0;
-        let painter = ui.painter();
-        painter.rect_filled(head, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, p.chrome);
-        for (x, text) in [(10.0, tr("Name")), (10.0 + name_w, tr("In")), (10.0 + name_w + place_w, tr("Example"))] {
-            painter.text(
-                Pos2::new(head.left() + x, head.center().y),
-                Align2::LEFT_CENTER,
-                text,
-                theme::medium(11.5),
-                p.text_muted,
-            );
-        }
-        for row in rows {
-            let r = ui.available_rect_before_wrap();
-            ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, p.border));
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(10.0);
-                ui.allocate_ui_with_layout(vec2(name_w - 10.0, 20.0), Layout::left_to_right(Align::Center), |ui| {
-                    ui.set_min_width(name_w - 10.0);
-                    ui.add(egui::Label::new(RichText::new(row.name).font(theme::mono(12.5)).color(p.text)).truncate());
-                    if row.place == "path" {
-                        ui.label(RichText::new(" *").color(p.err)).on_hover_text(tr("Required"));
-                    }
-                });
-                ui.allocate_ui_with_layout(vec2(place_w, 20.0), Layout::left_to_right(Align::Center), |ui| {
-                    ui.set_min_width(place_w);
-                    ui.label(RichText::new(row.place).small().color(p.text_muted));
-                });
-                ui.allocate_ui_with_layout(
-                    vec2(ui.available_width() - 10.0, 20.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(row.value).font(theme::mono(12.0)).color(p.text_muted))
-                                .truncate(),
-                        );
-                    },
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let w = ui.available_width();
+            let name_w = w * 0.34;
+            let place_w = w * 0.18;
+            let head = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover()).0;
+            let painter = ui.painter();
+            painter.rect_filled(head, CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 }, p.well);
+            painter.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
+            for (x, text) in [(12.0, tr("Name")), (12.0 + name_w, tr("In")), (12.0 + name_w + place_w, tr("Example"))] {
+                painter.text(
+                    Pos2::new(head.left() + x, head.center().y),
+                    Align2::LEFT_CENTER,
+                    text,
+                    theme::medium(11.5),
+                    p.text_muted,
                 );
-            });
-            if !row.description.trim().is_empty() {
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    ui.add(egui::Label::new(RichText::new(row.description.trim()).color(p.text_muted).small()).wrap());
-                });
             }
-            ui.add_space(6.0);
-        }
-    });
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    let r = ui.available_rect_before_wrap();
+                    ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.border));
+                }
+                ui.add_space(8.0);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(12.0);
+                    ui.allocate_ui_with_layout(vec2(name_w - 12.0, 0.0), Layout::top_down(Align::Min), |ui| {
+                        ui.set_width(name_w - 24.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        let mut job = LayoutJob::default();
+                        job.append(row.name, 0.0, TextFormat::simple(theme::mono(12.5), p.text));
+                        if row.place == "path" {
+                            job.append(" *", 0.0, TextFormat::simple(FontId::proportional(12.5), p.err));
+                        }
+                        let name = ui.add(egui::Label::new(job).truncate());
+                        if row.place == "path" {
+                            name.on_hover_text(tr("Required"));
+                        }
+                        if !row.description.trim().is_empty() {
+                            ui.add(egui::Label::new(kit::hint(ui, row.description.trim())).wrap());
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.allocate_ui_with_layout(vec2(place_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                        ui.set_width(place_w - 12.0);
+                        ui.label(RichText::new(row.place).size(12.5).color(p.text_muted));
+                    });
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width() - 12.0, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(row.value).font(theme::mono(12.5)).color(p.text)).wrap(),
+                            );
+                        },
+                    );
+                });
+                ui.add_space(8.0);
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,14 +2117,104 @@ enum ListAct {
     Delete(PathBuf),
 }
 
-/// Sidebar list of spec files.
+/// Where a "Delete…" asks for confirmation (the path to delete).
+fn delete_id() -> egui::Id {
+    egui::Id::unique("spec-list-delete")
+}
+
+/// The confirmation of a "Delete…" (from the sidebar or the tab), drawn
+/// once per frame by whichever of them runs first.
+fn delete_confirm(app: &mut TernaryWireApp, ui: &mut Ui) {
+    let Some(path) = ui.data(|d| d.get_temp::<PathBuf>(delete_id())) else { return };
+    let frame = ui.ctx().cumulative_frame_nr();
+    let drawn_id = delete_id().with("frame");
+    if ui.data(|d| d.get_temp::<u64>(drawn_id)) == Some(frame) {
+        return;
+    }
+    ui.data_mut(|d| d.insert_temp(drawn_id, frame));
+    let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    match crate::flow_tab::confirm_dialog(
+        ui.ctx(),
+        "spec-delete-confirm",
+        &trf("Delete “{}”?", &[&name]),
+        tr("The file is removed from specs/. This cannot be undone."),
+        tr("Delete file"),
+    ) {
+        Some(true) => {
+            ui.data_mut(|d| d.remove_temp::<PathBuf>(delete_id()));
+            if let Some(i) = app.tabs.iter().position(|t| matches!(&t.kind, TabKind::Spec(s) if s.path == path)) {
+                app.close_tab(i);
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                app.toast(e.to_string(), true);
+            }
+        }
+        Some(false) => {
+            ui.data_mut(|d| d.remove_temp::<PathBuf>(delete_id()));
+        }
+        None => {}
+    }
+}
+
+/// Creates `specs/openapi.yaml` (or `specs/model.smithy` when `smithy`),
+/// numbered when it exists (`openapi-2.yaml`, …), from a template and opens
+/// it. The "New OpenAPI spec" / "New Smithy model" of the APIs sidebar and
+/// the title bar's New menu.
+pub fn new_spec(app: &mut TernaryWireApp, smithy: bool) {
+    let dir = app.ws.root().join("specs");
+    let (stem, ext, text) =
+        if smithy { ("model", "smithy", SMITHY_TEMPLATE) } else { ("openapi", "yaml", OPENAPI_TEMPLATE) };
+    let mut path = dir.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.{ext}"));
+        n += 1;
+    }
+    match ternarywire_core::storage::write_atomic(&path, text.as_bytes()) {
+        Ok(()) => open_spec(app, path),
+        Err(e) => app.toast(e.to_string(), true),
+    }
+}
+
+/// Opens a spec file picked in a file dialog.
+pub fn open_spec_file(app: &mut TernaryWireApp) {
+    if let Some(p) = rfd::FileDialog::new()
+        .add_filter(tr("API specs"), &["yaml", "yml", "json", "proto", "graphql", "graphqls", "smithy"])
+        .pick_file()
+    {
+        open_spec(app, p);
+    }
+}
+
+/// The entries of the "New spec" menu: New OpenAPI spec, New Smithy model,
+/// Open file….
+pub fn new_spec_menu(app: &mut TernaryWireApp, ui: &mut Ui) {
+    if kit::menu_item(ui, Some(icons::FILE_CODE), tr("New OpenAPI spec"), None).clicked() {
+        new_spec(app, false);
+    }
+    if kit::menu_item(ui, Some(icons::TREE_STRUCTURE), tr("New Smithy model"), None).clicked() {
+        new_spec(app, true);
+    }
+    kit::menu_sep(ui);
+    if kit::menu_item(ui, Some(icons::FOLDER_OPEN), tr("Open file…"), None).clicked() {
+        open_spec_file(app);
+    }
+}
+
+/// The actions of the APIs sidebar header (the shell draws the header and
+/// calls this in a right-to-left layout): "+" with the New spec menu.
+pub fn sidebar_actions(app: &mut TernaryWireApp, ui: &mut Ui) {
+    let add = kit::icon_button_sm(ui, icons::PLUS, tr("New spec"));
+    egui::Popup::menu(&add).width(210.0).show(|ui| new_spec_menu(app, ui));
+}
+
+/// The APIs sidebar under its header: filter, the files of `specs/` and a
+/// hint at the bottom.
 pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
-    let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
     let root = app.ws.root().to_path_buf();
     let specs = list_specs(&root);
     let mut act: Option<ListAct> = None;
-    let delete_id = egui::Id::unique("spec-list-delete");
     if specs.is_empty() {
         kit::empty_state(
             ui,
@@ -1849,30 +2238,11 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
     } else {
         let filter_id = egui::Id::unique("spec-list-filter");
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let w = ui.available_width() - 32.0;
-            let r = kit::search_field(ui, "spec-filter", &mut filter, tr("Filter specs"), w);
-            widgets::a11y_name(&r, tr("Filter specs"));
-            let add = kit::icon_button(ui, icons::PLUS, tr("New spec"));
-            egui::Popup::menu(&add).show(|ui| {
-                if ui.button(kit::with_icon(icons::BRACKETS_CURLY, tr("New OpenAPI spec"))).clicked() {
-                    act = Some(ListAct::New(SpecKind::OpenApi));
-                    ui.close();
-                }
-                if ui.button(kit::with_icon(icons::TREE_STRUCTURE, tr("New Smithy model"))).clicked() {
-                    act = Some(ListAct::New(SpecKind::Smithy));
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button(kit::with_icon(icons::FOLDER_OPEN, tr("Open file…"))).clicked() {
-                    act = Some(ListAct::OpenFile);
-                    ui.close();
-                }
-            });
-        });
+        ui.add_space(4.0);
+        let r = kit::search_field_sm(ui, "spec-filter", &mut filter, tr("Filter specs"), ui.available_width());
+        widgets::a11y_name(&r, tr("Filter specs"));
+        ui.add_space(8.0);
         ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
-        ui.add_space(6.0);
         let active = app.tabs.get(app.active).and_then(|t| match &t.kind {
             TabKind::Spec(s) => Some(s.path.clone()),
             _ => None,
@@ -1886,124 +2256,85 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
             })
             .collect();
         let q = filter.trim().to_lowercase();
-        egui::ScrollArea::vertical().id_salt("spec-list").auto_shrink([false; 2]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            let mut shown = 0;
-            for path in &specs {
-                let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                if !q.is_empty() && !name.to_lowercase().contains(&q) {
-                    continue;
-                }
-                shown += 1;
-                let kind = list_kind(ui, path);
-                let out = crate::flow_tab::sidebar_row(
-                    ui,
-                    path,
-                    &crate::flow_tab::SidebarRow {
-                        icon: kind.icon(),
-                        icon_color: kind.color(dark),
-                        busy: false,
-                        name: &name,
-                        detail: kind.short(),
-                        active: active.as_ref() == Some(path),
-                        dirty: dirty.contains(path),
-                        action: None,
-                    },
-                );
-                let row = out.row.on_hover_text(path.display().to_string());
-                if row.clicked() {
-                    act = Some(ListAct::Open(path.clone()));
-                }
-                let mut menu = |ui: &mut Ui| {
-                    if ui.button(kit::with_icon(icons::FOLDER_OPEN, tr("Open"))).clicked() {
+        let foot = tr("Specs live in specs/ inside the workspace and can be committed to Git.");
+        let list_h =
+            (ui.available_height() - crate::sidebar::sidebar_footer_height(ui, foot, ui.available_width())).max(40.0);
+        egui::ScrollArea::vertical().id_salt("spec-list").max_height(list_h).auto_shrink([false, false]).show(
+            ui,
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut shown = 0;
+                for path in &specs {
+                    let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                    if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    shown += 1;
+                    let kind = list_kind(ui, path);
+                    let popup_id = egui::Id::unique(("spec-row-menu", path));
+                    let menu_open = crate::env_tab::row_menu_open(ui, popup_id);
+                    let row = kit::TreeRow {
+                        pad_left: 4.0,
+                        icon: Some(kind.file_icon()),
+                        icon_color: Some(kind.color(dark)),
+                        label: &name,
+                        meta: Some(kind.short()),
+                        unsaved: dirty.contains(path),
+                        selected: active.as_ref() == Some(path),
+                        actions_width: 22.0,
+                        force_actions: menu_open,
+                        ..Default::default()
+                    };
+                    let (row, actions) = kit::tree_row(ui, row, |_| {});
+                    widgets::a11y_button(&row, &name);
+                    let row = row.on_hover_text(path.display().to_string());
+                    if row.clicked() {
                         act = Some(ListAct::Open(path.clone()));
-                        ui.close();
                     }
-                    if ui.button(kit::with_icon(icons::COPY, tr("Copy file path"))).clicked() {
-                        ui.ctx().copy_text(path.display().to_string());
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button(RichText::new(kit::with_icon(icons::TRASH, tr("Delete…"))).color(p.err)).clicked() {
-                        act = Some(ListAct::Delete(path.clone()));
-                        ui.close();
-                    }
-                };
-                if let Some((more, popup_id)) = &out.more {
-                    egui::Popup::menu(more).id(*popup_id).show(&mut menu);
+                    let mut menu = |ui: &mut Ui| {
+                        if kit::menu_item(ui, Some(icons::FOLDER_OPEN), tr("Open"), None).clicked() {
+                            act = Some(ListAct::Open(path.clone()));
+                        }
+                        if kit::menu_item(ui, Some(icons::COPY), tr("Copy file path"), None).clicked() {
+                            ui.ctx().copy_text(path.display().to_string());
+                        }
+                        kit::menu_sep(ui);
+                        let delete = kit::MenuItem {
+                            icon: Some(icons::TRASH),
+                            label: tr("Delete…"),
+                            danger: true,
+                            ..Default::default()
+                        };
+                        if kit::menu_item_ex(ui, delete).clicked() {
+                            act = Some(ListAct::Delete(path.clone()));
+                        }
+                    };
+                    crate::env_tab::row_menu(ui, actions, popup_id, 200.0, &mut menu);
+                    row.context_menu(&mut menu);
                 }
-                row.context_menu(&mut menu);
-            }
-            if shown == 0 {
+                if shown == 0 {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(kit::hint(ui, &trf("No specs match “{}”", &[&filter.trim()])));
+                    });
+                }
                 ui.add_space(8.0);
-                ui.label(RichText::new(trf("No specs match “{}”", &[&filter.trim()])).color(p.text_muted));
-            }
-            ui.add_space(12.0);
-            ui.label(kit::hint(ui, tr("Specs live in specs/ inside the workspace and can be committed to Git.")));
-        });
-    }
-
-    if let Some(path) = ui.data(|d| d.get_temp::<PathBuf>(delete_id)) {
-        let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-        match crate::flow_tab::confirm_dialog(
-            ui.ctx(),
-            "spec-delete-confirm",
-            &trf("Delete “{}”?", &[&name]),
-            tr("The file is removed from specs/. This cannot be undone."),
-            tr("Delete file"),
-        ) {
-            Some(true) => {
-                ui.data_mut(|d| {
-                    d.remove_temp::<PathBuf>(delete_id);
-                });
-                if let Some(i) = app.tabs.iter().position(|t| matches!(&t.kind, TabKind::Spec(s) if s.path == path)) {
-                    app.close_tab(i);
-                }
-                if let Err(e) = std::fs::remove_file(&path) {
-                    app.toast(e.to_string(), true);
-                }
-            }
-            Some(false) => {
-                ui.data_mut(|d| {
-                    d.remove_temp::<PathBuf>(delete_id);
-                });
-            }
-            None => {}
-        }
+            },
+        );
+        crate::sidebar::sidebar_footer(ui, foot);
     }
 
     match act {
         None => {}
-        Some(ListAct::New(kind)) => {
-            let dir = root.join("specs");
-            let (stem, ext, text) = match kind {
-                SpecKind::Smithy => ("model", "smithy", SMITHY_TEMPLATE),
-                _ => ("openapi", "yaml", OPENAPI_TEMPLATE),
-            };
-            let mut path = dir.join(format!("{stem}.{ext}"));
-            let mut n = 2;
-            while path.exists() {
-                path = dir.join(format!("{stem}-{n}.{ext}"));
-                n += 1;
-            }
-            match ternarywire_core::storage::write_atomic(&path, text.as_bytes()) {
-                Ok(()) => open_spec(app, path),
-                Err(e) => app.toast(e.to_string(), true),
-            }
-        }
-        Some(ListAct::OpenFile) => {
-            if let Some(p) = rfd::FileDialog::new()
-                .add_filter(tr("API specs"), &["yaml", "yml", "json", "proto", "graphql", "graphqls", "smithy"])
-                .pick_file()
-            {
-                open_spec(app, p);
-            }
-        }
+        Some(ListAct::New(kind)) => new_spec(app, kind == SpecKind::Smithy),
+        Some(ListAct::OpenFile) => open_spec_file(app),
         Some(ListAct::Open(path)) => open_spec(app, path),
         Some(ListAct::Delete(path)) => {
-            ui.data_mut(|d| d.insert_temp(delete_id, path));
+            ui.data_mut(|d| d.insert_temp(delete_id(), path));
         }
     }
+    delete_confirm(app, ui);
 }
 
 pub fn open_spec(app: &mut TernaryWireApp, path: PathBuf) {

@@ -5,10 +5,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, Ui, pos2, vec2};
+use std::sync::Arc;
+
+use egui::{Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, Ui, pos2, vec2};
 use ternarywire_core::response::{BodyLanguage, HttpResponse};
 
 use crate::i18n::{tr, trf};
+use crate::kit::Tone;
 use crate::{icons, kit, theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,27 +319,36 @@ pub struct CompareActs {
     pub maximize: bool,
 }
 
+/// The Compare tab under the response tabs, edge to edge: a 40 px toolbar
+/// (what to compare, the line counts, keep the baseline), then 12 px from
+/// the sides a summary strip and the diff table.
 pub fn show(ui: &mut Ui, state: &mut CompareState, prev: &Snapshot, cur: &Snapshot, pinned: bool) -> CompareActs {
+    // The rows sit edge to edge, whatever spacing the caller uses.
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        show_compare(ui, state, prev, cur, pinned)
+    })
+    .inner
+}
+
+fn show_compare(ui: &mut Ui, state: &mut CompareState, prev: &Snapshot, cur: &Snapshot, pinned: bool) -> CompareActs {
     let p = theme::pal(ui);
     let mut acts = CompareActs::default();
     if state.computed.as_ref().map(|c| c.mode) != Some(state.mode) {
         state.computed = Some(compute(state.mode, &prev.resp, &cur.resp));
     }
-    let Some(c) = state.computed.as_mut() else { return acts };
+    let Some((added, removed)) = state.computed.as_ref().map(|c| (c.added, c.removed)) else { return acts };
     let headers_changed = changed_headers(&prev.resp, &cur.resp);
-    // Toolbar: what to compare, line counts, keep the baseline.
-    ui.horizontal(|ui| {
-        ui.set_height(30.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
+    kit::toolbar(ui, |ui| {
         let headers_label = if headers_changed > 0 {
             format!("{} · {headers_changed}", tr("Headers"))
         } else {
             tr("Headers").to_string()
         };
-        kit::segmented(ui, &mut state.mode, &[(Mode::Body, tr("Body")), (Mode::Headers, &headers_label)]);
-        if c.added + c.removed > 0 {
-            ui.label(RichText::new(format!("+{}", c.added)).font(theme::medium(12.5)).color(p.ok));
-            ui.label(RichText::new(format!("−{}", c.removed)).font(theme::medium(12.5)).color(p.err));
+        kit::segmented_sm(ui, &mut state.mode, &[(Mode::Body, tr("Body")), (Mode::Headers, &headers_label)]);
+        if added + removed > 0 {
+            ui.label(RichText::new(format!("+{added}")).font(theme::semibold(11.0)).color(p.ok));
+            ui.label(RichText::new(format!("−{removed}")).font(theme::semibold(11.0)).color(p.err));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let tip = if pinned {
@@ -344,59 +356,82 @@ pub fn show(ui: &mut Ui, state: &mut CompareState, prev: &Snapshot, cur: &Snapsh
             } else {
                 tr("Keep this baseline: compare new responses with it instead of the previous one")
             };
-            if kit::icon_toggle(ui, icons::PUSH_PIN, tip, pinned).clicked() {
+            if kit::icon_button_ex(ui, icons::PUSH_PIN, tip, pinned, 22.0).clicked() {
                 acts.toggle_pin = true;
             }
         });
     });
-    ui.add_space(6.0);
-    summary(ui, prev, cur, headers_changed);
-    ui.add_space(8.0);
-    if let Some(note) = &c.note {
-        crate::request_tab::banner(ui, icons::INFO, p.info, note);
-        return acts;
+    if state.computed.as_ref().map(|c| c.mode) != Some(state.mode) {
+        state.computed = Some(compute(state.mode, &prev.resp, &cur.resp));
     }
-    if c.added + c.removed == 0 {
-        let text = match c.mode {
-            Mode::Body => tr("The body is the same as in the previous response."),
-            Mode::Headers => tr("The headers are the same as in the previous response."),
-        };
-        crate::request_tab::banner(ui, icons::CHECK_CIRCLE, p.ok, text);
-        return acts;
-    }
-    if c.truncated {
-        crate::request_tab::banner(
-            ui,
-            icons::INFO,
-            p.info,
-            &trf("Only the first {} lines of each body are compared.", &[&MAX_LINES]),
-        );
-        ui.add_space(6.0);
-    }
-    if c.replaced {
-        crate::request_tab::banner(
-            ui,
-            icons::INFO,
-            p.info,
-            tr("The bodies differ in too many lines to line them up; showing the whole body as replaced."),
-        );
-        ui.add_space(6.0);
-    }
-    if ui.available_height() < 90.0 {
-        // No room for the lines: say how many changed and offer room.
-        let text = trf("{} lines changed. Maximize the response to see them.", &[&(c.added + c.removed)]);
-        crate::request_tab::banner_with(ui, icons::GIT_DIFF, p.info, &text, |ui| {
-            if kit::ghost(ui, Some(icons::ARROWS_OUT), tr("Maximize response")).clicked() {
-                acts.maximize = true;
-            }
-        });
-        return acts;
-    }
-    diff_list(ui, c, prev, cur);
+    let Some(c) = state.computed.as_mut() else { return acts };
+    let full = ui.available_rect_before_wrap();
+    let rect = egui::Rect::from_min_max(
+        pos2(full.left() + kit::size::PAD, full.top()),
+        pos2(full.right() - kit::size::PAD, (full.bottom() - 16.0).max(full.top() + 40.0)),
+    );
+    // The caller's cursor moves past the whole area below.
+    let mut body = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+    (|ui: &mut Ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        summary(ui, prev, cur, headers_changed);
+        if let Some(note) = &c.note {
+            kit::banner(ui, Tone::Info, icons::INFO, note);
+            return;
+        }
+        if c.added + c.removed == 0 {
+            let text = match c.mode {
+                Mode::Body => tr("The body is the same as in the previous response."),
+                Mode::Headers => tr("The headers are the same as in the previous response."),
+            };
+            kit::banner(ui, Tone::Ok, icons::CHECK_CIRCLE, text);
+            return;
+        }
+        if c.truncated {
+            kit::banner(
+                ui,
+                Tone::Info,
+                icons::INFO,
+                &trf("Only the first {} lines of each body are compared.", &[&MAX_LINES]),
+            );
+        }
+        if c.replaced {
+            kit::banner(
+                ui,
+                Tone::Info,
+                icons::INFO,
+                tr("The bodies differ in too many lines to line them up; showing the whole body as replaced."),
+            );
+        }
+        if ui.available_height() < 90.0 {
+            // No room for the lines: say how many changed and offer room.
+            let text = trf("{} lines changed. Maximize the response to see them.", &[&(c.added + c.removed)]);
+            kit::banner_with(ui, Tone::Info, icons::GIT_DIFF, &text, |ui| {
+                if kit::ghost(ui, Some(icons::ARROWS_OUT), tr("Maximize response")).clicked() {
+                    acts.maximize = true;
+                }
+            });
+            return;
+        }
+        diff_list(ui, c, prev, cur);
+    })(&mut body);
+    ui.advance_cursor_after_rect(full);
     acts
 }
 
-/// Status, time, size and headers of both responses side by side.
+/// `118 ms → 142 ms` as `118 → 142 ms` when both have the same unit.
+fn span(a: String, b: String) -> String {
+    match (a.rsplit_once(' '), b.rsplit_once(' ')) {
+        (Some((n, unit)), Some((_, u))) if unit == u => format!("{n} → {b}"),
+        _ => format!("{a} → {b}"),
+    }
+}
+
+/// One item of the summary: label, value, and a colored delta.
+type SummaryItem<'a> = (&'a str, String, Option<(String, Color32)>);
+
+/// Status, time, size and headers of both responses: a bordered strip of
+/// `Label a → b` items (12 px) that wrap as whole items.
 fn summary(ui: &mut Ui, prev: &Snapshot, cur: &Snapshot, headers_changed: usize) {
     let p = theme::pal(ui);
     let (a, b) = (&prev.resp, &cur.resp);
@@ -414,182 +449,139 @@ fn summary(ui: &mut Ui, prev: &Snapshot, cur: &Snapshot, headers_changed: usize)
             p.warn
         }
     };
-    if ui.available_height() < 340.0 || ui.available_width() < 560.0 {
-        // Little room: one wrapped line, so the diff keeps its space.
-        let dark = ui.visuals().dark_mode;
-        let size = crate::request_tab::small_size(ui) + 0.5;
-        let mut job = egui::text::LayoutJob::default();
-        let mut add = |text: &str, color: Color32, strong: bool| {
-            let font = if strong { theme::medium(size) } else { egui::FontId::proportional(size) };
-            job.append(text, 0.0, egui::TextFormat::simple(font, color));
-        };
-        let status = |r: &HttpResponse| format!("{} {}", r.status, r.status_text).trim().to_string();
-        add(&status(a), theme::status_color(a.status, dark), true);
-        add(" → ", p.text_faint, false);
-        add(&status(b), theme::status_color(b.status, dark), true);
-        add("  ·  ", p.text_faint, false);
-        add(&format!("{} → ", fmt_ms(a.timings.total_ms)), p.text_muted, false);
-        add(&fmt_ms(b.timings.total_ms), p.text, true);
-        if delta_ms.abs() >= 0.5 {
-            let sign = if delta_ms < 0.0 { "−" } else { "+" };
-            add(&format!(" ({sign}{})", fmt_ms(delta_ms.abs())), tone(delta_ms, a.timings.total_ms), false);
-        }
-        add("  ·  ", p.text_faint, false);
-        add(&format!("{} → ", bytes(a.total_size())), p.text_muted, false);
-        add(&bytes(b.total_size()), p.text, true);
-        if delta_size != 0 {
-            let sign = if delta_size < 0 { "−" } else { "+" };
-            let text = format!(" ({sign}{})", bytes(delta_size.unsigned_abs()));
-            add(&text, tone(delta_size as f64, a.total_size() as f64), false);
-        }
-        add("  ·  ", p.text_faint, false);
-        add(&format!("{} ", tr("Headers")), p.text_muted, false);
-        if headers_changed == 0 {
-            add(tr("same"), p.text_muted, false);
-        } else if headers_changed == 1 {
-            add(tr("1 changed"), p.warn, true);
-        } else {
-            add(&trf("{} changed", &[&headers_changed]), p.warn, true);
-        }
-        job.wrap.max_width = ui.available_width();
-        ui.add(egui::Label::new(job).wrap());
-        return;
-    }
-    let label = |ui: &mut Ui, text: &str| {
-        ui.label(RichText::new(text).small().color(p.text_muted));
+    let sign = |neg: bool| if neg { "−" } else { "+" };
+    // One item: (label, value, optional colored delta).
+    let mut items: Vec<SummaryItem> = vec![
+        (tr("Status"), format!("{} → {}", a.status, b.status), None),
+        (
+            tr("Time"),
+            span(fmt_ms(a.timings.total_ms), fmt_ms(b.timings.total_ms)),
+            (delta_ms.abs() >= 0.5).then(|| {
+                (format!("{}{}", sign(delta_ms < 0.0), fmt_ms(delta_ms.abs())), tone(delta_ms, a.timings.total_ms))
+            }),
+        ),
+        (
+            tr("Size"),
+            span(bytes(a.total_size()), bytes(b.total_size())),
+            (delta_size != 0).then(|| {
+                (
+                    format!("{}{}", sign(delta_size < 0), bytes(delta_size.unsigned_abs())),
+                    tone(delta_size as f64, a.total_size() as f64),
+                )
+            }),
+        ),
+    ];
+    let headers = match headers_changed {
+        0 => tr("same").to_string(),
+        1 => tr("1 changed").to_string(),
+        n => trf("{} changed", &[&n]),
     };
-    let arrow = |ui: &mut Ui| {
-        ui.label(RichText::new(icons::ARROW_RIGHT).font(theme::icon_font(12.0)).color(p.text_faint));
-    };
-    let group = |ui: &mut Ui, i: usize| match i {
-        0 => {
-            label(ui, tr("Status"));
-            kit::status_pill(ui, a.status, &a.status_text);
-            arrow(ui);
-            kit::status_pill(ui, b.status, &b.status_text);
-        }
-        1 => {
-            label(ui, tr("Time"));
-            ui.label(RichText::new(fmt_ms(a.timings.total_ms)).color(p.text_muted));
-            arrow(ui);
-            ui.label(RichText::new(fmt_ms(b.timings.total_ms)).font(theme::medium(13.0)));
-            if delta_ms.abs() >= 0.5 {
-                let sign = if delta_ms < 0.0 { "−" } else { "+" };
-                ui.label(
-                    RichText::new(format!("{sign}{}", fmt_ms(delta_ms.abs())))
-                        .small()
-                        .color(tone(delta_ms, a.timings.total_ms)),
-                );
+    items.push((tr("Headers"), headers, None));
+    let font = FontId::proportional(12.0);
+    let galleys: Vec<Arc<egui::Galley>> = items
+        .iter()
+        .map(|(label, value, delta)| {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(label, 0.0, egui::TextFormat::simple(font.clone(), p.text_muted));
+            job.append(value, 4.0, egui::TextFormat::simple(font.clone(), p.text));
+            if let Some((d, c)) = delta {
+                job.append(d, 4.0, egui::TextFormat::simple(font.clone(), *c));
             }
-        }
-        2 => {
-            label(ui, tr("Size"));
-            ui.label(RichText::new(bytes(a.total_size())).color(p.text_muted));
-            arrow(ui);
-            ui.label(RichText::new(bytes(b.total_size())).font(theme::medium(13.0)));
-            if delta_size != 0 {
-                let sign = if delta_size < 0 { "−" } else { "+" };
-                ui.label(
-                    RichText::new(format!("{sign}{}", bytes(delta_size.unsigned_abs())))
-                        .small()
-                        .color(tone(delta_size as f64, a.total_size() as f64)),
-                );
-            }
-        }
-        _ => {
-            label(ui, tr("Headers"));
-            if headers_changed == 0 {
-                ui.label(RichText::new(tr("same")).color(p.text_muted));
-            } else {
-                let text = if headers_changed == 1 {
-                    tr("1 changed").to_string()
-                } else {
-                    trf("{} changed", &[&headers_changed])
-                };
-                ui.label(RichText::new(text).font(theme::medium(13.0)).color(p.warn));
-            }
-        }
-    };
-    kit::card(ui).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-        // The groups go in rows that fit, using their widths of the last
-        // frame (a group never breaks, which would push the panel wider).
-        let id = ui.make_persistent_id("compare-summary");
-        let widths: [f32; 4] = ui.data(|d| d.get_temp(id)).unwrap_or([220.0; 4]);
-        const SEP: f32 = 9.0 + 16.0;
-        let avail = ui.available_width();
-        let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
-        let mut used = 0.0;
-        for (i, w) in widths.iter().enumerate() {
-            let row = rows.last_mut().expect("a row");
-            let need = if row.is_empty() { *w } else { w + SEP };
-            if !row.is_empty() && used + need > avail {
-                rows.push(vec![i]);
-                used = *w;
-            } else {
-                row.push(i);
-                used += need;
-            }
-        }
-        let mut measured = widths;
-        for row in rows {
-            ui.horizontal(|ui| {
-                for (n, i) in row.into_iter().enumerate() {
-                    if n > 0 {
-                        kit::vdivider(ui, 18.0);
-                    }
-                    measured[i] = ui.horizontal(|ui| group(ui, i)).response.rect.width();
-                }
-            });
-        }
-        if measured.iter().zip(&widths).any(|(m, w)| (m - w).abs() > 0.5) {
-            ui.data_mut(|d| d.insert_temp(id, measured));
-            ui.ctx().request_discard("compare summary widths");
-        }
-    });
-}
-
-/// The diff lines with line numbers, colored by change, unchanged runs
-/// folded into a clickable row.
-fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
-    let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    let ops: Vec<Op> = c.edits.iter().map(|e| e.op).collect();
-    let rows = rows(&ops, &c.opened);
-    let mono_size = crate::request_tab::mono_size(ui) - 0.5;
-    let font = theme::mono(mono_size);
-    let char_w = ui.painter().layout_no_wrap("0".into(), font.clone(), p.text).size().x;
-    let digits = (c.old.len().max(c.new.len()).max(1) as f32).log10().floor() + 1.0;
-    let num_w = (digits * char_w + 12.0).max(28.0);
-    let gutter = num_w * 2.0 + 18.0;
-    let row_h = (mono_size * 1.45).round().max(17.0);
-    let content_w = gutter + c.widest as f32 * char_w + 24.0;
-    let time = |s: &Snapshot| s.at.format("%H:%M:%S").to_string();
+            ui.painter().layout_job(job)
+        })
+        .collect();
+    const GAP: f32 = 18.0;
     egui::Frame::new()
-        .fill(p.canvas)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let avail = ui.available_width();
+            // Lay the items out in rows that fit; an item never breaks.
+            let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+            let mut used = 0.0;
+            for (i, g) in galleys.iter().enumerate() {
+                let w = g.size().x;
+                let row = rows.last_mut().expect("a row");
+                if !row.is_empty() && used + GAP + w > avail {
+                    rows.push(vec![i]);
+                    used = w;
+                } else {
+                    used += if row.is_empty() { w } else { GAP + w };
+                    row.push(i);
+                }
+            }
+            let line_h = galleys.iter().map(|g| g.size().y).fold(0.0, f32::max);
+            for (n, row) in rows.into_iter().enumerate() {
+                if n > 0 {
+                    ui.add_space(GAP);
+                }
+                let (rect, _) = ui.allocate_exact_size(vec2(avail, line_h), Sense::hover());
+                let mut x = rect.left();
+                for i in row {
+                    let g = galleys[i].clone();
+                    let w = g.size().x;
+                    ui.painter().galley(pos2(x, rect.top()), g, p.text);
+                    x += w + GAP;
+                }
+            }
+        });
+}
+
+/// The diff as a table: a `well` header naming both sides, then 22 px rows
+/// (old and new line numbers, the sign, the line), removed lines on
+/// `err_soft`, added ones on `ok_soft`, unchanged runs folded into a row.
+fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
+    let p = theme::pal(ui);
+    let ops: Vec<Op> = c.edits.iter().map(|e| e.op).collect();
+    let rows = rows(&ops, &c.opened);
+    let font = theme::mono(12.0);
+    let char_w = ui.painter().layout_no_wrap("0".into(), font.clone(), p.text).size().x;
+    let digits = (c.old.len().max(c.new.len()).max(1) as f32).log10().floor() + 1.0;
+    let num_w = (digits * char_w + 8.0).max(34.0);
+    let gutter = num_w * 2.0 + 22.0;
+    let row_h = 22.0;
+    let head_h = 28.0;
+    let content_w = gutter + c.widest as f32 * char_w + 12.0;
+    let time = |s: &Snapshot| s.at.format("%H:%M:%S").to_string();
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
         .inner_margin(egui::Margin::same(1))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
             // Which side is which.
-            ui.horizontal(|ui| {
-                ui.set_height(26.0);
-                ui.add_space(10.0);
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new("−").font(theme::mono(12.0)).color(p.err));
-                ui.label(RichText::new(trf("Previous · {}", &[&time(prev)])).small().color(p.text_muted))
-                    .on_hover_text(RichText::new(&prev.resp.url).monospace());
-                ui.add_space(8.0);
-                ui.label(RichText::new("+").font(theme::mono(12.0)).color(p.ok));
-                ui.label(RichText::new(trf("Current · {}", &[&time(cur)])).small().color(p.text_muted))
-                    .on_hover_text(RichText::new(&cur.resp.url).monospace());
-            });
-            crate::dialogs::hairline(ui);
+            let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), head_h), Sense::hover());
+            let r = theme::RADIUS_CARD - 1;
+            ui.painter().rect_filled(head, CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, p.well);
+            ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
+            let small = FontId::proportional(11.5);
+            let left = ui.painter().layout_no_wrap(
+                format!("− {}", trf("Previous · {}", &[&time(prev)])),
+                small.clone(),
+                p.err,
+            );
+            let right = ui.painter().layout_no_wrap(format!("+ {}", trf("Current · {}", &[&time(cur)])), small, p.ok);
+            let lr =
+                egui::Rect::from_min_size(pos2(head.left() + 10.0, head.center().y - left.size().y / 2.0), left.size());
+            let rr = egui::Rect::from_min_size(
+                pos2(head.right() - 10.0 - right.size().x, head.center().y - right.size().y / 2.0),
+                right.size(),
+            );
+            ui.painter().galley(lr.min, left, p.err);
+            ui.painter().galley(rr.min, right, p.ok);
+            ui.interact(lr, ui.scope_id().with("cmp-prev"), Sense::hover())
+                .on_hover_text(RichText::new(&prev.resp.url).monospace());
+            ui.interact(rr, ui.scope_id().with("cmp-cur"), Sense::hover())
+                .on_hover_text(RichText::new(&cur.resp.url).monospace());
             let mut open = None;
+            let max_h = (ui.available_height() - 1.0).max(row_h);
             kit::show_rows(
-                egui::ScrollArea::both().id_salt("resp-compare").auto_shrink([false; 2]),
+                egui::ScrollArea::both().id_salt("resp-compare").auto_shrink([false, true]).max_height(max_h),
                 ui,
                 row_h,
                 rows.len(),
@@ -598,22 +590,31 @@ fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
                     for row in &rows[range] {
                         let (rect, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
                         let painter = ui.painter();
+                        let cy = rect.center().y;
                         match *row {
                             Row::Fold { start, len } => {
                                 let hovered = resp.hovered();
-                                painter.rect_filled(rect, 0.0, if hovered { p.hover } else { p.chrome });
+                                if hovered {
+                                    painter.rect_filled(rect, 0.0, p.hover);
+                                }
                                 let text = if len == 1 {
                                     tr("1 unchanged line").to_string()
                                 } else {
                                     trf("{} unchanged lines", &[&len])
                                 };
-                                let label = format!("{}  {text}", icons::DOTS_THREE);
                                 painter.text(
-                                    pos2(rect.left() + gutter, rect.center().y),
+                                    pos2(rect.left() + num_w * 2.0 + 11.0, cy),
+                                    Align2::CENTER_CENTER,
+                                    icons::DOTS_THREE,
+                                    theme::icon_font(12.0),
+                                    p.text_faint,
+                                );
+                                painter.text(
+                                    pos2(rect.left() + gutter, cy),
                                     Align2::LEFT_CENTER,
-                                    label,
-                                    egui::FontId::proportional(mono_size),
-                                    if hovered { p.text } else { p.text_muted },
+                                    &text,
+                                    FontId::proportional(12.0),
+                                    if hovered { p.text_muted } else { p.text_faint },
                                 );
                                 let resp = resp.on_hover_text(tr("Show these lines"));
                                 crate::widgets::a11y_button(&resp, &text);
@@ -627,15 +628,11 @@ fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
                             Row::Line(i) => {
                                 let e = c.edits[i];
                                 let (sign, color, bg, text) = match e.op {
-                                    Op::Same => (" ", p.text_muted, Color32::TRANSPARENT, &c.new[e.b]),
-                                    Op::Removed => {
-                                        ("−", p.err, theme::soft(p.err, if dark { 0.16 } else { 0.09 }), &c.old[e.a])
-                                    }
-                                    Op::Added => {
-                                        ("+", p.ok, theme::soft(p.ok, if dark { 0.16 } else { 0.09 }), &c.new[e.b])
-                                    }
+                                    Op::Same => (" ", p.text_faint, None, &c.new[e.b]),
+                                    Op::Removed => ("-", p.err, Some(p.err_soft), &c.old[e.a]),
+                                    Op::Added => ("+", p.ok, Some(p.ok_soft), &c.new[e.b]),
                                 };
-                                if bg != Color32::TRANSPARENT {
+                                if let Some(bg) = bg {
                                     painter.rect_filled(rect, 0.0, bg);
                                 }
                                 let num = |n: usize| (n + 1).to_string();
@@ -644,24 +641,22 @@ fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
                                     Op::Removed => (num(e.a), String::new()),
                                     Op::Added => (String::new(), num(e.b)),
                                 };
-                                let cy = rect.center().y;
-                                let gutter_font = theme::mono(mono_size - 1.0);
                                 painter.text(
                                     pos2(rect.left() + num_w, cy),
                                     Align2::RIGHT_CENTER,
                                     old_no,
-                                    gutter_font.clone(),
+                                    font.clone(),
                                     p.text_faint,
                                 );
                                 painter.text(
                                     pos2(rect.left() + num_w * 2.0, cy),
                                     Align2::RIGHT_CENTER,
                                     new_no,
-                                    gutter_font,
+                                    font.clone(),
                                     p.text_faint,
                                 );
                                 painter.text(
-                                    pos2(rect.left() + num_w * 2.0 + 10.0, cy),
+                                    pos2(rect.left() + num_w * 2.0 + 11.0, cy),
                                     Align2::CENTER_CENTER,
                                     sign,
                                     font.clone(),
@@ -672,18 +667,16 @@ fn diff_list(ui: &mut Ui, c: &mut Computed, prev: &Snapshot, cur: &Snapshot) {
                                 } else {
                                     text.as_str().into()
                                 };
-                                let text_color = if e.op == Op::Same { p.text_muted } else { p.text };
                                 painter.text(
                                     pos2(rect.left() + gutter, cy),
                                     Align2::LEFT_CENTER,
                                     shown,
                                     font.clone(),
-                                    text_color,
+                                    p.text,
                                 );
                                 resp.context_menu(|ui| {
-                                    if ui.button(kit::with_icon(icons::COPY, tr("Copy line"))).clicked() {
+                                    if kit::menu_item(ui, Some(icons::COPY), tr("Copy line"), None).clicked() {
                                         ui.ctx().copy_text(text.clone());
-                                        ui.close();
                                     }
                                 });
                             }
@@ -794,6 +787,13 @@ mod tests {
         assert_eq!(r2.len(), r.len() + 3);
         // Short runs stay.
         assert_eq!(rows(&[Same, Added, Same], &HashSet::new()).len(), 3);
+    }
+
+    #[test]
+    fn summary_spans_share_units() {
+        assert_eq!(span("118 ms".into(), "142 ms".into()), "118 → 142 ms");
+        assert_eq!(span("902 B".into(), "1.2 KB".into()), "902 B → 1.2 KB");
+        assert_eq!(span("5".into(), "6".into()), "5 → 6");
     }
 
     #[test]

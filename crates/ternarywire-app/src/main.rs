@@ -17,6 +17,8 @@ mod highlight;
 mod i18n;
 mod icons;
 mod kit;
+#[cfg(target_os = "macos")]
+mod macos_titlebar;
 mod mcp_tab;
 #[cfg(target_os = "macos")]
 mod menu;
@@ -28,6 +30,7 @@ mod response_actions;
 mod response_diff;
 mod runner_tab;
 mod scroll_lock;
+mod server_ui;
 mod sidebar;
 mod sio_tab;
 mod snippets;
@@ -62,15 +65,21 @@ fn main() -> eframe::Result {
     let settings = AppSettings::load(&settings_path);
     let open_path = std::env::args().nth(1).map(std::path::PathBuf::from);
 
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("TernaryWire")
+        // Linux: matches ternarywire.desktop, so the window gets its icon and
+        // groups with the launcher.
+        .with_app_id("ternarywire")
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([760.0, 480.0])
+        .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default());
+    // macOS: the title bar is the app's own (44 px, app.rs `top_bar`); the
+    // window content runs under the transparent native title bar, whose
+    // traffic lights sit over the bar's left end.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("TernaryWire")
-            // Linux: matches ternarywire.desktop, so the window gets its icon and
-            // groups with the launcher.
-            .with_app_id("ternarywire")
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([760.0, 480.0])
-            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default()),
+        viewport,
         persist_window: true,
         // The app installs its own menu bar (menu.rs) instead of winit's,
         // which names the app after its executable ("ternarywire-app").

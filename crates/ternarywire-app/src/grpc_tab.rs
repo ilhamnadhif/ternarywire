@@ -15,6 +15,7 @@ use ternarywire_grpc::{Direction, GrpcCall, GrpcEvent, GrpcSchema, MethodKind, T
 use crate::app::{Msg, TernaryWireApp};
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
+use crate::kit::Tab;
 use crate::proto_common::{self as pc, Conn, Dir, ItemSlot, Log, ScriptState, header, resolver};
 use crate::widgets::{self, KvOptions};
 use crate::{icons, kit, theme};
@@ -72,12 +73,16 @@ pub struct GrpcTab {
     /// Set by UI automation.
     pub auto_load: bool,
     pub auto_invoke: bool,
+    /// Automation: `picker`, `select:<row>`, `section:<name>`, `resp:<name>`.
+    pub auto: Option<String>,
     pub scripts: ScriptState,
     /// Messages of the current call for the post-response script, and the
     /// script inputs not run yet (a tab in the background is not drawn):
     /// the latest [`pc::MAX_INBOX`] messages of a long stream.
     received: VecDeque<serde_json::Value>,
     queue: VecDeque<Queued>,
+    /// Input and output message types of the current call (log titles).
+    msg_types: (String, String),
 }
 
 impl GrpcTab {
@@ -102,9 +107,11 @@ impl GrpcTab {
             method_search: String::new(),
             auto_load: false,
             auto_invoke: false,
+            auto: None,
             scripts: ScriptState::default(),
             received: VecDeque::new(),
             queue: VecDeque::new(),
+            msg_types: Default::default(),
         }
     }
 
@@ -154,7 +161,8 @@ impl GrpcTab {
                             self.queue.remove(i);
                         }
                     }
-                    self.log.push(dir, "", json, at_ms);
+                    let title = if dir == Dir::In { &self.msg_types.1 } else { &self.msg_types.0 };
+                    self.log.push(dir, title.clone(), json, at_ms);
                 }
                 GrpcEvent::Trailers(t) => self.trailers = t,
                 GrpcEvent::Finished { code, code_name, message, elapsed_ms } => {
@@ -231,14 +239,27 @@ fn load_schema(app: &mut TernaryWireApp, tab_id: u64, tab: &mut GrpcTab, item: &
     });
 }
 
-/// Short label and color of a method kind.
-fn kind_look(kind: MethodKind, p: &theme::Palette) -> (&'static str, egui::Color32) {
+/// Short label and tone of a method kind.
+fn kind_look(kind: MethodKind) -> (&'static str, kit::Tone) {
     match kind {
-        MethodKind::Unary => (tr("unary"), p.info),
-        MethodKind::ServerStreaming => (tr("server stream"), p.ok),
-        MethodKind::ClientStreaming => (tr("client stream"), p.warn),
-        MethodKind::Bidi => (tr("bidi stream"), p.accent_text),
+        MethodKind::Unary => (tr("unary"), kit::Tone::Info),
+        MethodKind::ServerStreaming => (tr("server stream"), kit::Tone::Ok),
+        MethodKind::ClientStreaming => (tr("client stream"), kit::Tone::Warn),
+        MethodKind::Bidi => (tr("bidi stream"), kit::Tone::Accent),
     }
+}
+
+/// `HelloRequest → stream HelloReply`: the messages of a method.
+fn signature(m: &ternarywire_grpc::MethodInfo) -> String {
+    let stream = |on: bool| if on { "stream " } else { "" };
+    let server = matches!(m.kind, MethodKind::ServerStreaming | MethodKind::Bidi);
+    format!(
+        "{}{} → {}{}",
+        stream(m.kind.is_client_streaming()),
+        short(&m.input_type),
+        stream(server),
+        short(&m.output_type)
+    )
 }
 
 /// What the method picker asks for.
@@ -247,33 +268,41 @@ enum Pick {
     LoadSchema,
 }
 
-/// The method picker of the bar: the selected method (or "Load schema"),
-/// opening a searchable list of the services' methods with their kinds.
-fn method_picker(ui: &mut Ui, tab: &mut GrpcTab, service: &str, method: &str) -> Option<Pick> {
+/// What the method picker shows.
+struct Picker<'a> {
+    loaded: bool,
+    loading: bool,
+    methods: &'a [ternarywire_grpc::ServiceInfo],
+    search: &'a mut String,
+    /// Where the schema comes from (`from server reflection`).
+    source: &'a str,
+    /// Open the list (automation).
+    open: bool,
+}
+
+/// The method cell of the connect bar (`helloworld.Greeter / SayHello ▾`,
+/// or Load schema), opening a searchable list of the services' methods with
+/// their kinds.
+fn method_picker(ui: &mut Ui, picker: Picker<'_>, service: &str, method: &str) -> Option<Pick> {
     let p = theme::pal(ui);
     let mut pick = None;
-    let w = ui.available_width().max(150.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
-    let label = if tab.schema_loading {
+    let w = ui.available_width().max(120.0);
+    let label = if picker.loading {
         tr("Loading schema…").to_string()
-    } else if tab.schema.is_none() {
+    } else if !picker.loaded {
         tr("Load schema").to_string()
     } else if method.is_empty() {
         tr("Select a method").to_string()
     } else {
-        format!("{} / {method}", short(service))
+        format!("{service} / {method}")
     };
-    widgets::a11y_button(&resp, &label);
-    if ui.is_rect_visible(rect) {
+    let resp = pc::bar_combo(ui, &label, w, |ui, rect| {
         let painter = ui.painter();
-        if resp.hovered() {
-            painter.rect_filled(rect.shrink(1.0), egui::CornerRadius::same(5), p.hover);
-        }
-        let mut x = rect.left() + 8.0;
-        let icon = if tab.schema.is_none() { icons::ARROWS_CLOCKWISE } else { icons::TREE_STRUCTURE };
-        if tab.schema_loading {
+        let cy = rect.center().y;
+        let mut x = rect.left();
+        if picker.loading {
             let t = ui.input(|i| i.time) as f32;
-            let c = egui::pos2(x + 7.0, rect.center().y);
+            let c = egui::pos2(x + 7.0, cy);
             let pts: Vec<egui::Pos2> = (0..=14)
                 .map(|i| {
                     let a = t * 6.0 + i as f32 / 14.0 * 4.5;
@@ -283,58 +312,68 @@ fn method_picker(ui: &mut Ui, tab: &mut GrpcTab, service: &str, method: &str) ->
             painter.line(pts, egui::Stroke::new(1.6, p.accent));
             ui.ctx().request_repaint();
         } else {
+            let icon = if picker.loaded { icons::TREE_STRUCTURE } else { icons::ARROWS_CLOCKWISE };
             painter.text(
-                egui::pos2(x + 7.0, rect.center().y),
+                egui::pos2(x + 7.0, cy),
                 egui::Align2::CENTER_CENTER,
                 icon,
                 theme::icon_font(14.0),
-                p.text_muted,
+                p.text_faint,
             );
         }
-        x += 20.0;
-        let color = if method.is_empty() || tab.schema.is_none() { p.text_muted } else { p.text };
-        let caret_w = if tab.schema.is_some() { 18.0 } else { 0.0 };
-        let mut job =
-            egui::text::LayoutJob::single_section(label.clone(), egui::TextFormat::simple(theme::medium(13.0), color));
-        job.wrap = egui::text::TextWrapping {
-            max_width: (rect.right() - caret_w - x - 4.0).max(10.0),
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
-        let g = painter.layout_job(job);
-        painter.galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, color);
-        if tab.schema.is_some() {
-            painter.text(
-                egui::pos2(rect.right() - 10.0, rect.center().y),
-                egui::Align2::CENTER_CENTER,
-                icons::CARET_DOWN,
-                theme::icon_font(12.0),
-                p.text_muted,
-            );
+        x += 14.0 + 7.0;
+        if picker.loaded && !method.is_empty() {
+            // `helloworld.Greeter /` gives way to the method name.
+            let name = painter.layout_no_wrap(method.to_string(), theme::medium(12.5), p.text);
+            let room = (rect.right() - x - name.size().x - 6.0).max(0.0);
+            if room > 14.0 {
+                let svc = kit::elide(ui, &format!("{service} /"), egui::FontId::proportional(12.5), p.text_muted, room);
+                painter.galley(egui::pos2(x, cy - svc.size().y / 2.0), svc.clone(), p.text_muted);
+                x += svc.size().x + 6.0;
+            }
+            let name = kit::elide(ui, method, theme::medium(12.5), p.text, rect.right() - x);
+            painter.galley(egui::pos2(x, cy - name.size().y / 2.0), name, p.text);
+        } else {
+            let g = kit::elide(ui, &label, egui::FontId::proportional(12.5), p.text_muted, rect.right() - x);
+            painter.galley(egui::pos2(x, cy - g.size().y / 2.0), g, p.text_muted);
         }
-    }
-    if tab.schema.is_none() {
-        if resp.clicked() && !tab.schema_loading {
+    });
+    if !picker.loaded {
+        if resp.clicked() && !picker.loading {
             pick = Some(Pick::LoadSchema);
         }
         resp.on_hover_text(tr("Server reflection or the .proto files in Schema"));
         return pick;
     }
+    let resp = resp.on_hover_text(tr("Method"));
+    let popup_id = egui::Popup::default_response_id(&resp);
+    if picker.open {
+        egui::Popup::open_id(ui.ctx(), popup_id);
+    }
+    let frame =
+        egui::Frame::popup(ui.style()).corner_radius(egui::CornerRadius::same(12)).inner_margin(egui::Margin::same(6));
     let popup = egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(5.0)
+        .frame(frame)
         .width(380.0);
+    let search = picker.search;
     popup.show(|ui| {
-        ui.set_min_width(380.0);
-        let r = kit::search_field(ui, "grpc-method-search", &mut tab.method_search, tr("Search methods"), 364.0);
-        if !r.has_focus() && tab.method_search.is_empty() {
-            r.request_focus();
-        }
-        ui.add_space(4.0);
-        let q = tab.method_search.to_lowercase();
-        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+        ui.set_min_width(368.0);
+        ui.set_max_width(368.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::Frame::new().inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 8 }).show(ui, |ui| {
+            let r = kit::search_field_sm(ui, "grpc-method-search", search, tr("Search methods"), ui.available_width());
+            if !r.has_focus() && search.is_empty() {
+                r.request_focus();
+            }
+        });
+        let q = search.to_lowercase();
+        egui::ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             let mut any = false;
-            for svc in &tab.methods {
+            for svc in picker.methods {
                 let methods: Vec<_> = svc
                     .methods
                     .iter()
@@ -346,35 +385,52 @@ fn method_picker(ui: &mut Ui, tab: &mut GrpcTab, service: &str, method: &str) ->
                     continue;
                 }
                 any = true;
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::CUBE).font(theme::icon_font(13.0)).color(p.text_faint));
-                    ui.label(RichText::new(&svc.name).font(theme::medium(11.5)).color(p.text_muted));
-                });
+                let (head, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+                ui.painter().text(
+                    egui::pos2(head.left() + 8.0, head.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    icons::CUBE,
+                    theme::icon_font(13.0),
+                    p.text_faint,
+                );
+                ui.painter().text(
+                    egui::pos2(head.left() + 8.0 + 13.0 + 6.0, head.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &svc.name,
+                    theme::semibold(11.5),
+                    p.text_muted,
+                );
                 for m in methods {
                     let selected = svc.name == service && m.name == method;
                     let (rect, r) =
-                        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
+                        ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.0), egui::Sense::click());
                     widgets::a11y_button(&r, &format!("{} {}", svc.name, m.name));
                     let painter = ui.painter();
-                    if selected {
-                        painter.rect_filled(rect, egui::CornerRadius::same(6), p.accent_soft);
-                    } else if r.hovered() {
-                        painter.rect_filled(rect, egui::CornerRadius::same(6), p.hover);
+                    if selected || r.hovered() {
+                        painter.rect_filled(rect, egui::CornerRadius::same(7), p.hover);
                     }
-                    let (kind, color) = kind_look(m.kind, &p);
-                    let kg = painter.layout_no_wrap(kind.to_string(), theme::medium(10.5), color);
+                    if selected {
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
+                            egui::CornerRadius { nw: 7, sw: 7, ne: 0, se: 0 },
+                            p.accent,
+                        );
+                    }
+                    let (kind, tone) = kind_look(m.kind);
+                    let (fg, bg) = p.tone(tone);
+                    let kg = painter.layout_no_wrap(kind.to_string(), theme::medium(11.5), fg);
                     let pill = egui::Rect::from_min_size(
-                        egui::pos2(rect.right() - kg.size().x - 20.0, rect.center().y - 9.0),
-                        egui::vec2(kg.size().x + 12.0, 18.0),
+                        egui::pos2(rect.right() - 10.0 - kg.size().x - 14.0, rect.center().y - 10.0),
+                        egui::vec2(kg.size().x + 14.0, 20.0),
                     );
-                    painter.rect_filled(pill, egui::CornerRadius::same(9), theme::soft(color, 0.14));
-                    painter.galley(pill.center() - kg.size() / 2.0, kg, color);
-                    let ng = painter.layout_no_wrap(m.name.clone(), theme::medium(13.0), p.text);
-                    painter.galley(egui::pos2(rect.left() + 10.0, rect.top() + 5.0), ng, p.text);
-                    let io = format!("{} → {}", short(&m.input_type), short(&m.output_type));
-                    let ig = painter.layout_no_wrap(io, theme::mono(11.0), p.text_muted);
-                    painter.galley(egui::pos2(rect.left() + 10.0, rect.top() + 22.0), ig, p.text_muted);
+                    painter.rect_filled(pill, egui::CornerRadius::same(10), bg);
+                    painter.galley(pill.center() - kg.size() / 2.0, kg, fg);
+                    let text_w = pill.left() - rect.left() - 20.0;
+                    let ng = kit::elide(ui, &m.name, theme::medium(13.0), p.text, text_w);
+                    let ig = kit::elide(ui, &signature(m), theme::mono(11.0), p.text_faint, text_w);
+                    let top = rect.center().y - (ng.size().y + ig.size().y) / 2.0;
+                    ui.painter().galley(egui::pos2(rect.left() + 10.0, top), ng.clone(), p.text);
+                    ui.painter().galley(egui::pos2(rect.left() + 10.0, top + ng.size().y), ig, p.text_faint);
                     if r.clicked() {
                         pick = Some(Pick::Method(svc.name.clone(), m.name.clone()));
                         ui.close();
@@ -382,28 +438,42 @@ fn method_picker(ui: &mut Ui, tab: &mut GrpcTab, service: &str, method: &str) ->
                 }
             }
             if !any {
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.label(RichText::new(tr("No methods match")).color(p.text_muted));
+                ui.add_space(10.0);
             }
         });
-        ui.add_space(4.0);
-        ui.separator();
-        if kit::ghost(ui, Some(icons::ARROWS_CLOCKWISE), tr("Reload schema")).clicked() {
-            pick = Some(Pick::LoadSchema);
-            ui.close();
-        }
+        let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
+        ui.painter().hline(line.x_range(), line.bottom() - 0.5, egui::Stroke::new(1.0, p.border));
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 30.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add_space(4.0);
+                if kit::ghost(ui, Some(icons::ARROWS_CLOCKWISE), tr("Reload schema")).clicked() {
+                    pick = Some(Pick::LoadSchema);
+                    ui.close();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(picker.source).size(11.0).color(p.text_faint));
+                });
+            },
+        );
     });
     pick
 }
-
 pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTab) {
     let Some(original) = tab.slot.load(app) else {
         ui.label(tr("This request no longer exists."));
         return;
     };
     let mut item = original.clone();
+    // The rows of the view are edge to edge.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let collection = tab.slot.collection_id();
     let vars = app.var_ctx(collection.as_deref());
+    let inherited = pc::inherited_auth(app, &tab.slot, &item);
     let methods_n: usize = tab.methods.iter().map(|s| s.methods.len()).sum();
     let (schema_state, schema_text) = if tab.schema_loading {
         (Conn::Busy, tr("Loading schema…").to_string())
@@ -414,13 +484,42 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
     } else {
         (Conn::Idle, tr("No schema").to_string())
     };
-    let source = match &item.request {
-        RequestKind::Grpc(r) if matches!(r.schema, GrpcSchemaSource::Reflection) => tr("server reflection"),
-        _ => tr(".proto files"),
-    };
+    let reflection = matches!(&item.request, RequestKind::Grpc(r) if matches!(r.schema, GrpcSchemaSource::Reflection));
+    let source = if reflection { tr("server reflection") } else { tr(".proto files") };
     header(ui, app, tab_id, &tab.slot, &mut item, |ui| {
-        pc::status_pill(ui, schema_state, &schema_text).on_hover_text(trf("Schema from {}", &[&source]));
+        let opts = kit::PillOpts { dot: true, live: false, ..Default::default() };
+        let r = match schema_state {
+            Conn::Live => kit::pill_ex(ui, &schema_text, kit::Tone::Ok, opts),
+            Conn::Failed => kit::pill_ex(ui, &schema_text, kit::Tone::Err, opts),
+            s => pc::conn_pill(ui, s, &schema_text, false),
+        };
+        r.on_hover_text(trf("Schema from {}", &[&source]));
     });
+    let mut open_picker = false;
+    match tab.auto.take().as_deref() {
+        Some("picker") => open_picker = true,
+        Some(a) => {
+            if let Some(i) = a.strip_prefix("select:").and_then(|i| i.parse().ok()) {
+                tab.log.selected = Some(i);
+            } else if let Some(s) = a.strip_prefix("section:") {
+                tab.section = match s {
+                    "metadata" => Section::Metadata,
+                    "auth" => Section::Auth,
+                    "schema" => Section::Schema,
+                    "scripts" => Section::Scripts,
+                    "settings" => Section::Settings,
+                    _ => Section::Message,
+                };
+            } else if let Some(s) = a.strip_prefix("resp:") {
+                tab.resp_section = match s {
+                    "headers" => RespSection::Headers,
+                    "trailers" => RespSection::Trailers,
+                    _ => RespSection::Messages,
+                };
+            }
+        }
+        None => {}
+    }
     let mut do_load = false;
     let mut do_invoke = false;
     let mut stream_send = false;
@@ -434,43 +533,341 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
         let mut cancel = false;
         let mut invoke_clicked = false;
         let mut picked = None;
-        pc::connect_bar(
+        let mut end_stream = false;
+        let mut dismiss_error = false;
+        let mut retry_load = false;
+        let tests: Vec<_> = tab.scripts.tests.iter().filter(|t| !t.skipped).collect();
+        let tests_run = (tests.iter().filter(|t| t.passed).count(), tests.len());
+        let item_id = item.id.clone();
+        let scripts = &mut item.scripts;
+        let panes = ui.make_persistent_id("grpc-panes");
+        let call = &tab.call;
+        let schema = &tab.schema;
+        let schema_loading = tab.schema_loading;
+        let schema_error = &tab.schema_error;
+        let methods = &tab.methods;
+        let method_search = &mut tab.method_search;
+        let section = &mut tab.section;
+        let scripts_state = &mut tab.scripts;
+        let log = &mut tab.log;
+        let resp_section = &mut tab.resp_section;
+        let status = &tab.status;
+        let headers = &tab.headers;
+        let trailers = &tab.trailers;
+        let started = tab.started;
+        let source_label = if reflection { tr("from server reflection") } else { tr("from .proto files") };
+        pc::view_panes(
             ui,
-            "gRPC",
-            132.0,
+            panes,
             |ui| {
-                let picker_w = (ui.available_width() * 0.45).clamp(180.0, 340.0);
-                let w = (ui.available_width() - picker_w - 10.0).max(120.0);
-                let r = widgets::var_cell(ui, "grpc-url", &mut req.url, &vars, "localhost:50051", w);
-                kit::vdivider(ui, 22.0);
-                let (service, method) = (req.service.clone(), req.method.clone());
-                picked = method_picker(ui, tab, &service, &method);
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if tab.schema.is_none() {
-                        do_load = true;
-                    } else {
-                        do_invoke = !running;
+                pc::connect_bar(
+                    ui,
+                    "gRPC",
+                    112.0,
+                    |ui| {
+                        let url_w = (ui.available_width() * 0.3).clamp(150.0, 240.0);
+                        let r = pc::bar_var(ui, "grpc-url", &mut req.url, &vars, "localhost:50051", url_w);
+                        pc::bar_divider(ui);
+                        let picker = Picker {
+                            loaded: schema.is_some(),
+                            loading: schema_loading,
+                            methods,
+                            search: &mut *method_search,
+                            source: source_label,
+                            open: open_picker,
+                        };
+                        let (service, method) = (req.service.clone(), req.method.clone());
+                        picked = method_picker(ui, picker, &service, &method);
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            if schema.is_none() {
+                                do_load = true;
+                            } else {
+                                do_invoke = !running;
+                            }
+                        }
+                        r.has_focus()
+                    },
+                    |ui| {
+                        if running {
+                            cancel = kit::action_button(ui, kit::Kind::Secondary, icons::STOP, tr("Cancel")).clicked();
+                        } else {
+                            let label = match method_kind {
+                                Some(MethodKind::ClientStreaming) | Some(MethodKind::Bidi) => tr("Start stream"),
+                                _ => tr("Invoke"),
+                            };
+                            let r = ui
+                                .add_enabled_ui(ready, |ui| {
+                                    kit::action_button(ui, kit::Kind::Primary, icons::PLAY, label)
+                                })
+                                .inner;
+                            let hint = if has_schema { tr("Select a method") } else { tr("Load the schema first") };
+                            if r.on_hover_text(format!("{label} (⇧⌘↩)")).on_disabled_hover_text(hint).clicked() {
+                                invoke_clicked = true;
+                            }
+                        }
+                    },
+                );
+                let metadata_n = req.metadata.iter().filter(|m| m.enabled).count();
+                let tabs = [
+                    Tab::new(Section::Message, tr("Message")),
+                    Tab::new(Section::Metadata, tr("Metadata")).count(metadata_n),
+                    Tab::new(Section::Auth, tr("Auth")).dot(pc::has_own_auth(&req.auth)),
+                    Tab::new(Section::Schema, tr("Schema")),
+                    Tab::new(Section::Scripts, tr("Scripts")).count(pc::scripts_count(scripts)),
+                    Tab::new(Section::Settings, tr("Settings")),
+                ];
+                kit::tabs(ui, section, &tabs);
+                match *section {
+                    Section::Message => {
+                        let p = theme::pal(ui);
+                        let info = schema.as_ref().and_then(|s| s.method(&req.service, &req.method));
+                        let template = info.as_ref().map(|m| m.input_template.clone());
+                        pc::toolbar(
+                            ui,
+                            |ui| match &info {
+                                Some(m) => {
+                                    let (kind, tone) = kind_look(m.kind);
+                                    kit::tone_pill(ui, kind, tone);
+                                    let full = format!("{} → {}", m.input_type, m.output_type);
+                                    ui.scope(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        ui.label(
+                                            RichText::new(short(&m.input_type)).font(theme::mono(12.0)).color(p.text),
+                                        )
+                                        .on_hover_text(&full);
+                                        ui.label(
+                                            RichText::new(icons::ARROW_RIGHT)
+                                                .font(theme::icon_font(12.0))
+                                                .color(p.text_faint),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(short(&m.output_type))
+                                                    .font(theme::mono(12.0))
+                                                    .color(p.text),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&full);
+                                    });
+                                }
+                                None => {
+                                    ui.add(
+                                        egui::Label::new(kit::hint(
+                                            ui,
+                                            tr("Pick a method to get a template of its input message."),
+                                        ))
+                                        .truncate(),
+                                    );
+                                }
+                            },
+                            |ui| {
+                                if let Some(c) = call {
+                                    if c.can_send() && pc::toolbar_send(ui, tr("Send"), true, "") {
+                                        stream_send = true;
+                                    }
+                                    if c.kind().is_client_streaming() {
+                                        let opts = kit::ButtonOpts { icon: Some(icons::STOP), ..Default::default() };
+                                        if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("End stream"), opts)
+                                            .clicked()
+                                        {
+                                            end_stream = true;
+                                        }
+                                    }
+                                } else if let Some(t) = &template
+                                    && kit::ghost(ui, Some(icons::SPARKLE), tr("Use example"))
+                                        .on_hover_text(tr("Fill with a template of the input message"))
+                                        .clicked()
+                                {
+                                    req.message = t.clone();
+                                }
+                            },
+                        );
+                        let margin = egui::Margin { left: 12, right: 12, top: 0, bottom: 12 };
+                        let r = pc::editor_well(
+                            ui,
+                            "grpc-msg",
+                            &mut req.message,
+                            Lang::Json,
+                            Some(&vars),
+                            margin,
+                            None,
+                            None,
+                        );
+                        pc::well_placeholder(ui, &r, &req.message, tr("The request message as JSON"));
+                    }
+                    Section::Metadata => {
+                        pc::body(ui, "grpc-md-scroll", 0.0, 0.0, |ui| {
+                            let mut md = req.metadata.clone();
+                            let opts = KvOptions {
+                                title: Some(tr("Metadata")),
+                                allow_add: true,
+                                show_description: true,
+                                key_hint: tr("Key"),
+                                value_hint: tr("Value"),
+                                ..Default::default()
+                            };
+                            if widgets::kv_table(ui, "grpc-metadata", &mut md, &vars, opts) {
+                                req.metadata = md;
+                            }
+                            ui.add_space(14.0);
+                            ui.label(kit::hint(ui, tr("Keys ending in -bin take base64 values.")));
+                        });
+                    }
+                    Section::Auth => pc::auth_pane(
+                        ui,
+                        "grpc-auth",
+                        &mut req.auth,
+                        &item_id,
+                        inherited.clone(),
+                        Some(tr("Bearer, Basic and API key (header) are sent as metadata.")),
+                        &vars,
+                    ),
+                    Section::Schema => schema_section(ui, req, schema.is_some(), schema_loading, methods, &mut do_load),
+                    Section::Scripts => pc::scripts_ui(
+                        ui,
+                        scripts,
+                        &[
+                            (ScriptEvent::PreRequest, "Before invoke"),
+                            (ScriptEvent::OnMessage, "On message"),
+                            (ScriptEvent::PostResponse, "After response"),
+                        ],
+                        scripts_state,
+                        &vars,
+                    ),
+                    Section::Settings => {
+                        pc::toolbar(ui, |ui| pc::toolbar_title(ui, tr("Connection"), None), |_| {});
+                        pc::body(ui, "grpc-settings", 0.0, 14.0, |ui| {
+                            kit::group(ui, "", "", |ui, rows| {
+                                rows.row(ui, "TLS", "", |ui| {
+                                    ui.push_id("tls", |ui| {
+                                        kit::segmented_ex(
+                                            ui,
+                                            &mut req.tls,
+                                            &[
+                                                (None, None, tr("By scheme")),
+                                                (Some(true), None, tr("On")),
+                                                (Some(false), None, tr("Off")),
+                                            ],
+                                            true,
+                                        )
+                                    });
+                                });
+                                rows.row(ui, tr("Verify SSL certificates"), tr("When TLS is on"), |ui| {
+                                    let mut v = req.verify_ssl.unwrap_or(true);
+                                    if kit::check(ui, &mut v, tr("Verify SSL certificates")).changed() {
+                                        req.verify_ssl = Some(v);
+                                    }
+                                });
+                                rows.row(ui, tr("Deadline"), tr("ms, 0 = none"), |ui| {
+                                    let mut d = req.deadline_ms.unwrap_or(0);
+                                    if pc::number_input(ui, "grpc-deadline", &mut d, 90.0, tr("Deadline")).changed() {
+                                        req.deadline_ms = (d > 0).then_some(d);
+                                    }
+                                });
+                            });
+                        });
                     }
                 }
-                r.has_focus()
             },
             |ui| {
-                if running {
-                    cancel = kit::secondary(ui, Some(icons::STOP), tr("Cancel")).clicked();
-                } else {
-                    let label = match method_kind {
-                        Some(MethodKind::ClientStreaming) | Some(MethodKind::Bidi) => tr("Start stream"),
-                        _ => tr("Invoke"),
-                    };
-                    let r = ui.add_enabled_ui(ready, |ui| kit::primary_icon(ui, icons::PLAY, label)).inner;
-                    let hint = if has_schema { tr("Select a method") } else { tr("Load the schema first") };
-                    if r.on_hover_text("⇧⌘↩").on_disabled_hover_text(hint).clicked() {
-                        invoke_clicked = true;
+                let p = theme::pal(ui);
+                let n = log.lines.iter().filter(|l| l.dir != Dir::System).count();
+                let received = log.lines.iter().filter(|l| l.dir == Dir::In).count();
+                pc::status_row(
+                    ui,
+                    |ui| {
+                        if let Some(s) = started {
+                            pc::status_pill(ui, Conn::Busy, tr("Calling…"));
+                            let ms = s.elapsed().as_secs_f64() * 1000.0;
+                            pc::metrics(ui, |ui| {
+                                kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(ms));
+                                if received > 0 {
+                                    kit::metric(ui, icons::ARROW_DOWN, &messages_text(received));
+                                }
+                            });
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                        } else if let Some((code, name, message, elapsed)) = status {
+                            let tone = if *code == 0 { kit::Tone::Ok } else { kit::Tone::Err };
+                            let opts = kit::PillOpts { large: true, ..Default::default() };
+                            let tip = if message.is_empty() { tr("(empty)") } else { message.as_str() };
+                            kit::pill_ex(ui, &format!("{code} {name}"), tone, opts)
+                                .on_hover_text(trf("Status message: {}", &[&tip]));
+                            let (passed, total) = tests_run;
+                            pc::metrics(ui, |ui| {
+                                kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(*elapsed));
+                                kit::metric(ui, icons::ARROW_DOWN, &messages_text(received));
+                                if total > 0 {
+                                    let color = (passed < total).then_some(p.err);
+                                    kit::metric_colored(
+                                        ui,
+                                        icons::CHECK_CIRCLE,
+                                        &trf("{}/{} tests", &[&passed, &total]),
+                                        color,
+                                    );
+                                }
+                            });
+                        } else {
+                            pc::status_pill(ui, Conn::Idle, tr("No response yet"));
+                        }
+                    },
+                    |ui| pc::pane_actions(ui, panes),
+                );
+                let tabs = [
+                    Tab::new(RespSection::Messages, tr("Messages")).count(n),
+                    Tab::new(RespSection::Headers, tr("Headers")).count(headers.len()),
+                    Tab::new(RespSection::Trailers, tr("Trailers")).count(trailers.len()),
+                ];
+                let messages = *resp_section == RespSection::Messages;
+                kit::tabs_with(ui, resp_section, &tabs, |ui| {
+                    if messages {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        // The search gives way to the tabs.
+                        let w = (ui.available_width() - 320.0 - 34.0).clamp(90.0, 160.0);
+                        log.tools(ui, ("grpc-log", tab_id), false, w);
                     }
+                });
+                if let Some(e) = schema_error {
+                    let mut retry = false;
+                    egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 0 }).show(
+                        ui,
+                        |ui| {
+                            pc::error_banner(ui, tr("Could not load the schema"), e, |ui| {
+                                dismiss_error = kit::icon_button_sm(ui, icons::X, tr("Dismiss")).clicked();
+                                let opts = kit::ButtonOpts { icon: Some(icons::ARROW_CLOCKWISE), ..Default::default() };
+                                retry =
+                                    kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Retry"), opts).clicked();
+                            });
+                        },
+                    );
+                    if retry {
+                        retry_load = true;
+                    }
+                }
+                match *resp_section {
+                    RespSection::Messages => log.body(ui, ("grpc-log", tab_id)),
+                    RespSection::Headers => pc::body(ui, "grpc-headers", 12.0, 0.0, |ui| {
+                        pc::kv_table_view(
+                            ui,
+                            headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                            tr("No response headers yet."),
+                        )
+                    }),
+                    RespSection::Trailers => pc::body(ui, "grpc-trailers", 12.0, 0.0, |ui| {
+                        pc::kv_table_view(
+                            ui,
+                            trailers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                            tr("No trailers yet."),
+                        )
+                    }),
                 }
             },
         );
         do_invoke |= invoke_clicked;
+        do_load |= retry_load;
+        if dismiss_error {
+            tab.schema_error = None;
+        }
         match picked {
             Some(Pick::Method(s, m)) => {
                 if let Some(info) = tab.schema.as_ref().and_then(|sc| sc.method(&s, &m))
@@ -498,228 +895,6 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
                 _ => {}
             }
         }
-        if let Some(e) = tab.schema_error.clone() {
-            ui.add_space(8.0);
-            let mut dismiss = false;
-            pc::error_banner(ui, tr("Could not load the schema"), &e, |ui| {
-                dismiss = kit::icon_button(ui, icons::X, tr("Dismiss")).clicked();
-                if kit::secondary(ui, Some(icons::ARROW_CLOCKWISE), tr("Retry")).clicked() {
-                    do_load = true;
-                }
-            });
-            if dismiss {
-                tab.schema_error = None;
-            }
-        }
-        let metadata_n = req.metadata.iter().filter(|m| m.enabled).count();
-        let items = vec![
-            (Section::Message, tr("Message").to_string()),
-            (Section::Metadata, trf("Metadata{}", &[&widgets::count_label(metadata_n)])),
-            (Section::Auth, tr("Authorization").to_string()),
-            (Section::Schema, tr("Schema").to_string()),
-            (Section::Scripts, pc::scripts_label(&item.scripts)),
-            (Section::Settings, tr("Settings").to_string()),
-        ];
-        ui.add_space(8.0);
-        pc::section_tabs(ui, "grpc-tabs", &mut tab.section, &items);
-        ui.add_space(8.0);
-        let call = &tab.call;
-        let schema = &tab.schema;
-        let schema_loading = tab.schema_loading;
-        let methods = &tab.methods;
-        let section = tab.section;
-        let scripts_state = &mut tab.scripts;
-        let scripts = &mut item.scripts;
-        let item_id = item.id.clone();
-        let log = &mut tab.log;
-        let resp_section = &mut tab.resp_section;
-        let status = &tab.status;
-        let headers = &tab.headers;
-        let trailers = &tab.trailers;
-        let started = tab.started;
-        let mut end_stream = false;
-        pc::split_view(
-            ui,
-            ("grpc-split", tab_id),
-            0.5,
-            |ui| match section {
-                Section::Message => {
-                    let p = theme::pal(ui);
-                    let info = schema.as_ref().and_then(|s| s.method(&req.service, &req.method));
-                    ui.horizontal(|ui| {
-                        ui.set_height(30.0);
-                        match &info {
-                            Some(m) => {
-                                let (kind, color) = kind_look(m.kind, &p);
-                                kit::pill(ui, kind, color);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(format!("{} → {}", short(&m.input_type), short(&m.output_type)))
-                                            .monospace()
-                                            .color(p.text_muted),
-                                    )
-                                    .truncate(),
-                                )
-                                .on_hover_text(format!("{} → {}", m.input_type, m.output_type));
-                            }
-                            None => {
-                                ui.label(kit::hint(ui, tr("Pick a method to get a template of its input message.")));
-                            }
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(c) = call {
-                                if c.can_send() && pc::send_button(ui, icons::PAPER_PLANE_RIGHT, tr("Send"), true, "") {
-                                    stream_send = true;
-                                }
-                                if c.kind().is_client_streaming()
-                                    && kit::secondary(ui, Some(icons::STOP), tr("End stream")).clicked()
-                                {
-                                    end_stream = true;
-                                }
-                            } else if let Some(m) = &info
-                                && kit::ghost(ui, Some(icons::SPARKLE), tr("Use example"))
-                                    .on_hover_text(tr("Fill with a template of the input message"))
-                                    .clicked()
-                            {
-                                req.message = m.input_template.clone();
-                            }
-                        });
-                    });
-                    ui.add_space(6.0);
-                    let r = pc::fill_editor(ui, "grpc-msg", &mut req.message, Lang::Json, &vars, 6);
-                    pc::editor_placeholder(ui, &r, &req.message, tr("The request message as JSON"));
-                }
-                Section::Metadata => {
-                    egui::ScrollArea::vertical().id_salt("grpc-md-scroll").show(ui, |ui| {
-                        let mut md = req.metadata.clone();
-                        let opts = KvOptions {
-                            title: Some(tr("Metadata")),
-                            allow_add: true,
-                            show_description: true,
-                            key_hint: tr("Key"),
-                            value_hint: tr("Value"),
-                            ..Default::default()
-                        };
-                        if widgets::kv_table(ui, "grpc-metadata", &mut md, &vars, opts) {
-                            req.metadata = md;
-                        }
-                        ui.label(kit::hint(ui, tr("Keys ending in -bin take base64 values.")));
-                    });
-                }
-                Section::Auth => {
-                    egui::ScrollArea::vertical().id_salt("grpc-auth").show(ui, |ui| {
-                        ui.label(kit::hint(ui, tr("Bearer, Basic and API key (header) are sent as metadata.")));
-                        ui.add_space(4.0);
-                        crate::auth_ui::auth_editor(
-                            ui,
-                            &mut req.auth,
-                            crate::auth_ui::AuthUiCtx {
-                                is_root: false,
-                                inherited: None,
-                                owner_id: &item_id,
-                                token: None,
-                                fetching: false,
-                                vars: &vars,
-                            },
-                        );
-                    });
-                }
-                Section::Schema => {
-                    egui::ScrollArea::vertical().id_salt("grpc-schema").show(ui, |ui| {
-                        schema_section(ui, req, schema.is_some(), schema_loading, methods, &mut do_load)
-                    });
-                }
-                Section::Scripts => crate::proto_common::scripts_ui(
-                    ui,
-                    scripts,
-                    &[
-                        (ScriptEvent::PreRequest, "Before invoke"),
-                        (ScriptEvent::OnMessage, "On message"),
-                        (ScriptEvent::PostResponse, "After response"),
-                    ],
-                    scripts_state,
-                    &vars,
-                ),
-                Section::Settings => {
-                    egui::ScrollArea::vertical().id_salt("grpc-settings").show(ui, |ui| {
-                        pc::form_grid("grpc-settings").show(ui, |ui| {
-                            pc::form_label(ui, "TLS");
-                            ui.push_id("tls", |ui| {
-                                kit::segmented(
-                                    ui,
-                                    &mut req.tls,
-                                    &[(None, tr("By scheme")), (Some(true), tr("On")), (Some(false), tr("Off"))],
-                                )
-                            });
-                            ui.end_row();
-                            pc::form_label(ui, tr("Verify SSL certificates"));
-                            let mut v = req.verify_ssl.unwrap_or(true);
-                            if ui.checkbox(&mut v, tr("When TLS is on")).changed() {
-                                req.verify_ssl = Some(v);
-                            }
-                            ui.end_row();
-                            pc::form_label(ui, tr("Deadline (ms, 0 = none)"));
-                            let mut d = req.deadline_ms.unwrap_or(0);
-                            if ui.add(egui::DragValue::new(&mut d).range(0..=3_600_000)).changed() {
-                                req.deadline_ms = (d > 0).then_some(d);
-                            }
-                            ui.end_row();
-                        });
-                    });
-                }
-            },
-            |ui| {
-                let p = theme::pal(ui);
-                let n = log.lines.iter().filter(|l| l.dir != Dir::System).count();
-                let items = vec![
-                    (RespSection::Messages, format!("{}{}", tr("Messages"), widgets::count_label(n))),
-                    (RespSection::Headers, format!("{}{}", tr("Headers"), widgets::count_label(headers.len()))),
-                    (RespSection::Trailers, trf("Trailers{}", &[&widgets::count_label(trailers.len())])),
-                ];
-                ui.horizontal(|ui| {
-                    widgets::sub_tabs(ui, resp_section, &items);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(s) = started {
-                            let ms = s.elapsed().as_secs_f64() * 1000.0;
-                            kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(ms));
-                            pc::status_pill(ui, Conn::Busy, tr("Calling…"));
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                        } else if let Some((code, name, message, elapsed)) = status {
-                            kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(*elapsed));
-                            let color = if *code == 0 { p.ok } else { p.err };
-                            let r = kit::pill(ui, &format!("{code} {name}"), color);
-                            if !message.is_empty() {
-                                r.on_hover_text(message);
-                            }
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-                match *resp_section {
-                    RespSection::Messages => log.ui(ui, ("grpc-log", tab_id)),
-                    RespSection::Headers => {
-                        egui::ScrollArea::vertical().id_salt("grpc-headers").show(ui, |ui| {
-                            pc::kv_view(
-                                ui,
-                                "grpc-headers",
-                                headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-                                tr("No response headers yet."),
-                            )
-                        });
-                    }
-                    RespSection::Trailers => {
-                        egui::ScrollArea::vertical().id_salt("grpc-trailers").show(ui, |ui| {
-                            pc::kv_view(
-                                ui,
-                                "grpc-trailers",
-                                trailers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-                                tr("No trailers yet."),
-                            )
-                        });
-                    }
-                }
-            },
-        );
         if end_stream && let Some(c) = &tab.call {
             c.end_stream();
         }
@@ -775,7 +950,13 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut GrpcTa
     tab.slot.store(app, &original, item);
 }
 
-/// Where the schema comes from: server reflection or `.proto` files.
+/// `1 message`, `3 messages`.
+fn messages_text(n: usize) -> String {
+    if n == 1 { tr("1 message").to_string() } else { trf("{} messages", &[&n]) }
+}
+
+/// Where the schema comes from: server reflection or `.proto` files, and
+/// the services it has.
 fn schema_section(
     ui: &mut Ui,
     req: &mut ternarywire_core::protocols::GrpcRequest,
@@ -786,87 +967,110 @@ fn schema_section(
 ) {
     let p = theme::pal(ui);
     let mut reflection = matches!(req.schema, GrpcSchemaSource::Reflection);
-    ui.horizontal(|ui| {
-        if kit::segmented(ui, &mut reflection, &[(true, tr("Server reflection")), (false, tr(".proto files"))]) {
-            req.schema = if reflection {
-                GrpcSchemaSource::Reflection
-            } else {
-                GrpcSchemaSource::ProtoFiles { files: Vec::new(), import_paths: Vec::new() }
-            };
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    pc::toolbar(
+        ui,
+        |ui| {
+            let items = [(true, None, tr("Server reflection")), (false, None, tr(".proto files"))];
+            if kit::segmented_ex(ui, &mut reflection, &items, true) {
+                req.schema = if reflection {
+                    GrpcSchemaSource::Reflection
+                } else {
+                    GrpcSchemaSource::ProtoFiles { files: Vec::new(), import_paths: Vec::new() }
+                };
+            }
+        },
+        |ui| {
             if loading {
                 ui.add(egui::Spinner::new().size(16.0).color(p.accent));
             } else {
                 let label = if loaded { tr("Reload schema") } else { tr("Load schema") };
-                if kit::secondary(ui, Some(icons::ARROWS_CLOCKWISE), label).clicked() {
+                let opts = kit::ButtonOpts { icon: Some(icons::ARROWS_CLOCKWISE), ..Default::default() };
+                if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, label, opts).clicked() {
                     *do_load = true;
                 }
             }
-        });
+        },
+    );
+    pc::body(ui, "grpc-schema", 0.0, 10.0, |ui| {
+        match &mut req.schema {
+            GrpcSchemaSource::Reflection => {
+                ui.label(kit::hint(ui, tr("The server lists its services itself (grpc.reflection v1 or v1alpha).")));
+            }
+            GrpcSchemaSource::ProtoFiles { files, import_paths } => {
+                let mut remove = None;
+                let mut remove_import = None;
+                let n = files.len() + import_paths.len();
+                if n == 0 {
+                    ui.label(kit::hint(ui, tr("No .proto files yet.")));
+                } else {
+                    pc::list_box(ui, n, 40.0, |ui, i| {
+                        let (icon, path, import) = if i < files.len() {
+                            (icons::FILE, files[i].as_str(), false)
+                        } else {
+                            (icons::FOLDER_SIMPLE, import_paths[i - files.len()].as_str(), true)
+                        };
+                        ui.label(RichText::new(icon).font(theme::icon_font(15.0)).color(p.text_faint));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            let tip = if import { tr("Remove import path") } else { tr("Remove file") };
+                            if kit::icon_button_sm(ui, icons::X, tip).clicked() {
+                                if import {
+                                    remove_import = Some(i - files.len());
+                                } else {
+                                    remove = Some(i);
+                                }
+                            }
+                            if import {
+                                kit::tone_pill(ui, tr("import path"), kit::Tone::Neutral);
+                            }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(path).font(theme::mono(12.0)).color(p.text))
+                                        .truncate(),
+                                )
+                                .on_hover_text(path);
+                            });
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    files.remove(i);
+                }
+                if let Some(i) = remove_import {
+                    import_paths.remove(i);
+                }
+                ui.horizontal(|ui| {
+                    if kit::ghost(ui, Some(icons::FILE_PLUS), tr("Add .proto files")).clicked()
+                        && let Some(paths) =
+                            rfd::FileDialog::new().add_filter("Protocol Buffers", &["proto"]).pick_files()
+                    {
+                        files.extend(paths.into_iter().map(|p| p.display().to_string()));
+                    }
+                    if kit::ghost(ui, Some(icons::FOLDER_PLUS), tr("Add import path")).clicked()
+                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                    {
+                        import_paths.push(dir.display().to_string());
+                    }
+                });
+            }
+        }
+        if !methods.is_empty() {
+            ui.label(kit::section_title(tr("Services")));
+            pc::list_box(ui, methods.len(), 40.0, |ui, i| {
+                let svc = &methods[i];
+                ui.label(RichText::new(icons::CUBE).font(theme::icon_font(15.0)).color(p.text_faint));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(trf("{} methods", &[&svc.methods.len()])).size(11.0).color(p.text_faint));
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&svc.name).font(theme::mono(12.0)).color(p.text)).truncate(),
+                        );
+                    });
+                });
+            });
+        }
     });
-    ui.add_space(8.0);
-    match &mut req.schema {
-        GrpcSchemaSource::Reflection => {
-            ui.label(kit::hint(ui, tr("The server lists its services itself (grpc.reflection v1 or v1alpha).")));
-        }
-        GrpcSchemaSource::ProtoFiles { files, import_paths } => {
-            let mut remove = None;
-            let mut remove_import = None;
-            if files.is_empty() {
-                ui.label(kit::hint(ui, tr("No .proto files yet.")));
-            }
-            for (i, f) in files.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::FILE_CODE).font(theme::icon_font(15.0)).color(p.text_muted));
-                    ui.add(egui::Label::new(RichText::new(f).monospace()).truncate());
-                    if kit::icon_button(ui, icons::X, tr("Remove file")).clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            for (i, d) in import_paths.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::FOLDER).font(theme::icon_font(15.0)).color(p.text_muted));
-                    ui.add(egui::Label::new(RichText::new(d).monospace().color(p.text_muted)).truncate());
-                    kit::pill(ui, tr("import path"), p.text_muted);
-                    if kit::icon_button(ui, icons::X, tr("Remove import path")).clicked() {
-                        remove_import = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                files.remove(i);
-            }
-            if let Some(i) = remove_import {
-                import_paths.remove(i);
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if kit::ghost(ui, Some(icons::FILE_PLUS), tr("Add .proto files")).clicked()
-                    && let Some(paths) = rfd::FileDialog::new().add_filter("Protocol Buffers", &["proto"]).pick_files()
-                {
-                    files.extend(paths.into_iter().map(|p| p.display().to_string()));
-                }
-                if kit::ghost(ui, Some(icons::FOLDER_PLUS), tr("Add import path")).clicked()
-                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
-                {
-                    import_paths.push(dir.display().to_string());
-                }
-            });
-        }
-    }
-    if !methods.is_empty() {
-        ui.add_space(12.0);
-        pc::section(ui, tr("Services"), None);
-        for svc in methods {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::CUBE).font(theme::icon_font(14.0)).color(p.text_muted));
-                ui.label(RichText::new(&svc.name).monospace());
-                pc::count_badge(ui, svc.methods.len());
-            });
-        }
-    }
 }
 
 fn invoke(app: &mut TernaryWireApp, tab_id: u64, tab: &mut GrpcTab, item: &ternarywire_core::model::RequestItem) {
@@ -879,6 +1083,12 @@ fn invoke(app: &mut TernaryWireApp, tab_id: u64, tab: &mut GrpcTab, item: &terna
     tab.headers.clear();
     tab.trailers.clear();
     tab.received.clear();
+    tab.msg_types = tab
+        .schema
+        .as_ref()
+        .and_then(|s| s.method(&req.service, &req.method))
+        .map(|m| (short(&m.input_type).to_string(), short(&m.output_type).to_string()))
+        .unwrap_or_default();
     let tx = app.tx.clone();
     let ctx = app.ctx.clone();
     let first = Some(r(&req.message)).filter(|m| !m.trim().is_empty());

@@ -6,18 +6,21 @@
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, Visuals};
 
-/// Colors of one theme.
+/// Colors of one theme. The values are the tokens of the redesign
+/// (`design/redesign/styles.css`, `:root` and `.theme-dark`).
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    /// Content area (request editor, response).
+    /// Content area: the workbench card (request editor, response).
     pub canvas: Color32,
-    /// Window chrome: top bar, sidebar, tab strip, status bar.
+    /// Window chrome: title bar, rail, sidebar, status bar.
     pub chrome: Color32,
     /// Raised surfaces: inputs, cards, dialogs, menus.
     pub surface: Color32,
+    /// Quiet panels: code wells, table headers, the tab strip, side panels.
+    pub well: Color32,
     /// Hovered rows and quiet button fills.
     pub hover: Color32,
-    /// Pressed state and subtle fills (segmented control track).
+    /// Pressed state and subtle fills (segmented control track, count badges).
     pub subtle: Color32,
     pub border: Color32,
     pub border_strong: Color32,
@@ -36,57 +39,150 @@ pub struct Palette {
     pub warn: Color32,
     pub err: Color32,
     pub info: Color32,
+    /// Soft fills behind `ok`/`warn`/`err`/`info` text (pills, banners).
+    pub ok_soft: Color32,
+    pub warn_soft: Color32,
+    pub err_soft: Color32,
+    pub info_soft: Color32,
+    /// `{{variable}}` chips: defined (text, fill) and undefined (fill; text is `err`).
+    pub var_ok: Color32,
+    pub var_ok_bg: Color32,
+    pub var_bad_bg: Color32,
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
+    Color32::from_rgb(r, g, b)
 }
 
 const LIGHT: Palette = Palette {
-    canvas: Color32::from_rgb(255, 255, 255),
-    chrome: Color32::from_rgb(247, 247, 248),
-    surface: Color32::from_rgb(255, 255, 255),
-    hover: Color32::from_rgb(240, 240, 243),
-    subtle: Color32::from_rgb(234, 234, 238),
-    border: Color32::from_rgb(228, 228, 233),
-    border_strong: Color32::from_rgb(208, 208, 215),
-    text: Color32::from_rgb(26, 26, 32),
-    text_muted: Color32::from_rgb(104, 104, 116),
-    text_faint: Color32::from_rgb(150, 150, 162),
-    accent: Color32::from_rgb(225, 77, 42),
-    accent_hover: Color32::from_rgb(204, 64, 31),
+    canvas: rgb(255, 255, 255),
+    chrome: rgb(244, 244, 246),
+    surface: rgb(255, 255, 255),
+    well: rgb(248, 248, 250),
+    hover: rgb(239, 239, 242),
+    subtle: rgb(232, 232, 236),
+    border: rgb(228, 228, 233),
+    border_strong: rgb(208, 208, 215),
+    text: rgb(23, 23, 28),
+    text_muted: rgb(98, 98, 109),
+    text_faint: rgb(154, 154, 165),
+    accent: rgb(225, 77, 42),
+    accent_hover: rgb(204, 64, 31),
     on_accent: Color32::WHITE,
-    accent_soft: Color32::from_rgb(253, 236, 230),
-    accent_text: Color32::from_rgb(190, 58, 26),
-    ok: Color32::from_rgb(22, 140, 78),
-    warn: Color32::from_rgb(180, 112, 0),
-    err: Color32::from_rgb(214, 48, 49),
-    info: Color32::from_rgb(37, 99, 220),
+    accent_soft: rgb(253, 236, 230),
+    accent_text: rgb(190, 58, 26),
+    ok: rgb(22, 140, 78),
+    warn: rgb(180, 112, 0),
+    err: rgb(214, 48, 49),
+    info: rgb(37, 99, 220),
+    ok_soft: rgb(229, 245, 236),
+    warn_soft: rgb(251, 241, 220),
+    err_soft: rgb(252, 232, 232),
+    info_soft: rgb(231, 238, 252),
+    var_ok: rgb(20, 130, 70),
+    var_ok_bg: rgb(227, 244, 234),
+    var_bad_bg: rgb(252, 232, 232),
 };
 
 const DARK: Palette = Palette {
-    canvas: Color32::from_rgb(24, 25, 28),
-    chrome: Color32::from_rgb(19, 20, 23),
-    surface: Color32::from_rgb(32, 33, 37),
-    hover: Color32::from_rgb(38, 39, 44),
-    subtle: Color32::from_rgb(44, 45, 51),
-    border: Color32::from_rgb(46, 47, 53),
-    border_strong: Color32::from_rgb(62, 64, 71),
-    text: Color32::from_rgb(232, 232, 236),
-    text_muted: Color32::from_rgb(158, 159, 168),
-    text_faint: Color32::from_rgb(110, 111, 120),
-    accent: Color32::from_rgb(242, 103, 72),
-    accent_hover: Color32::from_rgb(250, 125, 96),
+    canvas: rgb(24, 25, 28),
+    chrome: rgb(18, 19, 22),
+    surface: rgb(32, 33, 37),
+    well: rgb(28, 29, 33),
+    hover: rgb(38, 39, 44),
+    subtle: rgb(45, 46, 52),
+    border: rgb(44, 45, 51),
+    border_strong: rgb(62, 64, 71),
+    text: rgb(232, 232, 236),
+    text_muted: rgb(158, 159, 168),
+    text_faint: rgb(110, 111, 120),
+    accent: rgb(242, 103, 72),
+    accent_hover: rgb(250, 125, 96),
     on_accent: Color32::WHITE,
-    accent_soft: Color32::from_rgb(63, 36, 30),
-    accent_text: Color32::from_rgb(255, 144, 118),
-    ok: Color32::from_rgb(74, 205, 128),
-    warn: Color32::from_rgb(240, 180, 72),
-    err: Color32::from_rgb(248, 104, 100),
-    info: Color32::from_rgb(110, 160, 255),
+    accent_soft: rgb(63, 36, 30),
+    accent_text: rgb(255, 144, 118),
+    ok: rgb(74, 205, 128),
+    warn: rgb(240, 180, 72),
+    err: rgb(248, 104, 100),
+    info: rgb(110, 160, 255),
+    ok_soft: rgb(23, 51, 38),
+    warn_soft: rgb(58, 47, 23),
+    err_soft: rgb(61, 31, 31),
+    info_soft: rgb(28, 42, 69),
+    var_ok: rgb(110, 200, 140),
+    var_ok_bg: rgb(27, 51, 38),
+    var_bad_bg: rgb(61, 31, 31),
 };
+
+/// Which status color a pill, banner or badge uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Neutral,
+    Accent,
+    Ok,
+    Warn,
+    Err,
+    Info,
+}
 
 impl Palette {
     /// Barely visible fill for hovered table rows.
     pub fn faint_row(&self) -> Color32 {
-        Color32::from_rgba_unmultiplied(self.hover.r(), self.hover.g(), self.hover.b(), 150)
+        self.well
     }
+
+    /// `(text, fill)` of a tone.
+    pub fn tone(&self, tone: Tone) -> (Color32, Color32) {
+        match tone {
+            Tone::Neutral => (self.text_muted, self.subtle),
+            Tone::Accent => (self.accent_text, self.accent_soft),
+            Tone::Ok => (self.ok, self.ok_soft),
+            Tone::Warn => (self.warn, self.warn_soft),
+            Tone::Err => (self.err, self.err_soft),
+            Tone::Info => (self.info, self.info_soft),
+        }
+    }
+}
+
+/// Tone of an HTTP status code.
+pub fn status_tone(status: u16) -> Tone {
+    match status {
+        200..=299 => Tone::Ok,
+        300..=399 => Tone::Info,
+        400..=499 => Tone::Warn,
+        _ => Tone::Err,
+    }
+}
+
+/// Fixed sizes of the layout grid (points). Rows that sit side by side in
+/// the request and response panes have the same height, so their hairlines
+/// line up across the window.
+pub mod size {
+    /// Title bar with the workspace switcher, search and environment.
+    pub const TITLE_BAR: f32 = 44.0;
+    /// Tab strip at the top of the workbench card.
+    pub const TAB_STRIP: f32 = 40.0;
+    pub const STATUS_BAR: f32 = 28.0;
+    pub const RAIL: f32 = 52.0;
+    /// Title row of a view (breadcrumb, name, secondary actions).
+    pub const VIEW_TITLE: f32 = 46.0;
+    /// First row of a pane: URL bar + Send, or the response status.
+    pub const ACTION_ROW: f32 = 56.0;
+    /// Tabs inside a pane.
+    pub const TABS: f32 = 36.0;
+    /// Toolbar above a pane's content.
+    pub const TOOLBAR: f32 = 40.0;
+    /// Horizontal padding of pane rows and content.
+    pub const PAD: f32 = 12.0;
+    /// Table and key/value rows.
+    pub const ROW: f32 = 32.0;
+    pub const TABLE_HEAD: f32 = 28.0;
+    /// Sidebar tree rows.
+    pub const TREE_ROW: f32 = 28.0;
+    /// Gutter between two panes (1 px line in its middle).
+    pub const GUTTER: f32 = 9.0;
+    /// Side by side needs two usable panes; narrower work areas stack them.
+    pub const SIDE_BY_SIDE_MIN: f32 = 880.0;
 }
 
 pub fn palette(dark: bool) -> Palette {
@@ -169,9 +265,9 @@ const MEDIUM: &str = "medium";
 const SEMIBOLD: &str = "semibold";
 const ICONS: &str = "icons";
 
-/// Body text size for the user's font size setting.
+/// Body text size for the user's font size setting (13 by default).
 fn body(font_size: f32) -> f32 {
-    font_size + 0.5
+    font_size
 }
 
 /// Inter Medium (labels that need a little weight: tabs, buttons).
@@ -230,8 +326,15 @@ pub fn install_fonts(ctx: &egui::Context) {
 // Style
 // ---------------------------------------------------------------------------
 
-pub const RADIUS: u8 = 6;
+/// Controls (buttons, inputs); small controls use 6.
+pub const RADIUS: u8 = 7;
+pub const RADIUS_SM: u8 = 6;
+/// Cards.
+pub const RADIUS_CARD: u8 = 9;
+/// The workbench card and toasts.
 pub const RADIUS_LG: u8 = 10;
+/// Dialogs.
+pub const RADIUS_DIALOG: u8 = 14;
 
 pub fn apply(ctx: &egui::Context, font_size: f32) {
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
@@ -240,10 +343,11 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             let p = palette(dark);
             let s = &mut style.spacing;
             s.item_spacing = egui::vec2(8.0, 6.0);
-            s.button_padding = egui::vec2(10.0, 4.0);
-            s.interact_size = egui::vec2(24.0, 26.0);
-            s.window_margin = egui::Margin::same(16);
-            s.menu_margin = egui::Margin::same(6);
+            s.button_padding = egui::vec2(9.0, 4.0);
+            // Inputs, selects and menu items are 30 high.
+            s.interact_size = egui::vec2(24.0, 30.0);
+            s.window_margin = egui::Margin::same(18);
+            s.menu_margin = egui::Margin::same(5);
             s.indent = 16.0;
             s.icon_width = 15.0;
             s.icon_width_inner = 9.0;
@@ -261,7 +365,7 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             v.window_fill = p.surface;
             v.extreme_bg_color = p.surface;
             v.text_edit_bg_color = Some(p.surface);
-            v.faint_bg_color = if dark { Color32::from_rgb(28, 29, 33) } else { Color32::from_rgb(250, 250, 251) };
+            v.faint_bg_color = p.well;
             v.code_bg_color = p.subtle;
             v.hyperlink_color = p.accent_text;
             v.warn_fg_color = p.warn;
@@ -272,20 +376,20 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             // Also the border of a focused text field: accent in both themes.
             v.selection.stroke = Stroke::new(1.0, if dark { p.accent } else { p.accent_text });
             v.text_cursor.stroke = Stroke::new(1.5, p.accent);
-            v.window_corner_radius = CornerRadius::same(RADIUS_LG);
-            v.menu_corner_radius = CornerRadius::same(8);
+            v.window_corner_radius = CornerRadius::same(RADIUS_DIALOG);
+            v.menu_corner_radius = CornerRadius::same(RADIUS_LG);
             v.window_stroke = Stroke::new(1.0, p.border);
             v.window_shadow = Shadow {
-                offset: [0, 10],
-                blur: 30,
+                offset: [0, 24],
+                blur: 64,
                 spread: 0,
-                color: Color32::from_black_alpha(if dark { 120 } else { 38 }),
+                color: Color32::from_black_alpha(if dark { 153 } else { 56 }),
             };
             v.popup_shadow = Shadow {
-                offset: [0, 4],
-                blur: 14,
+                offset: [0, 6],
+                blur: 24,
                 spread: 0,
-                color: Color32::from_black_alpha(if dark { 100 } else { 28 }),
+                color: Color32::from_black_alpha(if dark { 128 } else { 31 }),
             };
             v.window_highlight_topmost = false;
             v.collapsing_header_frame = false;
@@ -314,7 +418,7 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             w.hovered.bg_fill = p.subtle;
             w.hovered.weak_bg_fill = p.hover;
             w.hovered.bg_stroke =
-                Stroke::new(1.0, if dark { p.border_strong } else { Color32::from_rgb(190, 190, 200) });
+                Stroke::new(1.0, if dark { Color32::from_rgb(80, 82, 90) } else { Color32::from_rgb(190, 190, 200) });
             w.hovered.fg_stroke = Stroke::new(1.0, p.text);
             w.hovered.corner_radius = radius;
             w.hovered.expansion = 0.0;
@@ -332,10 +436,10 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
 
             for (ts, font) in style.text_styles.iter_mut() {
                 *font = match ts {
-                    egui::TextStyle::Heading => semibold(font_size + 5.0),
-                    egui::TextStyle::Small => FontId::proportional(font_size - 1.5),
+                    egui::TextStyle::Heading => semibold(font_size + 3.0),
+                    egui::TextStyle::Small => FontId::proportional(font_size - 1.0),
                     egui::TextStyle::Monospace => mono(font_size - 0.5),
-                    egui::TextStyle::Button => FontId::proportional(body(font_size)),
+                    egui::TextStyle::Button => FontId::proportional(font_size - 0.5),
                     _ => FontId::proportional(body(font_size)),
                 };
             }

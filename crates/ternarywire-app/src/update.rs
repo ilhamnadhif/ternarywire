@@ -987,7 +987,7 @@ pub fn poll_requests(app: &mut TernaryWireApp, ctx: &egui::Context) {
 // UI
 // ---------------------------------------------------------------------------
 
-/// A small status-bar pill while a newer version is waiting.
+/// A small status-bar button (`.sbtn`, 22 high) while a newer version is waiting.
 pub fn status_pill(app: &mut TernaryWireApp, ui: &mut egui::Ui) {
     let Some(r) = &app.update.available else { return };
     if app.update.dialog_open {
@@ -998,38 +998,59 @@ pub fn status_pill(app: &mut TernaryWireApp, ui: &mut egui::Ui) {
         Some(_) => tr("Updating…").to_string(),
         None => trf("Update {}", &[&r.version]),
     };
-    let label = format!("{} {}", icons::ARROW_LINE_DOWN, text);
-    let resp = ui
-        .add(egui::Button::new(RichText::new(label).small().color(p.accent_text)).frame(false))
-        .on_hover_text(tr("A new version of TernaryWire is available"));
+    let g = ui.painter().layout_no_wrap(text.clone(), egui::FontId::proportional(11.5), p.accent_text);
+    let ig = ui.painter().layout_no_wrap(icons::ARROW_LINE_DOWN.into(), theme::icon_font(13.0), p.accent_text);
+    let size = egui::vec2(7.0 + ig.size().x + 6.0 + g.size().x + 7.0, 22.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &text));
+    let resp = resp.on_hover_text(tr("A new version of TernaryWire is available"));
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(5), p.hover);
+    }
+    let cy = rect.center().y;
+    let iw = ig.size().x;
+    ui.painter().galley(egui::pos2(rect.left() + 7.0, cy - ig.size().y / 2.0), ig, p.accent_text);
+    ui.painter().galley(egui::pos2(rect.left() + 13.0 + iw, cy - g.size().y / 2.0), g, p.accent_text);
     if resp.clicked() {
         app.update.dialog_open = true;
     }
 }
 
-/// Release notes in Markdown, drawn simply: headings, bullets, paragraphs.
+/// Release notes in Markdown, drawn simply (`.dl-relnotes`): 12 px
+/// semibold headings, muted bullets and paragraphs of 12.5.
 fn notes_ui(ui: &mut egui::Ui, notes: &str) {
     let p = theme::pal(ui);
     let clean = |s: &str| s.replace("**", "").replace('`', "");
+    ui.spacing_mut().item_spacing.y = 3.0;
+    let mut first = true;
     for line in notes.lines() {
         let t = line.trim();
         if t.is_empty() {
-            ui.add_space(4.0);
-        } else if let Some(h) = t.strip_prefix('#') {
-            ui.add_space(4.0);
-            ui.label(RichText::new(clean(h.trim_start_matches('#').trim())).font(theme::semibold(13.5)).color(p.text));
+            continue;
+        }
+        if let Some(h) = t.strip_prefix('#') {
+            if !first {
+                ui.add_space(7.0);
+            }
+            ui.label(RichText::new(clean(h.trim_start_matches('#').trim())).font(theme::semibold(12.0)).color(p.text));
+            ui.add_space(1.0);
         } else if let Some(b) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("•").color(p.text_muted));
-                ui.label(RichText::new(clean(b)).color(p.text));
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(6.0);
+                ui.label(RichText::new("•").size(12.5).color(p.text_muted));
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(RichText::new(clean(b)).size(12.5).color(p.text_muted)).wrap());
             });
         } else {
-            ui.label(RichText::new(clean(t)).color(p.text));
+            ui.add(egui::Label::new(RichText::new(clean(t)).size(12.5).color(p.text_muted)).wrap());
         }
+        first = false;
     }
 }
 
-/// Download › Verify › Install, with the current step spinning.
+/// Download › Verify › Install (`.dl-steps`): done steps green with a
+/// check, the current one spinning, the rest muted.
 fn steps_ui(ui: &mut egui::Ui, stage: Stage) {
     let p = theme::pal(ui);
     let current = match stage {
@@ -1039,37 +1060,46 @@ fn steps_ui(ui: &mut egui::Ui, stage: Stage) {
         Stage::Restarting => 3,
     };
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
         for (i, label) in [tr("Download"), tr("Verify"), tr("Install")].into_iter().enumerate() {
             if i > 0 {
-                ui.add_space(2.0);
-                ui.label(RichText::new(icons::CARET_RIGHT).font(theme::icon_font(12.0)).color(p.text_faint));
-                ui.add_space(2.0);
+                ui.label(RichText::new(icons::CARET_RIGHT).font(theme::icon_font(12.5)).color(p.text_faint));
             }
-            if i == current {
-                ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-            } else {
-                let (icon, color) =
-                    if i < current { (icons::CHECK_CIRCLE, p.ok) } else { (icons::CIRCLE, p.text_faint) };
-                ui.label(RichText::new(icon).font(theme::icon_font(15.0)).color(color));
-            }
-            ui.label(RichText::new(label).color(if i <= current { p.text } else { p.text_muted }));
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if i == current {
+                    ui.add(egui::Spinner::new().size(12.5).color(p.text));
+                    ui.label(RichText::new(label).font(theme::medium(12.5)).color(p.text));
+                } else if i < current {
+                    ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(12.5)).color(p.ok));
+                    ui.label(RichText::new(label).size(12.5).color(p.ok));
+                } else {
+                    ui.label(RichText::new(icons::CIRCLE).font(theme::icon_font(12.5)).color(p.text_muted));
+                    ui.label(RichText::new(label).size(12.5).color(p.text_muted));
+                }
+            });
         }
     });
 }
 
-/// The progress of a download (`install`: and of the install after it).
+/// The progress of a download (`install`: and of the install after it):
+/// the steps, an 8 px bar and what is happening.
 fn progress_ui(ui: &mut egui::Ui, stage: Stage, install: bool) {
     let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.y = 8.0;
     if install {
         steps_ui(ui, stage);
-        ui.add_space(8.0);
     }
     let frac = match stage {
         Stage::Starting => 0.0,
         Stage::Downloading { received, total } => total.map(|t| received as f32 / t.max(1) as f32).unwrap_or(0.0),
+        Stage::Verifying => 0.82,
         _ => 1.0,
     };
-    ui.add(egui::ProgressBar::new(frac).desired_height(8.0).fill(p.accent));
+    let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
+    ui.painter().rect_filled(bar, egui::CornerRadius::same(4), p.subtle);
+    let fill = egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac.clamp(0.0, 1.0), 8.0));
+    ui.painter().rect_filled(fill, egui::CornerRadius::same(4), p.accent);
     let text = match stage {
         Stage::Starting => tr("Looking for the newest version…").to_string(),
         Stage::Downloading { received, total } => trf(
@@ -1087,8 +1117,11 @@ fn progress_ui(ui: &mut egui::Ui, stage: Stage, install: bool) {
     ui.label(kit::hint(ui, &text));
 }
 
-/// The pop-up, when a newer version is available and not dismissed.
+/// The pop-up, when a newer version is available and not dismissed: no
+/// header; the app icon and the versions, the release notes in a card, the
+/// progress, and Skip / Remind me later / the main action.
 pub fn dialog(app: &mut TernaryWireApp, ctx: &egui::Context) {
+    use crate::dialogs::{Modal, Outcome, body_with, footer, trailing};
     if !app.update.dialog_open {
         return;
     }
@@ -1107,101 +1140,115 @@ pub fn dialog(app: &mut TernaryWireApp, ctx: &egui::Context) {
     let install = matches!(plan, Plan::Install(_))
         || matches!(plan, Plan::Download(_)) && Install::current() == Install::AppImage;
     let stage = app.update.stage;
-    let modal = egui::Modal::new(egui::Id::unique("update-available")).show(ctx, |ui| {
-        let p = theme::pal(ui);
-        ui.set_width(560.0);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Image::new(egui::include_image!("../assets/icon-256.png"))
-                    .fit_to_exact_size(egui::vec2(52.0, 52.0))
-                    .corner_radius(12),
-            );
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new(tr("A new version of TernaryWire is available")).font(theme::semibold(17.0)));
-                let mut sub = trf("{} is ready — you have {}.", &[&release.name, &CURRENT]);
-                if let Some(d) = &release.published {
-                    sub.push_str(&format!("  ·  {d}"));
-                }
-                ui.label(RichText::new(sub).color(p.text_muted));
+    let out = Modal::new("update-available", 560.0).center().show(ctx, |ui| {
+        body_with(ui, 20.0, |ui| {
+            let p = theme::pal(ui);
+            ui.spacing_mut().item_spacing.y = 14.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.add(
+                    egui::Image::new(egui::include_image!("../assets/icon-256.png"))
+                        .fit_to_exact_size(egui::vec2(52.0, 52.0))
+                        .corner_radius(12),
+                );
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(tr("A new version of TernaryWire is available"))
+                                .font(theme::semibold(15.0))
+                                .color(p.text),
+                        )
+                        .wrap(),
+                    );
+                    let mut sub = trf("{} is ready — you have {}.", &[&release.name, &CURRENT]);
+                    if let Some(d) = &release.published {
+                        sub.push_str(&format!("  ·  {d}"));
+                    }
+                    ui.add(egui::Label::new(RichText::new(sub).size(12.0).color(p.text_muted)).wrap());
+                });
             });
-        });
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.label(kit::section_title(tr("What's new")));
-            if !release.page_url.is_empty() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if kit::ghost(ui, Some(icons::ARROW_SQUARE_OUT), tr("Release notes")).clicked() {
-                        act = Act::Page;
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 24.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(kit::section_title(tr("What's new")).color(p.text));
+                    if !release.page_url.is_empty() {
+                        trailing(ui, |ui| {
+                            if kit::ghost(ui, Some(icons::ARROW_SQUARE_OUT), tr("Release notes")).clicked() {
+                                act = Act::Page;
+                            }
+                        });
+                    }
+                },
+            );
+            kit::card(ui).inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                egui::ScrollArea::vertical().max_height(186.0).auto_shrink([false, true]).show(ui, |ui| {
+                    if release.notes.is_empty() {
+                        ui.label(
+                            RichText::new(tr("See the release page for the changes.")).size(12.5).color(p.text_muted),
+                        );
+                    } else {
+                        notes_ui(ui, &release.notes);
                     }
                 });
+            });
+            if let Some(stage) = stage {
+                ui.vertical(|ui| progress_ui(ui, stage, install));
+            }
+            if let Some(path) = &app.update.downloaded {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(15.0)).color(p.ok));
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.label(RichText::new(trf("Downloaded {}", &[&name])).color(p.text));
+                    });
+                    let how = if cfg!(target_os = "macos") {
+                        tr("Open it, drag TernaryWire to Applications to replace this version, then start TernaryWire again.")
+                    } else {
+                        tr("Open it and replace this version with the new one, then start TernaryWire again.")
+                    };
+                    ui.add(egui::Label::new(kit::hint(ui, how)).wrap());
+                });
+            }
+            if let Some(e) = &app.update.error {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let title = if install { tr("The update was not installed") } else { tr("Download failed") };
+                    crate::proto_common::error_banner(ui, title, e, |_| {});
+                    if install {
+                        ui.add(
+                            egui::Label::new(kit::hint(
+                                ui,
+                                tr("TernaryWire was not changed. Try again, or get the new version from the release page."),
+                            ))
+                            .wrap(),
+                        );
+                    }
+                });
+            } else if install && stage.is_none() && app.update.downloaded.is_none() {
+                ui.label(kit::hint(ui, tr("TernaryWire quits, installs the new version and opens again with your tabs.")));
             }
         });
-        ui.add_space(4.0);
-        kit::card(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
-                if release.notes.is_empty() {
-                    ui.label(RichText::new(tr("See the release page for the changes.")).color(p.text_muted));
-                } else {
-                    notes_ui(ui, &release.notes);
-                }
-            });
-        });
-        if let Some(stage) = stage {
-            ui.add_space(12.0);
-            progress_ui(ui, stage, install);
-        }
-        if let Some(path) = &app.update.downloaded {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(18.0)).color(p.ok));
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                ui.label(RichText::new(trf("Downloaded {}", &[&name])).color(p.text));
-            });
-            let how = if cfg!(target_os = "macos") {
-                tr("Open it, drag TernaryWire to Applications to replace this version, then start TernaryWire again.")
-            } else {
-                tr("Open it and replace this version with the new one, then start TernaryWire again.")
-            };
-            ui.label(kit::hint(ui, how));
-        }
-        if let Some(e) = &app.update.error {
-            ui.add_space(10.0);
-            let title = if install { tr("The update was not installed") } else { tr("Download failed") };
-            crate::proto_common::error_banner(ui, title, e, |_| {});
-            if install {
-                ui.add_space(4.0);
-                ui.label(kit::hint(
-                    ui,
-                    tr("TernaryWire was not changed. Try again, or get the new version from the release page."),
-                ));
-            }
-        } else if install && stage.is_none() {
-            ui.add_space(10.0);
-            ui.label(kit::hint(ui, tr("TernaryWire quits, installs the new version and opens again with your tabs.")));
-        }
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
+        footer(ui, |ui| {
             let skip = ui.add_enabled_ui(stage.is_none(), |ui| kit::ghost(ui, None, tr("Skip this version"))).inner;
             if skip.clicked() {
                 act = Act::Skip;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            trailing(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 if stage.is_some() {
-                    let (icon, label) = if install {
-                        (icons::ARROWS_CLOCKWISE, tr("Installing…"))
-                    } else {
-                        (icons::DOWNLOAD_SIMPLE, tr("Downloading…"))
-                    };
-                    ui.add_enabled_ui(false, |ui| kit::primary_icon(ui, icon, label));
+                    let label = if install { tr("Installing…") } else { tr("Downloading…") };
+                    ui.add_enabled_ui(false, |ui| kit::primary(ui, label));
                 } else if app.update.downloaded.is_some() {
                     if kit::primary_icon(ui, icons::ARROW_SQUARE_OUT, tr("Open installer")).clicked() {
                         act = Act::Open;
                     }
                 } else {
                     let (icon, label) = match plan {
-                        Plan::Install(_) => (icons::ARROWS_CLOCKWISE, tr("Install and restart")),
+                        Plan::Install(_) => (icons::ARROW_LINE_DOWN, tr("Install and restart")),
                         Plan::Download(_) => (icons::DOWNLOAD_SIMPLE, tr("Download and install")),
                         Plan::Page => (icons::ARROW_SQUARE_OUT, tr("Get the update")),
                     };
@@ -1214,8 +1261,9 @@ pub fn dialog(app: &mut TernaryWireApp, ctx: &egui::Context) {
                 }
             });
         });
+        Outcome::Keep
     });
-    if modal.should_close() && act == Act::None {
+    if matches!(out, Outcome::Close) && act == Act::None {
         act = Act::Later;
     }
     match act {
@@ -1236,6 +1284,28 @@ pub fn dialog(app: &mut TernaryWireApp, ctx: &egui::Context) {
             }
         }
     }
+}
+
+/// Shows the pop-up (`progress`: while the new version is being verified),
+/// for screenshots of the dialog: for the release the startup check found,
+/// or else a made-up one.
+pub fn show_example(app: &mut TernaryWireApp, progress: bool) {
+    app.update.stage = progress.then_some(Stage::Verifying);
+    app.update.error = None;
+    app.update.downloaded = None;
+    app.update.dialog_open = true;
+    if app.update.available.is_some() {
+        return;
+    }
+    let notes = "## Workbench\n- Request on the left, response on the right, with a status row that always shows code, time, size and tests.\n- Local servers (mock, webhooks, capture) get their own sidebar section.\n## Fixes\n- Large responses no longer freeze the tree view.\n- OAuth 2.0 tokens refresh before a collection run starts.\n- gRPC reflection works with servers that only offer v1alpha.";
+    app.update.available = Some(Release {
+        version: "0.3.0".into(),
+        name: "TernaryWire 0.3.0".into(),
+        notes: notes.into(),
+        page_url: format!("{}/releases", env!("CARGO_PKG_REPOSITORY")),
+        published: Some("2026-11-10".into()),
+        assets: Vec::new(),
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ use ternarywire_mqtt::{Direction, MessageProperties, MqttConfig, MqttEvent, Mqtt
 use crate::app::{Msg, TernaryWireApp};
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
+use crate::kit::Tab;
 use crate::proto_common::{
     self as pc, Conn, ConnAction, Dir, ItemSlot, Log, LogLine, RowAction, ScriptState, basic_credentials, header,
     payload_text, resolver,
@@ -50,6 +51,12 @@ pub struct MqttTab {
     since: Option<Instant>,
     /// Why the last connection failed.
     error: Option<String>,
+    /// Subscriptions the broker granted on this connection (topic, QoS).
+    active: Vec<(String, u8)>,
+    session_present: bool,
+    /// Automation: `connect`, `publish`, `select:<row>`, `section:<name>`,
+    /// `compose:<topic>|<qos>|<retain>|<payload>`.
+    pub auto: Option<String>,
 }
 
 impl MqttTab {
@@ -74,6 +81,9 @@ impl MqttTab {
             inbox: Default::default(),
             since: None,
             error: None,
+            active: Vec::new(),
+            session_present: false,
+            auto: None,
         }
     }
 
@@ -103,13 +113,23 @@ impl MqttTab {
                 self.connected = true;
                 self.since = Some(Instant::now());
                 self.error = None;
+                self.session_present = session_present;
+                self.active.clear();
                 self.log.system(trf("Connected{}", &[&if session_present { tr(" (session present)") } else { "" }]));
             }
             MqttEvent::Subscribed { topic, granted_qos } => {
                 let qos = granted_qos.map(|q| format!(" (QoS {q})")).unwrap_or_default();
-                self.log.system(trf("Subscribed to {}{}", &[&topic, &qos]))
+                self.log.system(trf("Subscribed to {}{}", &[&topic, &qos]));
+                let granted = granted_qos.unwrap_or(0);
+                match self.active.iter_mut().find(|(t, _)| *t == topic) {
+                    Some(a) => a.1 = granted,
+                    None => self.active.push((topic, granted)),
+                }
             }
-            MqttEvent::Unsubscribed { topic } => self.log.system(trf("Unsubscribed from {}", &[&topic])),
+            MqttEvent::Unsubscribed { topic } => {
+                self.log.system(trf("Unsubscribed from {}", &[&topic]));
+                self.active.retain(|(t, _)| *t != topic);
+            }
             MqttEvent::Message { topic, payload, qos, retain, direction, at_ms } => {
                 let dir = if direction == Direction::Incoming { Dir::In } else { Dir::Out };
                 let mut meta = Vec::new();
@@ -167,6 +187,7 @@ impl MqttTab {
                 self.connecting = false;
                 self.session = None;
                 self.since = None;
+                self.active.clear();
                 self.log.system(if reason.is_empty() {
                     tr("Disconnected").to_string()
                 } else {
@@ -204,7 +225,7 @@ fn publish(app: &TernaryWireApp, tab: &MqttTab, collection: Option<&str>, out: O
     }
 }
 
-const QOS: [(u8, &str); 3] = [(0, "0"), (1, "1"), (2, "2")];
+const QOS: [(u8, Option<&str>, &str); 3] = [(0, None, "0"), (1, None, "1"), (2, None, "2")];
 
 pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MqttTab) {
     let Some(original) = tab.slot.load(app) else {
@@ -212,235 +233,259 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MqttTa
         return;
     };
     let mut item = original.clone();
+    // The rows of the view are edge to edge.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let collection = tab.slot.collection_id();
     let vars = app.var_ctx(collection.as_deref());
+    let resolve = resolver(app, collection.as_deref());
     let state = tab.state();
     let since = tab.since;
     let v5 = matches!(&item.request, RequestKind::Mqtt(r) if r.version == MqttVersion::V5);
     header(ui, app, tab_id, &tab.slot, &mut item, |ui| {
-        pc::conn_status(ui, state, since);
-        let p = theme::pal(ui);
-        kit::pill(ui, if v5 { "MQTT 5" } else { "MQTT 3.1.1" }, p.text_muted);
+        let opts = kit::PillOpts { outline: true, ..Default::default() };
+        kit::pill_ex(ui, if v5 { "MQTT 5" } else { "MQTT 3.1.1" }, kit::Tone::Neutral, opts);
     });
     let RequestKind::Mqtt(req) = &mut item.request else { return };
     let mut action = None;
-    let clicked = pc::connect_bar(
-        ui,
-        "MQTT",
-        126.0,
-        |ui| {
-            let r =
-                widgets::var_cell(ui, "mqtt-url", &mut req.url, &vars, "mqtt://localhost:1883", ui.available_width());
-            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && state != Conn::Live {
-                action = Some(ConnAction::Connect);
-            }
-            r.has_focus()
-        },
-        |ui| pc::connect_button(ui, state),
-    );
-    if clicked.is_some() {
-        action = clicked;
-    }
-    if let (Some(e), Conn::Failed) = (&tab.error, state) {
-        ui.add_space(8.0);
-        let mut retry = false;
-        let mut dismiss = false;
-        pc::error_banner(ui, tr("Could not connect to the broker"), e, |ui| {
-            dismiss = kit::icon_button(ui, icons::X, tr("Dismiss")).clicked();
-            retry = kit::secondary(ui, Some(icons::ARROW_CLOCKWISE), tr("Retry")).clicked();
-        });
-        if retry {
-            action = Some(ConnAction::Connect);
-        }
-        if dismiss {
-            tab.error = None;
-        }
-    }
     let connected = state == Conn::Live;
     let mut outgoing: Option<Outgoing> = None;
     let can_publish = connected && !tab.topic.trim().is_empty();
     if can_publish && pc::send_shortcut(ui) {
         outgoing = Some((tab.topic.clone(), tab.payload.clone(), tab.qos, tab.retain, tab.user_props.clone()));
     }
-    let active_subs = req.subscriptions.iter().filter(|s| s.enabled).count();
-    let items = vec![
-        (Section::Publish, tr("Publish").to_string()),
-        (Section::Subscriptions, trf("Subscriptions{}", &[&widgets::count_label(active_subs)])),
-        (Section::Saved, format!("{}{}", tr("Saved messages"), widgets::count_label(req.messages.len()))),
-        (Section::Connection, tr("Connection").to_string()),
-        (Section::Scripts, pc::scripts_label(&item.scripts)),
-    ];
-    ui.add_space(8.0);
-    pc::section_tabs(ui, "mqtt-tabs", &mut tab.section, &items);
-    ui.add_space(8.0);
+    match tab.auto.take().as_deref() {
+        Some("connect") if state != Conn::Live => action = Some(ConnAction::Connect),
+        Some("publish") if can_publish => {
+            outgoing = Some((tab.topic.clone(), tab.payload.clone(), tab.qos, tab.retain, tab.user_props.clone()))
+        }
+        Some(a) => {
+            if let Some(i) = a.strip_prefix("select:").and_then(|i| i.parse().ok()) {
+                tab.log.selected = Some(i);
+            } else if let Some(s) = a.strip_prefix("section:") {
+                tab.section = match s {
+                    "subs" | "subscriptions" => Section::Subscriptions,
+                    "saved" => Section::Saved,
+                    "conn" | "connection" => Section::Connection,
+                    "scripts" => Section::Scripts,
+                    _ => Section::Publish,
+                };
+            } else if let Some(rest) = a.strip_prefix("compose:") {
+                // `compose:<topic>|<qos>|<retain>|<payload>`
+                let mut parts = rest.splitn(4, '|');
+                tab.topic = parts.next().unwrap_or_default().to_string();
+                tab.qos = parts.next().and_then(|q| q.parse().ok()).unwrap_or(0);
+                tab.retain = parts.next() == Some("true");
+                tab.payload = parts.next().unwrap_or_default().to_string();
+            }
+        }
+        None => {}
+    }
     let mut sub_action: Option<(bool, String, u8)> = None;
-    {
-        let log = &mut tab.log;
-        let t = &mut tab.topic;
-        let payload = &mut tab.payload;
-        let qos = &mut tab.qos;
-        let retain = &mut tab.retain;
-        let user_props = &mut tab.user_props;
-        let section = &mut tab.section;
-        let scripts_state = &mut tab.scripts;
-        let scripts = &mut item.scripts;
-        pc::split_view(
-            ui,
-            ("mqtt-split", tab_id),
-            0.5,
-            |ui| match *section {
+    let mut unsubscribe: Option<String> = None;
+    let mut go_subs = false;
+    let mut retry = false;
+    let panes = ui.make_persistent_id("mqtt-panes");
+    let session_present = tab.session_present;
+    let scripts = &mut item.scripts;
+    pc::view_panes(
+        ui,
+        panes,
+        |ui| {
+            let clicked = pc::connect_bar(
+                ui,
+                "MQTT",
+                124.0,
+                |ui| {
+                    let w = ui.available_width();
+                    let r = pc::bar_var(ui, "mqtt-url", &mut req.url, &vars, "mqtt://localhost:1883", w);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && state != Conn::Live {
+                        action = Some(ConnAction::Connect);
+                    }
+                    r.has_focus()
+                },
+                |ui| pc::connect_button(ui, state),
+            );
+            if clicked.is_some() {
+                action = clicked;
+            }
+            let active_subs = req.subscriptions.iter().filter(|s| s.enabled).count();
+            let tabs = [
+                Tab::new(Section::Publish, tr("Publish")),
+                Tab::new(Section::Subscriptions, tr("Subscriptions")).count(active_subs),
+                Tab::new(Section::Saved, tr("Saved")).count(req.messages.len()),
+                Tab::new(Section::Connection, tr("Connection")),
+                Tab::new(Section::Scripts, tr("Scripts")).count(pc::scripts_count(scripts)),
+            ];
+            kit::tabs(ui, &mut tab.section, &tabs);
+            let t = &mut tab.topic;
+            let payload = &mut tab.payload;
+            let qos = &mut tab.qos;
+            let retain = &mut tab.retain;
+            let user_props = &mut tab.user_props;
+            let p = theme::pal(ui);
+            let label = |ui: &mut Ui, text: &str| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 20.0), egui::Sense::hover());
+                ui.painter().text(
+                    rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    text,
+                    egui::FontId::proportional(13.0),
+                    p.text_muted,
+                );
+            };
+            match tab.section {
                 Section::Publish => {
-                    let p = theme::pal(ui);
-                    ui.horizontal(|ui| {
-                        ui.set_height(30.0);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if pc::send_button(
-                                ui,
-                                icons::PAPER_PLANE_RIGHT,
-                                tr("Publish"),
-                                connected && !t.trim().is_empty(),
-                                if connected { tr("Enter a topic first") } else { tr("Connect first") },
-                            ) {
-                                outgoing = Some((t.clone(), payload.clone(), *qos, *retain, user_props.clone()));
+                    pc::toolbar(
+                        ui,
+                        |ui| {
+                            label(ui, tr("Topic"));
+                            let w = ui.available_width();
+                            pc::var_input_sm(ui, "mqtt-topic", t, &vars, "sensors/kitchen/temp", w);
+                        },
+                        |_| {},
+                    );
+                    let (topic_now, qos_now, retain_now) = (t.clone(), *qos, *retain);
+                    pc::toolbar(
+                        ui,
+                        |ui| {
+                            label(ui, "QoS");
+                            ui.push_id("pub-qos", |ui| kit::segmented_ex(ui, qos, &QOS, true));
+                            ui.add_space(6.0);
+                            pc::check_label(ui, retain, tr("Retain")).on_hover_text(tr(
+                                "The broker keeps the last retained message of a topic for new subscribers",
+                            ));
+                        },
+                        |ui| {
+                            let hint = if connected { tr("Enter a topic first") } else { tr("Connect first") };
+                            if pc::toolbar_send(ui, tr("Publish"), connected && !topic_now.trim().is_empty(), hint) {
+                                outgoing =
+                                    Some((topic_now.clone(), payload.clone(), qos_now, retain_now, user_props.clone()));
                             }
-                            if pc::save_message_button(ui, !t.trim().is_empty()) {
+                            if pc::save_message_button(ui, !topic_now.trim().is_empty()) {
                                 req.messages.push(MqttMessage {
-                                    name: t.clone(),
-                                    topic: t.clone(),
+                                    name: topic_now.clone(),
+                                    topic: topic_now.clone(),
                                     payload: payload.clone(),
-                                    qos: *qos,
-                                    retain: *retain,
+                                    qos: qos_now,
+                                    retain: retain_now,
                                     user_properties: user_props.clone(),
                                     ..Default::default()
                                 });
                             }
-                            kit::vdivider(ui, 20.0);
-                            ui.checkbox(retain, tr("Retain")).on_hover_text(tr(
-                                "The broker keeps the last retained message of a topic for new subscribers",
-                            ));
-                            ui.push_id("pub-qos", |ui| kit::segmented(ui, qos, &QOS));
-                            ui.label(RichText::new("QoS").color(p.text_muted));
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(tr("Topic")).color(p.text_muted));
-                                widgets::var_line(
-                                    ui,
-                                    "mqtt-topic",
-                                    t,
-                                    &vars,
-                                    "sensors/kitchen/temp",
-                                    ui.available_width(),
-                                );
-                            });
-                        });
-                    });
-                    ui.add_space(6.0);
-                    egui::ScrollArea::vertical().id_salt("mqtt-publish").show(ui, |ui| {
-                        let rows = if req.version == MqttVersion::V5 {
-                            pc::fill_rows(ui, 4).saturating_sub(7).max(4)
-                        } else {
-                            pc::fill_rows(ui, 4)
-                        };
-                        let r = widgets::code_editor(ui, "mqtt-payload", payload, Lang::Json, Some(&vars), rows, false);
-                        pc::editor_placeholder(ui, &r, payload, tr("Payload: JSON or text, with {{variables}}"));
-                        if req.version == MqttVersion::V5 {
-                            ui.add_space(10.0);
-                            let opts = widgets::KvOptions {
-                                title: Some(tr("User properties")),
-                                key_suggestions: None,
-                                show_description: false,
-                                key_hint: tr("Name"),
-                                value_hint: tr("Value"),
-                                readonly_keys: false,
-                                allow_add: true,
-                            };
-                            widgets::kv_table(ui, "mqtt-user-props", user_props, &vars, opts);
+                        },
+                    );
+                    // The user properties (MQTT 5) under the editor keep their
+                    // height (measured on the previous frame).
+                    let props_id = ui.make_persistent_id("mqtt-props-h");
+                    let props_h: f32 = if req.version == MqttVersion::V5 {
+                        ui.data(|d| d.get_temp(props_id).unwrap_or(120.0))
+                    } else {
+                        0.0
+                    };
+                    let margin = egui::Margin { left: 12, right: 12, top: 4, bottom: 10 };
+                    let h = (ui.available_height() - 14.0 - props_h).max(80.0);
+                    let r =
+                        pc::editor_well(ui, "mqtt-payload", payload, Lang::Json, Some(&vars), margin, Some(h), None);
+                    pc::well_placeholder(ui, &r, payload, tr("Payload: JSON or text, with {{variables}}"));
+                    if req.version == MqttVersion::V5 {
+                        let top = ui.cursor().top();
+                        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 12 }).show(
+                            ui,
+                            |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                let id = ui.make_persistent_id("mqtt-user-props-open");
+                                let n = user_props.iter().filter(|p| p.enabled && !p.key.is_empty()).count();
+                                let open = pc::disclosure(ui, id, tr("User properties"), Some(n), true, |ui| {
+                                    ui.label(RichText::new("MQTT 5").size(11.0).color(p.text_faint));
+                                });
+                                if open {
+                                    egui::ScrollArea::vertical().id_salt("mqtt-props-scroll").max_height(200.0).show(
+                                        ui,
+                                        |ui| {
+                                            let opts = widgets::KvOptions {
+                                                title: None,
+                                                key_suggestions: None,
+                                                show_description: false,
+                                                key_hint: tr("Name"),
+                                                value_hint: tr("Value"),
+                                                readonly_keys: false,
+                                                allow_add: true,
+                                            };
+                                            widgets::kv_table(ui, "mqtt-user-props", user_props, &vars, opts);
+                                        },
+                                    );
+                                }
+                            },
+                        );
+                        let used = ui.cursor().top() - top;
+                        if (used - props_h).abs() > 0.5 {
+                            ui.data_mut(|d| d.insert_temp(props_id, used));
+                            ui.ctx().request_repaint();
                         }
-                    });
+                    }
                 }
                 Section::Subscriptions => {
-                    egui::ScrollArea::vertical().id_salt("mqtt-subs").show(ui, |ui| {
-                        pc::section(
+                    let n_subs = req.subscriptions.len();
+                    pc::toolbar(
+                        ui,
+                        |ui| pc::toolbar_title(ui, tr("Subscriptions"), Some(n_subs)),
+                        |ui| {
+                            if kit::ghost(ui, Some(icons::PLUS), tr("Add subscription")).clicked() {
+                                req.subscriptions.push(MqttSubscription { topic: "#".into(), qos: 0, enabled: true });
+                            }
+                        },
+                    );
+                    pc::body(ui, "mqtt-subs", 0.0, 10.0, |ui| {
+                        ui.label(kit::hint(
                             ui,
-                            tr("Subscriptions"),
-                            Some(tr("Enabled subscriptions are made automatically after connecting. Wildcards + and # are allowed.")),
-                        );
-                        ui.add_space(4.0);
+                            tr("Enabled subscriptions are made automatically after connecting. Wildcards + and # are allowed."),
+                        ));
                         if req.subscriptions.is_empty() {
                             ui.label(kit::hint(ui, tr("No subscriptions yet.")));
-                        } else {
-                            let p = theme::pal(ui);
-                            let mut remove = None;
-                            egui::Frame::new()
-                                .stroke(egui::Stroke::new(1.0, p.border))
-                                .corner_radius(egui::CornerRadius::same(8))
-                                .inner_margin(egui::Margin::symmetric(8, 2))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    for (i, s) in req.subscriptions.iter_mut().enumerate() {
-                                        if i > 0 {
-                                            let y = ui.cursor().top();
-                                            ui.painter().hline(
-                                                ui.max_rect().expand2(egui::vec2(8.0, 0.0)).x_range(),
-                                                y,
-                                                egui::Stroke::new(1.0, p.border),
-                                            );
-                                        }
-                                        ui.push_id(i, |ui| {
-                                            ui.allocate_ui_with_layout(
-                                                egui::vec2(ui.available_width(), 36.0),
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                                    if kit::icon_button(ui, icons::TRASH, tr("Remove subscription")).clicked() {
-                                                        remove = Some(i);
-                                                    }
-                                                    if connected {
-                                                        if kit::ghost(ui, Some(icons::MINUS), tr("Unsubscribe")).clicked() {
-                                                            sub_action = Some((false, s.topic.clone(), s.qos));
-                                                        }
-                                                        if kit::ghost(ui, Some(icons::PLUS), tr("Subscribe")).clicked() {
-                                                            sub_action = Some((true, s.topic.clone(), s.qos));
-                                                        }
-                                                    }
-                                                    ui.push_id("qos", |ui| kit::segmented(ui, &mut s.qos, &QOS));
-                                                    ui.label(RichText::new("QoS").color(p.text_muted));
-                                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                        ui.checkbox(&mut s.enabled, "")
-                                                            .on_hover_text(tr("Subscribe after connecting"));
-                                                        ui.add(
-                                                            egui::TextEdit::singleline(&mut s.topic)
-                                                                .desired_width(ui.available_width())
-                                                                .hint_text("sensors/#")
-                                                                .font(egui::TextStyle::Monospace),
-                                                        );
-                                                    });
-                                                },
-                                            );
-                                        });
-                                    }
-                                });
-                            if let Some(i) = remove {
-                                req.subscriptions.remove(i);
-                            }
+                            return;
                         }
-                        ui.add_space(6.0);
-                        if kit::ghost(ui, Some(icons::PLUS), tr("Add subscription")).clicked() {
-                            req.subscriptions.push(MqttSubscription { topic: "#".into(), qos: 0, enabled: true });
+                        let mut remove = None;
+                        let n = req.subscriptions.len();
+                        pc::list_box(ui, n, 40.0, |ui, i| {
+                            let s = &mut req.subscriptions[i];
+                            kit::check(ui, &mut s.enabled, tr("Subscribe after connecting"))
+                                .on_hover_text(tr("Subscribe after connecting"));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                if kit::icon_button_sm(ui, icons::TRASH, tr("Remove subscription")).clicked() {
+                                    remove = Some(i);
+                                }
+                                if connected {
+                                    let live = tab.active.iter().any(|(t, _)| *t == resolve(&s.topic));
+                                    let (icon, tip) = if live {
+                                        (icons::MINUS, tr("Unsubscribe"))
+                                    } else {
+                                        (icons::PLUS, tr("Subscribe"))
+                                    };
+                                    let opts = kit::ButtonOpts { icon: Some(icon), ..Default::default() };
+                                    let r =
+                                        kit::button(ui, kit::Kind::Ghost, kit::Size::Sm, "", opts).on_hover_text(tip);
+                                    widgets::a11y_name(&r, tip);
+                                    if r.clicked() {
+                                        sub_action = Some((!live, s.topic.clone(), s.qos));
+                                    }
+                                }
+                                ui.push_id("qos", |ui| kit::segmented_ex(ui, &mut s.qos, &QOS, true));
+                                pc::row_input(ui, &mut s.topic, "sensors/#", ui.available_width(), true);
+                            });
+                        });
+                        if let Some(i) = remove {
+                            req.subscriptions.remove(i);
                         }
                     });
                 }
                 Section::Saved => {
-                    egui::ScrollArea::vertical().id_salt("mqtt-saved").show(ui, |ui| {
+                    pc::toolbar(ui, |ui| pc::toolbar_title(ui, tr("Saved messages"), Some(req.messages.len())), |_| {});
+                    pc::body(ui, "mqtt-saved", 0.0, 14.0, |ui| {
                         if req.messages.is_empty() {
-                            kit::empty_state(
-                                ui,
-                                icons::BOOKMARK_SIMPLE,
-                                tr("No saved messages"),
-                                tr("Save messages from the Publish section to reuse them."),
-                                |_| {},
-                            );
+                            ui.label(kit::hint(ui, tr("Save messages from the Publish section to reuse them.")));
                         } else {
-                            let p = theme::pal(ui);
                             let acted = pc::saved_list(
                                 ui,
                                 "mqtt-saved-list",
@@ -448,17 +493,12 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MqttTa
                                 connected,
                                 tr("Publish now"),
                                 |ui, m| {
-                                    pc::name_field(ui, &mut m.name, 140.0);
-                                    kit::pill(ui, &crate::dialogs::ellipsize(&m.topic, 40), p.text_muted);
+                                    pc::name_field(ui, &mut m.name, 120.0);
+                                    pc::mono_tag(ui, &m.topic, 180.0);
                                     if m.qos > 0 {
-                                        ui.label(RichText::new(format!("QoS {}", m.qos)).small().color(p.text_muted));
+                                        kit::tone_pill(ui, &format!("QoS {}", m.qos), kit::Tone::Neutral);
                                     }
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(m.payload.replace('\n', " ")).monospace().color(p.text_muted),
-                                        )
-                                        .truncate(),
-                                    );
+                                    pc::row_summary(ui, &m.payload);
                                 },
                             );
                             match acted {
@@ -469,7 +509,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MqttTa
                                     *qos = m.qos;
                                     *retain = m.retain;
                                     *user_props = m.user_properties;
-                                    *section = Section::Publish;
+                                    tab.section = Section::Publish;
                                 }
                                 Some((i, RowAction::Send)) => {
                                     let m = &req.messages[i];
@@ -487,101 +527,129 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MqttTa
                                 None => {}
                             }
                         }
-                        ui.add_space(12.0);
                         crate::ws_tab::runner_section(ui, "mqtt", &mut req.runner, tr("topic filter, e.g. status/+"));
                     });
                 }
-                Section::Scripts => crate::proto_common::scripts_ui(
+                Section::Scripts => pc::scripts_ui(
                     ui,
                     scripts,
                     &[(ScriptEvent::PreRequest, "Before connect"), (ScriptEvent::OnMessage, "On message")],
-                    scripts_state,
+                    &mut tab.scripts,
                     &vars,
                 ),
                 Section::Connection => {
-                    egui::ScrollArea::vertical().id_salt("mqtt-conn").show(ui, |ui| {
-                        pc::form_grid("mqtt-conn").show(ui, |ui| {
-                            pc::form_label(ui, tr("Version"));
-                            ui.push_id("version", |ui| {
-                                kit::segmented(
-                                    ui,
-                                    &mut req.version,
-                                    &[(MqttVersion::V311, "3.1.1"), (MqttVersion::V5, "5.0")],
-                                )
-                            });
-                            ui.end_row();
-                            pc::form_label(ui, tr("Client ID"));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut req.client_id)
-                                    .hint_text(tr("generated when empty"))
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_width(260.0),
-                            );
-                            ui.end_row();
-                            pc::form_label(ui, tr("Keep alive (s)"));
-                            crate::widgets::a11y_name(
-                                &ui.add(egui::DragValue::new(&mut req.keep_alive_secs).range(0..=65535)),
-                                tr("Keep alive (s)"),
-                            );
-                            ui.end_row();
-                            pc::form_label(ui, tr("Clean session"));
-                            ui.checkbox(&mut req.clean_session, tr("Start without stored subscriptions"));
-                            ui.end_row();
-                            pc::form_label(ui, tr("Verify SSL certificates"));
-                            let mut verify = req.verify_ssl.unwrap_or(true);
-                            if ui.checkbox(&mut verify, tr("For mqtts:// and wss:// brokers")).changed() {
-                                req.verify_ssl = Some(verify);
-                            }
-                            ui.end_row();
-                        });
-                        ui.add_space(14.0);
-                        pc::section(ui, tr("Credentials"), None);
-                        basic_credentials(ui, &mut req.auth, &vars);
-                        ui.add_space(14.0);
-                        pc::section(
-                            ui,
-                            tr("Last will"),
-                            Some(tr("Published by the broker when this client disconnects unexpectedly.")),
-                        );
-                        let mut has_will = req.last_will.is_some();
-                        if ui.checkbox(&mut has_will, tr("Send a last will")).changed() {
-                            req.last_will = if has_will { Some(MqttMessage::default()) } else { None };
-                        }
-                        if let Some(w) = &mut req.last_will {
-                            ui.add_space(4.0);
-                            pc::form_grid("mqtt-will").show(ui, |ui| {
-                                pc::form_label(ui, tr("Topic"));
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut w.topic)
-                                        .hint_text("clients/ternarywire/status")
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(260.0),
-                                );
-                                ui.end_row();
-                                pc::form_label(ui, tr("Payload"));
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut w.payload)
-                                        .hint_text("offline")
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(260.0),
-                                );
-                                ui.end_row();
-                                pc::form_label(ui, "QoS");
-                                ui.horizontal(|ui| {
-                                    ui.push_id("will-qos", |ui| kit::segmented(ui, &mut w.qos, &QOS));
-                                    ui.checkbox(&mut w.retain, tr("Retain"));
+                    pc::toolbar(ui, |ui| pc::toolbar_title(ui, tr("Connection"), None), |_| {});
+                    pc::body(ui, "mqtt-conn", 0.0, 16.0, |ui| {
+                        kit::group(ui, "", "", |ui, rows| {
+                            rows.row(ui, tr("Version"), "", |ui| {
+                                ui.push_id("version", |ui| {
+                                    kit::segmented_ex(
+                                        ui,
+                                        &mut req.version,
+                                        &[(MqttVersion::V311, None, "3.1.1"), (MqttVersion::V5, None, "5.0")],
+                                        true,
+                                    )
                                 });
-                                ui.end_row();
                             });
-                        }
+                            rows.row(ui, tr("Client ID"), "", |ui| {
+                                pc::input_sm(ui, &mut req.client_id, tr("generated when empty"), 190.0, true);
+                            });
+                            rows.row(ui, tr("Keep alive (s)"), "", |ui| {
+                                pc::number_input(
+                                    ui,
+                                    "mqtt-keep-alive",
+                                    &mut req.keep_alive_secs,
+                                    80.0,
+                                    tr("Keep alive (s)"),
+                                );
+                            });
+                            rows.row(ui, tr("Clean session"), tr("Start without stored subscriptions"), |ui| {
+                                kit::check(ui, &mut req.clean_session, tr("Clean session"));
+                            });
+                            rows.row(ui, tr("Verify SSL certificates"), tr("For mqtts:// and wss:// brokers"), |ui| {
+                                let mut verify = req.verify_ssl.unwrap_or(true);
+                                if kit::check(ui, &mut verify, tr("Verify SSL certificates")).changed() {
+                                    req.verify_ssl = Some(verify);
+                                }
+                            });
+                        });
+                        basic_credentials(ui, &mut req.auth, &vars);
+                        kit::group(ui, tr("Last will"), "", |ui, rows| {
+                            rows.block(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                let mut has_will = req.last_will.is_some();
+                                if kit::checkbox(ui, &mut has_will, tr("Send a last will")).changed() {
+                                    req.last_will = if has_will { Some(MqttMessage::default()) } else { None };
+                                }
+                                ui.label(kit::hint(
+                                    ui,
+                                    tr("Published by the broker when this client disconnects unexpectedly."),
+                                ));
+                            });
+                            if let Some(w) = &mut req.last_will {
+                                rows.row(ui, tr("Topic"), "", |ui| {
+                                    pc::input_sm(ui, &mut w.topic, "clients/ternarywire/status", 220.0, true);
+                                });
+                                rows.row(ui, tr("Payload"), "", |ui| {
+                                    pc::input_sm(ui, &mut w.payload, "offline", 220.0, true);
+                                });
+                                rows.row(ui, "QoS", "", |ui| {
+                                    pc::check_label(ui, &mut w.retain, tr("Retain"));
+                                    ui.push_id("will-qos", |ui| kit::segmented_ex(ui, &mut w.qos, &QOS, true));
+                                });
+                            }
+                        });
                     });
                 }
-            },
-            |ui| log.ui(ui, ("mqtt-log", tab_id)),
-        );
+            }
+        },
+        |ui| {
+            pc::status_row(
+                ui,
+                |ui| {
+                    let text = pc::conn_text(ui, state, since);
+                    pc::status_pill(ui, state, &text);
+                    let (sent, received) = tab.log.counts();
+                    pc::metrics(ui, |ui| {
+                        if connected && session_present {
+                            kit::metric(ui, icons::CHECK, tr("session present"));
+                        }
+                        if connected || sent + received > 0 {
+                            kit::metric(ui, icons::ARROW_UP, &trf("{} sent", &[&sent]));
+                            kit::metric(ui, icons::ARROW_DOWN, &trf("{} received", &[&received]));
+                        }
+                    });
+                },
+                |ui| pc::pane_actions(ui, panes),
+            );
+            tab.log.bar(ui, ("mqtt-log", tab_id));
+            if let (Some(e), Conn::Failed) = (&tab.error, state) {
+                let (r, dismiss) = pc::connection_error(ui, tr("Could not connect to the broker"), e);
+                retry = r;
+                if dismiss {
+                    tab.error = None;
+                }
+            }
+            if connected {
+                let (u, add) = subscribed_chips(ui, &tab.active);
+                unsubscribe = u;
+                go_subs = add;
+            }
+            tab.log.body(ui, ("mqtt-log", tab_id));
+        },
+    );
+    if retry {
+        action = Some(ConnAction::Connect);
+    }
+    if go_subs {
+        tab.section = Section::Subscriptions;
     }
     if let Some(out) = outgoing {
         publish(app, tab, collection.as_deref(), out);
+    }
+    if let (Some(topic), Some(sess)) = (unsubscribe, &tab.session) {
+        // Already resolved (as the broker granted it).
+        sess.unsubscribe(&topic);
     }
     if let (Some((subscribe, topic, qos)), Some(sess)) = (sub_action, &tab.session) {
         // Topics may hold variables, as when connecting.
@@ -647,6 +715,62 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MqttTa
             break;
         }
     }
+}
+
+/// The subscriptions the broker granted, as chips above the log (× to
+/// unsubscribe), and Add (opens the Subscriptions section). Returns the
+/// topic to unsubscribe and whether Add was clicked.
+fn subscribed_chips(ui: &mut Ui, active: &[(String, u8)]) -> (Option<String>, bool) {
+    let p = theme::pal(ui);
+    let mut unsubscribe = None;
+    let mut add = false;
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            ui.add_sized(egui::vec2(0.0, 24.0), egui::Label::new(kit::eyebrow(ui, tr("Subscribed"))).selectable(false));
+            ui.add_space(2.0);
+            for (topic, qos) in active {
+                let tg = kit::elide(ui, topic, theme::mono(11.5), p.text, 220.0);
+                let qg =
+                    ui.painter().layout_no_wrap(format!("QoS {qos}"), egui::FontId::proportional(11.5), p.text_faint);
+                let w = 9.0 + tg.size().x + 6.0 + qg.size().x + 6.0 + 18.0 + 4.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::hover());
+                ui.painter().rect(
+                    rect,
+                    egui::CornerRadius::same(12),
+                    p.surface,
+                    egui::Stroke::new(1.0, p.border),
+                    egui::StrokeKind::Inside,
+                );
+                let mut x = rect.left() + 9.0;
+                ui.painter().galley(egui::pos2(x, rect.center().y - tg.size().y / 2.0), tg.clone(), p.text);
+                x += tg.size().x + 6.0;
+                ui.painter().galley(egui::pos2(x, rect.center().y - qg.size().y / 2.0), qg.clone(), p.text_faint);
+                let xr = egui::Rect::from_center_size(
+                    egui::pos2(rect.right() - 13.0, rect.center().y),
+                    egui::vec2(18.0, 18.0),
+                );
+                let r = ui.interact(xr, ui.make_persistent_id(("unsubscribe", topic)), egui::Sense::click());
+                let r = r.on_hover_text(tr("Unsubscribe"));
+                widgets::a11y_button(&r, &format!("{} {topic}", tr("Unsubscribe")));
+                if r.hovered() {
+                    ui.painter().circle_filled(xr.center(), 9.0, p.hover);
+                }
+                let c = if r.hovered() { p.text } else { p.text_faint };
+                ui.painter().text(xr.center(), egui::Align2::CENTER_CENTER, icons::X, theme::icon_font(10.0), c);
+                if r.clicked() {
+                    unsubscribe = Some(topic.clone());
+                }
+            }
+            if kit::ghost(ui, Some(icons::PLUS), tr("Add")).on_hover_text(tr("Add subscription")).clicked() {
+                add = true;
+            }
+        });
+    });
+    let bottom = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), bottom - 0.5, egui::Stroke::new(1.0, p.border));
+    (unsubscribe, add)
 }
 
 fn start(

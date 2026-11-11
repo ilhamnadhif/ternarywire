@@ -1,10 +1,17 @@
 //! HTTP (and GraphQL) request tab: URL bar, request editor sections and the
 //! response panel (PRD 5.1, 5.3, 6.1, 7.1).
+//!
+//! Layout (the redesign's `http` screens): a 46 px title row, then two
+//! panes side by side (or stacked when narrow). The request pane is the URL
+//! row (56) + section tabs (36) + the section; the response pane is the
+//! status row (56) + response tabs (36) + the response section, so the rows
+//! of both panes line up.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 
-use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use ternarywire_core::auth::{Auth, AuthType};
 use ternarywire_core::model::{
@@ -21,9 +28,10 @@ use crate::app::{ItemRef, TernaryWireApp};
 use crate::body_view::BodyState;
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
+use crate::icons;
+use crate::kit::{self, ButtonOpts, Kind, PillOpts, Size, Tab, Tone, size};
 use crate::theme;
 use crate::widgets::{self, KvOptions, VarCtx};
-use crate::{icons, kit};
 
 pub struct Running {
     pub cancel: CancellationToken,
@@ -40,23 +48,30 @@ pub struct ResultView {
 /// How much of the tab the response panel takes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PanelMode {
-    /// The split set by the divider ([`RequestTab::split`]).
+    /// The split set by the divider.
     #[default]
     Normal,
-    /// The request editor is folded to its section tabs (below) or hidden
-    /// (side by side).
+    /// The request editor is folded to its URL row and section tabs
+    /// (stacked) or hidden (side by side).
     Maximized,
-    /// Only the response's header bar is shown.
+    /// Only the response's status row is shown (a narrow rail beside the
+    /// request).
     Minimized,
 }
 
-#[derive(Default)]
 pub struct GraphQlState {
     pub schema: Option<Arc<ternarywire_convert::graphql::Schema>>,
     pub loading: bool,
     pub error: Option<String>,
+    /// The schema explorer drawer beside the query (open by default).
     pub explorer_open: bool,
     pub filter: String,
+}
+
+impl Default for GraphQlState {
+    fn default() -> Self {
+        GraphQlState { schema: None, loading: false, error: None, explorer_open: true, filter: String::new() }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,7 +116,8 @@ pub struct RequestTab {
     pub graphql: GraphQlState,
     pub test_filter: TestFilter,
     renaming: Option<String>,
-    /// Fraction of the tab given to the response panel.
+    /// Fraction of the panes given to the request at first (and after a
+    /// double click on the divider).
     pub split: f32,
     /// Set by UI automation to press Send through the normal button path.
     pub click_send: bool,
@@ -126,6 +142,14 @@ pub struct RequestTab {
     tools: crate::response_actions::Tools,
     /// A body value action requested by UI automation.
     pending_value: Option<crate::response_actions::ValueAction>,
+    /// The tab was opened from a History entry: when it was sent (unix
+    /// milliseconds) and the status it got (None: it failed). Shown as a
+    /// notice under the title row until dismissed or saved.
+    pub from_history: Option<(i64, Option<u16>)>,
+    /// Docs: the description is shown rendered instead of edited.
+    docs_preview: bool,
+    /// UI automation asked for the GraphQL schema.
+    pending_schema: bool,
 }
 
 pub struct GqlSubscription {
@@ -239,6 +263,9 @@ impl RequestTab {
             compare: Default::default(),
             tools: Default::default(),
             pending_value: None,
+            from_history: None,
+            docs_preview: false,
+            pending_schema: false,
         }
     }
 
@@ -305,13 +332,25 @@ impl RequestTab {
     /// UI automation of the response panel: `maximize`, `minimize`,
     /// `restore`, `compare`, `compare_headers`, `generate_tests`,
     /// `add_generated_tests` (presses "Add tests" in the preview),
-    /// `set_var:<path>`, `add_test:<path>` (a path of the JSON body).
+    /// `set_var:<path>`, `add_test:<path>` (a path of the JSON body), and
+    /// of the request: `fetch_schema` (GraphQL), `docs_preview`,
+    /// `from_history:<unix ms>:<status>`.
     pub fn automation(&mut self, action: &str) {
         use crate::response_actions::ValueAction;
         match action {
             "maximize" => self.panel = PanelMode::Maximized,
             "minimize" => self.panel = PanelMode::Minimized,
             "restore" => self.panel = PanelMode::Normal,
+            "fetch_schema" => self.pending_schema = true,
+            "docs_preview" => self.docs_preview = true,
+            // `from_history:<sent at, unix ms>:<status or "-">`: the notice of
+            // a tab opened from History (set by `app::open_history`).
+            a if a.starts_with("from_history:") => {
+                let mut parts = a.splitn(3, ':').skip(1);
+                if let Some(at) = parts.next().and_then(|t| t.parse().ok()) {
+                    self.from_history = Some((at, parts.next().and_then(|s| s.parse().ok())));
+                }
+            }
             "compare" | "compare_headers" => {
                 self.resp_section = RespSection::Compare;
                 self.compare.mode = if action == "compare" {
@@ -350,17 +389,34 @@ impl RequestTab {
     }
 }
 
+/// A recent History entry offered in the empty response.
+struct Recent {
+    id: String,
+    method: String,
+    path: String,
+    status: Option<u16>,
+    when: String,
+}
+
 /// Context computed before editing to avoid borrowing the workspace twice.
 struct EditCtx {
     vars: VarCtx,
     inherited: Option<(String, AuthType)>,
+    /// Where the inherited auth is set: (collection, folder).
+    inherited_owner: Option<(String, Option<String>)>,
     breadcrumb: Vec<String>,
+    /// The request is not saved in a collection.
+    scratch: bool,
     token: Option<ternarywire_core::tokens::OAuth2Token>,
     fetching: bool,
     max_pretty: u64,
     side_layout: bool,
     /// Settings > Requests: what the request's own settings fall back to.
     defaults: ternarywire_core::settings::RequestDefaults,
+    /// The last History entries (only when nothing was sent yet).
+    recent: Vec<Recent>,
+    /// `host:port` the request goes to (for "Waiting for … ").
+    host: String,
 }
 
 #[derive(Default)]
@@ -383,6 +439,18 @@ struct Actions {
     generate_tests: bool,
     /// Copy the request as sent (resolved) as a cURL command.
     copy_curl: bool,
+    /// Copy the request (as edited) as a cURL command.
+    copy_request_curl: bool,
+    /// Ask to delete the saved request.
+    delete: bool,
+    /// Open the collection or folder whose auth the request inherits.
+    open_parent_auth: bool,
+    /// Open a History entry (empty response).
+    open_history: Option<String>,
+    open_console: bool,
+    open_cookies: bool,
+    /// Keep the current response as the compare baseline.
+    pin_baseline: bool,
 }
 
 fn get_item(app: &TernaryWireApp, tab: &RequestTab) -> Option<RequestItem> {
@@ -407,95 +475,132 @@ fn put_item(app: &mut TernaryWireApp, tab: &mut RequestTab, item: RequestItem) {
     }
 }
 
+/// The path of a URL without its scheme and host (or a leading
+/// `{{baseUrl}}`-style variable), for short lists.
+fn url_path(url: &str) -> String {
+    let rest = if url.starts_with("{{") {
+        url.find("}}").map(|i| &url[i + 2..]).unwrap_or(url)
+    } else if let Some(i) = url.find("://") {
+        let after = &url[i + 3..];
+        after.find(['/', '?']).map(|j| &after[j..]).unwrap_or("/")
+    } else {
+        url
+    };
+    if rest.is_empty() { "/".into() } else { rest.to_string() }
+}
+
+/// `host[:port]` of a resolved URL.
+fn url_host(url: &str) -> String {
+    let after = url.split_once("://").map(|(_, a)| a).unwrap_or(url);
+    after.split(['/', '?', '#']).next().unwrap_or("").to_string()
+}
+
+/// "09:41" today, "Yesterday" or the date, for a unix-milliseconds time.
+fn short_when(at_ms: i64, with_time: bool) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp_millis(at_ms).map(|d| d.with_timezone(&chrono::Local)) else {
+        return String::new();
+    };
+    let today = chrono::Local::now().date_naive();
+    let time = t.format("%H:%M").to_string();
+    let day = t.date_naive();
+    if day == today {
+        if with_time { format!("{} {time}", tr("Today")) } else { time }
+    } else if Some(day) == today.pred_opt() {
+        if with_time { format!("{} {time}", tr("Yesterday")) } else { tr("Yesterday").to_string() }
+    } else if with_time {
+        t.format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        t.format("%Y-%m-%d").to_string()
+    }
+}
+
 pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut RequestTab) {
     let Some(original) = get_item(app, tab) else {
-        ui.label(tr("This request no longer exists."));
+        kit::empty_state(ui, icons::WARNING_CIRCLE, tr("This request no longer exists."), "", |_| {});
         return;
     };
     let mut item = original.clone();
     let collection_id = tab.location.as_ref().map(|l| l.collection.clone());
-    let (inherited, breadcrumb) = match &tab.location {
-        Some(loc) => match app.ws.data.collection(&loc.collection) {
-            Some(c) => {
-                let chain = c.ancestors(&loc.item).unwrap_or_default();
-                let inherited = ternarywire_core::model::effective_from_chain(&chain)
-                    .map(|e| (e.owner_name.to_string(), e.auth.kind));
-                (inherited, chain.iter().map(|a| a.name().to_string()).collect())
-            }
-            None => (None, Vec::new()),
-        },
-        None => (None, vec![tr("Unsaved").to_string()]),
-    };
+    let mut inherited = None;
+    let mut inherited_owner = None;
+    let mut breadcrumb = Vec::new();
+    if let Some(loc) = &tab.location
+        && let Some(c) = app.ws.data.collection(&loc.collection)
+    {
+        let chain = c.ancestors(&loc.item).unwrap_or_default();
+        if let Some(e) = ternarywire_core::model::effective_from_chain(&chain) {
+            inherited = Some((e.owner_name.to_string(), e.auth.kind));
+            let folder = (e.owner_id != c.id.as_str()).then(|| e.owner_id.to_string());
+            inherited_owner = Some((loc.collection.clone(), folder));
+        }
+        breadcrumb = chain.iter().map(|a| a.name().to_string()).collect();
+    }
     let token = TokenStore::get(app.ws.secrets.as_ref(), &item.id);
+    let nothing_sent = tab.result.is_none() && tab.running.is_none() && tab.gql_sub.is_none();
+    let recent = if nothing_sent {
+        app.ws
+            .history
+            .iter()
+            .take(2)
+            .map(|h| Recent {
+                id: h.id.clone(),
+                method: h.request.method.clone(),
+                path: url_path(&h.request.url),
+                status: h.status,
+                when: short_when(h.timestamp, false),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let vars = app.var_ctx(collection_id.as_deref());
+    let host = match (&tab.running, item.http()) {
+        (Some(_), Some(http)) => {
+            let scopes = app.ws.scopes_for(collection_id.as_deref());
+            url_host(&Resolver::new(&scopes).resolve(&http.url))
+        }
+        _ => String::new(),
+    };
     let ectx = EditCtx {
-        vars: app.var_ctx(collection_id.as_deref()),
+        vars,
         inherited,
+        inherited_owner,
         breadcrumb,
+        scratch: tab.location.is_none(),
         fetching: app.pending_tokens.contains(&item.id),
         token,
         max_pretty: app.settings.max_pretty_bytes,
         defaults: app.settings.request.clone(),
-        // Side by side needs room for both; a narrower tab has the response below.
+        // Side by side needs room for two usable panes; narrower views
+        // have the response below.
         side_layout: app.settings.ui.layout == ternarywire_core::settings::ResponseLayout::Side
-            && ui.available_width() >= SIDE_MIN_WIDTH,
+            && ui.available_width() >= size::SIDE_BY_SIDE_MIN,
+        recent,
+        host,
     };
     let mut actions = Actions::default();
-
-    header(ui, tab, &mut item, &ectx, &mut actions);
-    ui.add_space(4.0);
-
-    let resp_panel = |ui: &mut Ui, tab: &mut RequestTab, actions: &mut Actions| {
-        let rect = ui.max_rect();
-        response_panel(ui, tab, &ectx, actions);
-        rect
-    };
-    let avail = ui.available_rect_before_wrap();
-    let mut after = crate::response_actions::After::default();
-    let panel_rect = if ectx.side_layout {
-        let w = match tab.panel {
-            PanelMode::Normal => (avail.width() * tab.split).clamp(340.0, (avail.width() - 300.0).max(340.0)),
-            PanelMode::Maximized => avail.width(),
-            PanelMode::Minimized => MINIMIZED_RAIL,
-        };
-        let rect = egui::Panel::right(egui::Id::unique(("resp-side", tab_id)))
-            .exact_size(w)
-            .resizable(false)
-            .frame(egui::Frame::new().inner_margin(egui::Margin { left: 10, right: 0, top: 0, bottom: 0 }))
-            .show(ui, |ui| resp_panel(ui, tab, &mut actions))
-            .inner;
-        let handle = egui::Rect::from_min_max(
-            egui::pos2(rect.left() - 10.0, rect.top()),
-            egui::pos2(rect.left() - 4.0, rect.bottom()),
-        );
-        if tab.panel != PanelMode::Maximized {
-            split_handle(ui, egui::Id::unique(("split-side", tab_id)), handle, true, avail, tab);
-        }
-        rect
-    } else {
-        let h = match tab.panel {
-            PanelMode::Normal => (avail.height() * tab.split).clamp(120.0, (avail.height() - 140.0).max(120.0)),
-            // The request keeps its section tabs.
-            PanelMode::Maximized => (avail.height() - 44.0).max(120.0),
-            PanelMode::Minimized => MINIMIZED_BAR,
-        };
-        let rect = egui::Panel::bottom(egui::Id::unique(("resp-below", tab_id)))
-            .exact_size(h)
-            .resizable(false)
-            .frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 8, bottom: 0 }))
-            .show(ui, |ui| resp_panel(ui, tab, &mut actions))
-            .inner;
-        let handle = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.top() - 8.0),
-            egui::pos2(rect.right(), rect.top() - 2.0),
-        );
-        split_handle(ui, egui::Id::unique(("split-below", tab_id)), handle, false, avail, tab);
-        rect
-    };
-    if !(ectx.side_layout && tab.panel == PanelMode::Maximized) {
-        request_sections(ui, tab, &mut item, &ectx, &mut actions);
+    // Once saved, a tab from History is an ordinary saved request.
+    if tab.location.is_some() {
+        tab.from_history = None;
     }
-    // Over the response, or the whole tab when the response is a narrow rail.
-    let notice_rect = if panel_rect.width() < 320.0 { avail } else { panel_rect };
+    if std::mem::take(&mut tab.pending_schema) {
+        actions.fetch_schema = true;
+    }
+
+    // Rows are drawn edge to edge.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let whole = ui.available_rect_before_wrap();
+    title_row(ui, tab, &mut item, &ectx, &mut actions);
+    if let Some((at, status)) = tab.from_history
+        && history_notice(ui, at, status, &mut actions)
+    {
+        tab.from_history = None;
+    }
+    let resp_rect = panes(ui, tab, &mut item, &ectx, &mut actions);
+
+    let mut after = crate::response_actions::After::default();
+    // Over the response, or the whole view when the response is a rail or a bar.
+    let notice_rect = if resp_rect.width() < 320.0 || resp_rect.height() < 160.0 { whole } else { resp_rect };
     let scripts_shown = tab.section == Section::Scripts
         && tab.script_event == ScriptEvent::PostResponse
         && tab.panel != PanelMode::Maximized;
@@ -532,12 +637,31 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Reques
             tab.panel = PanelMode::Normal;
         }
     }
+    if actions.pin_baseline
+        && let Some(result) = &tab.result
+        && let Some(resp) = &result.exec.response
+    {
+        tab.prev = Some(Box::new(crate::response_diff::Snapshot { resp: resp.clone(), at: result.at }));
+        tab.prev_pinned = true;
+        tab.compare.reset();
+        tab.resp_section = RespSection::Compare;
+    }
     if actions.copy_curl
         && let Some(prepared) = tab.result.as_ref().and_then(|r| r.exec.prepared.as_ref())
     {
         let code = ternarywire_convert::codegen::generate(ternarywire_convert::codegen::Language::Curl, prepared);
         ui.ctx().copy_text(code);
         app.toast(tr("Copied the request as sent, as a cURL command"), false);
+    }
+    if actions.copy_request_curl {
+        let code = crate::dialogs::codegen_item(
+            app,
+            &item,
+            collection_id.as_deref(),
+            ternarywire_convert::codegen::Language::Curl,
+        );
+        ui.ctx().copy_text(code);
+        app.toast(tr("Copied"), false);
     }
 
     if item != original {
@@ -575,10 +699,31 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Reques
         } else {
             app.ws.flush();
             app.toast(tr("Saved"), false);
+            tab.from_history = None;
         }
+    }
+    if actions.delete
+        && let Some(loc) = &tab.location
+    {
+        app.dialog = Some(crate::dialogs::Dialog::confirm_delete(
+            loc.collection.clone(),
+            Some(loc.item.clone()),
+            item.name.clone(),
+        ));
     }
     if actions.codegen {
         app.dialog = Some(crate::dialogs::Dialog::codegen(app, &item, collection_id.as_deref()));
+    }
+    if actions.open_cookies {
+        app.dialog = Some(crate::dialogs::Dialog::cookies());
+    }
+    if actions.open_console {
+        app.console_open = true;
+    }
+    if actions.open_parent_auth
+        && let Some((c, folder)) = ectx.inherited_owner.clone()
+    {
+        app.open_container(c, folder);
     }
     if actions.get_token
         && let Some(http) = item.http()
@@ -651,60 +796,328 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Reques
             app.add_tab(crate::app::TabKind::Request(Box::new(RequestTab::scratch(copy))));
         }
     }
+    if let Some(id) = actions.open_history {
+        app.open_history(&id);
+    }
 }
 
-/// Height of the minimized response panel (its header bar).
-const MINIMIZED_BAR: f32 = 44.0;
-/// Width of the minimized response panel beside the request.
-const MINIMIZED_RAIL: f32 = 46.0;
-/// Narrowest request tab that shows the response beside the request (at
-/// least 300 points for the request and 340 for the response).
-const SIDE_MIN_WIDTH: f32 = 680.0;
+/// `kit::tabs_with` (36 high): its tab row is laid out in a row of the
+/// default interact height (30) at the bottom of the bar, which puts the
+/// 35 px tabs 5 px too low; a 36 px interact height keeps them in the bar.
+fn pane_tabs_with<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    current: &mut T,
+    items: &[Tab<'_, T>],
+    right: impl FnOnce(&mut Ui),
+) -> bool {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = size::TABS;
+        kit::tabs_with(ui, current, items, right)
+    })
+    .inner
+}
 
-/// A draggable divider between the request editor and the response panel.
-/// Dragging a maximized or minimized panel brings back the split at the
-/// pointer; a double click restores it (or resets the split to half).
-fn split_handle(ui: &mut Ui, id: egui::Id, rect: egui::Rect, vertical: bool, avail: Rect, tab: &mut RequestTab) {
-    let total = if vertical { avail.width() } else { avail.height() };
-    let r = ui.interact(rect, id, egui::Sense::click_and_drag());
-    let hovered = r.hovered() || r.dragged();
-    if hovered {
-        ui.ctx().set_cursor_icon(if vertical {
-            egui::CursorIcon::ResizeHorizontal
-        } else {
-            egui::CursorIcon::ResizeVertical
-        });
+/// Width of the minimized response beside the request.
+const MINIMIZED_RAIL: f32 = 46.0;
+
+/// The two panes in the current panel mode. Returns the response's rect.
+fn panes(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx, actions: &mut Actions) -> Rect {
+    let side = ectx.side_layout;
+    let id = ui.make_persistent_id("req-panes");
+    if tab.panel == PanelMode::Normal {
+        // The request gets `split` of the whole width (side by side the
+        // gutter comes out of the response), as in the prototype.
+        let area = ui.available_rect_before_wrap();
+        let len = if side { area.width() } else { area.height() };
+        // Stacked, the divider's line is where the response's top border is.
+        let request = if side { tab.split * len } else { tab.split * len - size::GUTTER / 2.0 };
+        let default = (request / (len - size::GUTTER).max(1.0)).clamp(0.15, 0.85);
+        // Both panes edit the tab; they are drawn one after the other.
+        let cell = RefCell::new((tab, item, actions, Rect::NOTHING));
+        kit::panes(
+            ui,
+            id,
+            side,
+            default,
+            |ui| {
+                let mut g = cell.borrow_mut();
+                let (tab, item, actions, _) = &mut *g;
+                request_pane(ui, tab, item, ectx, actions);
+            },
+            |ui| {
+                let mut g = cell.borrow_mut();
+                let (tab, _, actions, rect) = &mut *g;
+                *rect = ui.max_rect();
+                response_pane(ui, tab, ectx, actions);
+            },
+        );
+        return cell.into_inner().3;
     }
-    let split = &mut tab.split;
-    if r.dragged() && total > 0.0 {
-        if tab.panel != PanelMode::Normal {
-            if let Some(pos) = r.interact_pointer_pos() {
-                let from_end = if vertical { avail.right() - pos.x } else { avail.bottom() - pos.y };
-                *split = (from_end / total).clamp(0.15, 0.85);
-            }
-            tab.panel = PanelMode::Normal;
-        } else {
-            let d = r.drag_delta();
-            let delta = if vertical { -d.x } else { -d.y };
-            *split = (*split + delta / total).clamp(0.15, 0.85);
+    // Maximized or minimized: fixed sizes, and the divider brings the
+    // split back.
+    let area = ui.available_rect_before_wrap();
+    let g = size::GUTTER;
+    let (ra, rg, rb) = match (side, tab.panel) {
+        (true, PanelMode::Maximized) => (None, None, area),
+        (true, _) => {
+            let a = (area.width() - MINIMIZED_RAIL - g).max(0.0);
+            (
+                Some(Rect::from_min_size(area.min, vec2(a, area.height()))),
+                Some(Rect::from_min_size(pos2(area.left() + a, area.top()), vec2(g, area.height()))),
+                Rect::from_min_max(pos2(area.left() + a + g, area.top()), area.max),
+            )
         }
-    }
-    if r.double_clicked() {
-        if tab.panel == PanelMode::Normal {
-            *split = 0.5;
-        } else {
-            tab.panel = PanelMode::Normal;
+        (false, mode) => {
+            let a = if mode == PanelMode::Maximized {
+                size::ACTION_ROW + size::TABS
+            } else {
+                (area.height() - size::ACTION_ROW - g).max(0.0)
+            };
+            (
+                Some(Rect::from_min_size(area.min, vec2(area.width(), a))),
+                Some(Rect::from_min_size(pos2(area.left(), area.top() + a), vec2(area.width(), g))),
+                Rect::from_min_max(pos2(area.left(), area.top() + a + g), area.max),
+            )
         }
-    }
-    let stroke = if hovered {
-        egui::Stroke::new(2.0, crate::theme::accent(ui.visuals().dark_mode))
-    } else {
-        ui.visuals().widgets.noninteractive.bg_stroke
     };
-    if vertical {
-        ui.painter().vline(rect.left() + 1.0, rect.y_range(), stroke);
+    let pane = |ui: &mut Ui, r: Rect, salt: &str, add: &mut dyn FnMut(&mut Ui)| {
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(r).id_salt((id, salt)).layout(Layout::top_down(Align::Min)),
+            |ui| {
+                ui.set_clip_rect(r.intersect(ui.clip_rect()));
+                ui.set_min_size(r.size());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                add(ui);
+            },
+        );
+    };
+    if let Some(ra) = ra {
+        pane(ui, ra, "a", &mut |ui| request_pane(ui, tab, item, ectx, actions));
+    }
+    pane(ui, rb, "b", &mut |ui| response_pane(ui, tab, ectx, actions));
+    if let Some(rg) = rg {
+        let p = theme::pal(ui);
+        let r = ui.interact(rg, id.with("restore-gutter"), Sense::click_and_drag());
+        if side {
+            ui.painter().vline(rg.center().x, rg.y_range(), Stroke::new(1.0, p.border));
+        } else {
+            ui.painter().hline(rg.x_range(), rg.center().y, Stroke::new(1.0, p.border));
+        }
+        if r.hovered() || r.dragged() {
+            ui.ctx().set_cursor_icon(if side {
+                egui::CursorIcon::ResizeHorizontal
+            } else {
+                egui::CursorIcon::ResizeVertical
+            });
+        }
+        if r.drag_started() || r.double_clicked() {
+            tab.panel = PanelMode::Normal;
+        }
+    }
+    ui.advance_cursor_after_rect(area);
+    rb
+}
+
+// ---------------------------------------------------------------------------
+// Title row, history notice
+// ---------------------------------------------------------------------------
+
+/// The view's title row (46): breadcrumb (or "Unsaved") and the name, then
+/// Code snippet, Save and the ⋯ menu.
+fn title_row(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx, actions: &mut Actions) {
+    kit::bar(ui, size::VIEW_TITLE, true, |ui| {
+        // 16 px on the left, 12 on the right.
+        ui.add_space(4.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let more = kit::icon_button(ui, icons::DOTS_THREE, tr("More actions"));
+            egui::Popup::menu(&more)
+                .width(210.0)
+                .align(egui::RectAlign::BOTTOM_END)
+                .show(|ui| request_menu(ui, item, ectx, actions));
+            let label = if ectx.scratch { tr("Save…") } else { tr("Save") };
+            let save = kit::button(
+                ui,
+                Kind::Secondary,
+                Size::Sm,
+                label,
+                ButtonOpts { icon: Some(icons::FLOPPY_DISK), ..Default::default() },
+            );
+            if save.on_hover_text(format!("{} (⌘S)", tr("Save"))).clicked() {
+                actions.save = true;
+            }
+            if kit::icon_button(ui, icons::CODE, tr("Code snippet")).clicked() {
+                actions.codegen = true;
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| crumbs(ui, tab, item, ectx));
+        });
+    });
+}
+
+/// Breadcrumb with caret separators and the request's name (double-click
+/// renames it).
+fn crumbs(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx) {
+    let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.x = 4.0;
+    if ectx.scratch {
+        kit::pill_ex(ui, tr("Unsaved"), Tone::Neutral, PillOpts { outline: true, ..Default::default() });
     } else {
-        ui.painter().hline(rect.x_range(), rect.top() + 1.0, stroke);
+        for part in &ectx.breadcrumb {
+            ui.add(egui::Label::new(RichText::new(part.as_str()).size(12.5).color(p.text_muted)).selectable(false));
+            ui.add(
+                egui::Label::new(RichText::new(icons::CARET_RIGHT).font(theme::icon_font(11.0)).color(p.text_faint))
+                    .selectable(false),
+            );
+        }
+    }
+    match &mut tab.renaming {
+        Some(buf) => {
+            let r = ui.add(
+                egui::TextEdit::singleline(buf)
+                    .font(theme::semibold(14.0))
+                    .desired_width(ui.available_width().clamp(80.0, 320.0))
+                    .margin(egui::Margin::symmetric(6, 3)),
+            );
+            r.request_focus();
+            if r.lost_focus() {
+                if !buf.trim().is_empty() {
+                    item.name = buf.trim().to_string();
+                }
+                tab.renaming = None;
+            }
+        }
+        None => {
+            let r = ui.add(
+                egui::Label::new(RichText::new(&item.name).font(theme::semibold(14.0)).color(p.text))
+                    .sense(Sense::click())
+                    .selectable(false)
+                    .truncate(),
+            );
+            if r.on_hover_text(tr("Double-click to rename")).double_clicked() {
+                tab.renaming = Some(item.name.clone());
+            }
+        }
+    }
+}
+
+/// The ⋯ menu of the title row.
+fn request_menu(ui: &mut Ui, item: &RequestItem, ectx: &EditCtx, actions: &mut Actions) {
+    let entry = |icon, label| kit::MenuItem { icon: Some(icon), label, ..Default::default() };
+    if kit::menu_item_ex(ui, entry(icons::CODE, tr("Code snippet"))).clicked() {
+        actions.codegen = true;
+    }
+    if kit::menu_item_ex(ui, entry(icons::COPY, tr("Duplicate"))).clicked() {
+        actions.duplicate = true;
+    }
+    if item.http().is_some() && kit::menu_item_ex(ui, entry(icons::TERMINAL, tr("Copy as cURL"))).clicked() {
+        actions.copy_request_curl = true;
+    }
+    // A saved request has no "save a copy elsewhere" yet; an unsaved one
+    // picks where it goes.
+    if ectx.scratch && kit::menu_item_ex(ui, entry(icons::FLOPPY_DISK, tr("Save as…"))).clicked() {
+        actions.save = true;
+    }
+    if !ectx.scratch {
+        kit::menu_sep(ui);
+        let del = kit::MenuItem { danger: true, ..entry(icons::TRASH, tr("Delete…")) };
+        if kit::menu_item_ex(ui, del).clicked() {
+            actions.delete = true;
+        }
+    }
+}
+
+/// "Opened from History" under the title row (36 high, info fill). Returns
+/// true when it was dismissed.
+fn history_notice(ui: &mut Ui, at_ms: i64, status: Option<u16>, actions: &mut Actions) -> bool {
+    let p = theme::pal(ui);
+    let full = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(Rect::from_min_size(full.min, vec2(full.width(), 36.0)), 0.0, p.info_soft);
+    let mut dismiss = false;
+    kit::bar(ui, 36.0, true, |ui| {
+        ui.add_space(4.0);
+        let text = |ui: &mut Ui, s: &str, color: Color32| {
+            ui.add(egui::Label::new(RichText::new(s).size(12.5).color(color)).selectable(false));
+        };
+        ui.label(RichText::new(icons::CLOCK_COUNTER_CLOCKWISE).font(theme::icon_font(14.0)).color(p.info));
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            text(ui, &format!("{} ·", tr("Opened from History")), p.text);
+            ui.add(
+                egui::Label::new(RichText::new(short_when(at_ms, true)).font(theme::medium(12.5)).color(p.text))
+                    .selectable(false),
+            );
+        });
+        text(ui, "·", p.text_faint);
+        text(ui, tr("last answer"), p.text_muted);
+        match status {
+            Some(s) => {
+                let reason = reqwest::StatusCode::from_u16(s).ok().and_then(|c| c.canonical_reason()).unwrap_or("");
+                kit::pill_ex(ui, format!("{s} {reason}").trim_end(), theme::status_tone(s), PillOpts::default());
+            }
+            None => {
+                kit::tone_pill(ui, tr("Failed"), Tone::Err);
+            }
+        }
+        text(ui, "·", p.text_faint);
+        text(ui, tr("Save to keep it"), p.text_muted);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if kit::icon_button_sm(ui, icons::X, tr("Dismiss")).clicked() {
+                dismiss = true;
+            }
+            if kit::ghost(ui, Some(icons::FLOPPY_DISK), tr("Save to collection…")).clicked() {
+                actions.save = true;
+            }
+        });
+    });
+    dismiss
+}
+
+// ---------------------------------------------------------------------------
+// Request pane: URL row, section tabs
+// ---------------------------------------------------------------------------
+
+fn request_pane(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx, actions: &mut Actions) {
+    url_row(ui, tab, item, ectx, actions);
+    let Some(http) = item.http() else { return };
+    let enabled = |rows: &[KeyValue]| rows.iter().filter(|p| p.enabled).count();
+    let scripts =
+        [&item.scripts.pre_request, &item.scripts.post_response].iter().filter(|s| !s.trim().is_empty()).count();
+    let items = [
+        Tab::new(Section::Params, tr("Params")).count(enabled(&http.params)),
+        Tab::new(Section::Auth, tr("Auth")).dot(!matches!(http.auth.kind, AuthType::Inherit | AuthType::None)),
+        Tab::new(Section::Headers, tr("Headers")).count(enabled(&http.headers)),
+        Tab::new(Section::Body, tr("Body")).dot(http.body.mode != BodyMode::None),
+        Tab::new(Section::Scripts, tr("Scripts")).count(scripts),
+        Tab::new(Section::Settings, tr("Settings")).count(settings_overridden(&http.settings)),
+        Tab::new(Section::Docs, tr("Docs")).count(item.examples.len()),
+    ];
+    // With the response maximized (stacked) only the tabs show; picking
+    // one brings the editor back.
+    if tab.panel == PanelMode::Maximized {
+        let mut show = false;
+        let picked = pane_tabs_with(ui, &mut tab.section, &items, |ui| {
+            show = kit::ghost(ui, Some(icons::CARET_DOWN), tr("Show editor")).clicked();
+        });
+        if picked || show {
+            tab.panel = PanelMode::Normal;
+        }
+        return;
+    }
+    pane_tabs_with(ui, &mut tab.section, &items, |_| {});
+    let id = item.id.clone();
+    match tab.section {
+        Section::Scripts => scripts_section(ui, tab, &mut item.scripts, &ectx.vars, actions),
+        Section::Docs => docs_section(ui, tab, item),
+        section => {
+            let http = item.request.as_http_mut().expect("http request");
+            match section {
+                Section::Params => params_section(ui, http, ectx),
+                Section::Auth => auth_section(ui, http, &id, ectx, actions),
+                Section::Headers => headers_section(ui, http, ectx),
+                Section::Body => body_section(ui, tab, http, ectx, actions),
+                Section::Settings => settings_section(ui, &mut http.settings, &ectx.defaults),
+                Section::Scripts | Section::Docs => {}
+            }
+        }
     }
 }
 
@@ -723,397 +1136,375 @@ fn url_edited(http: &mut HttpRequest, url: String) -> Vec<String> {
     Vec::new()
 }
 
-fn header(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx, actions: &mut Actions) {
-    let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(30.0);
-        ui.spacing_mut().item_spacing.x = 6.0;
-        for part in &ectx.breadcrumb {
-            ui.label(RichText::new(part.as_str()).color(p.text_muted));
-            ui.label(RichText::new(icons::CARET_RIGHT).font(theme::icon_font(11.0)).color(p.text_faint));
-        }
-        match &mut tab.renaming {
-            Some(buf) => {
-                let r = ui.add(egui::TextEdit::singleline(buf).desired_width(260.0));
-                r.request_focus();
-                if r.lost_focus() {
-                    if !buf.trim().is_empty() {
-                        item.name = buf.trim().to_string();
-                    }
-                    tab.renaming = None;
-                }
-            }
-            None => {
-                let r = ui.add(
-                    egui::Label::new(RichText::new(&item.name).font(theme::semibold(15.0)).color(p.text))
-                        .sense(egui::Sense::click())
-                        .selectable(false),
-                );
-                if r.on_hover_text(tr("Double-click to rename")).double_clicked() {
-                    tab.renaming = Some(item.name.clone());
-                }
-            }
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let more = kit::icon_button(ui, icons::DOTS_THREE, tr("More actions"));
-            egui::Popup::menu(&more).show(|ui| {
-                if ui.button(kit::with_icon(icons::CODE, tr("Code snippet"))).clicked() {
-                    actions.codegen = true;
-                    ui.close();
-                }
-                if ui.button(kit::with_icon(icons::COPY, tr("Duplicate"))).clicked() {
-                    actions.duplicate = true;
-                    ui.close();
-                }
-            });
-            if kit::secondary(ui, Some(icons::FLOPPY_DISK), tr("Save")).on_hover_text("⌘S").clicked() {
-                actions.save = true;
-            }
-            if kit::icon_button(ui, icons::CODE, tr("Code snippet")).clicked() {
-                actions.codegen = true;
-            }
-        });
-    });
-    ui.add_space(6.0);
+/// The URL row (56): the URL bar (method, URL) and Send, or Cancel while
+/// sending.
+fn url_row(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx, actions: &mut Actions) {
+    let running = tab.running.is_some() || tab.gql_sub.as_ref().map(|s| !s.done).unwrap_or(false);
     let Some(http) = item.http_mut() else { return };
-    // Method, URL and Send as one group.
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let send_w = 104.0;
-        let group_w = (ui.available_width() - send_w - 8.0).max(200.0);
-        let running = tab.running.is_some() || tab.gql_sub.as_ref().map(|s| !s.done).unwrap_or(false);
-        let frame = egui::Frame::new()
-            .fill(p.surface)
-            .stroke(egui::Stroke::new(1.0, p.border_strong))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(2, 2));
-        let group = frame.show(ui, |ui| {
-            ui.set_width(group_w - 4.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.scope(|ui| {
-                    let w = &mut ui.visuals_mut().widgets;
-                    for v in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
-                        v.bg_stroke = egui::Stroke::NONE;
-                    }
-                    w.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                    widgets::method_picker(ui, &mut http.method);
-                });
-                kit::vdivider(ui, 22.0);
-                let mut url = http.url.clone();
-                let r = widgets::var_cell(
-                    ui,
-                    "url",
-                    &mut url,
-                    &ectx.vars,
-                    tr("Enter a URL and press Send"),
-                    ui.available_width(),
-                );
-                if std::mem::take(&mut tab.focus_url) {
-                    r.request_focus();
+    kit::bar(ui, size::ACTION_ROW, true, |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if running {
+                let r = kit::action_button(ui, Kind::Secondary, icons::STOP, tr("Cancel"));
+                if r.on_hover_text(format!("{} (⌘↩)", tr("Cancel"))).clicked() {
+                    actions.cancel = true;
                 }
-                if r.changed() {
-                    actions.curl_warnings = url_edited(http, url);
-                }
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            } else {
+                let r = kit::action_button(ui, Kind::Primary, icons::PAPER_PLANE_RIGHT, tr("Send"));
+                if r.on_hover_text(format!("{} (⌘↩)", tr("Send"))).clicked() || std::mem::take(&mut tab.click_send)
+                {
                     actions.send = true;
                 }
-                r.has_focus()
-            })
-            .inner
-        });
-        if group.inner {
-            kit::focus_ring(ui, group.response.rect, 8);
-        }
-        let h = group.response.rect.height();
-        ui.allocate_ui_with_layout(
-            egui::vec2(send_w, h),
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                if running {
-                    if kit::button_ex(ui, kit::Kind::Secondary, Some(icons::STOP), tr("Cancel"), false).clicked() {
-                        actions.cancel = true;
-                    }
-                } else {
-                    let send = kit::primary_icon(ui, icons::PAPER_PLANE_RIGHT, tr("Send"));
-                    if send.on_hover_text("⌘↩").clicked() || std::mem::take(&mut tab.click_send) {
-                        actions.send = true;
-                    }
-                }
-            },
-        );
-    });
-}
-
-fn request_sections(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem, ectx: &EditCtx, actions: &mut Actions) {
-    let id = item.id.clone();
-    let Some(http) = item.http_mut() else { return };
-    let enabled_params = http.params.iter().filter(|p| p.enabled).count();
-    let enabled_headers = http.headers.iter().filter(|p| p.enabled).count();
-    // A dot after "Body" and "Authorization" tells that they are set.
-    let mut dots = Vec::new();
-    if http.body.mode != BodyMode::None {
-        dots.push(Section::Body);
-    }
-    if !matches!(http.auth.kind, AuthType::Inherit | AuthType::None) {
-        dots.push(Section::Auth);
-    }
-    let overridden = settings_overridden(&http.settings);
-    let script_count = [!item.scripts.pre_request.trim().is_empty(), !item.scripts.post_response.trim().is_empty()]
-        .iter()
-        .filter(|b| **b)
-        .count();
-    let items = vec![
-        (Section::Params, format!("{}{}", tr("Params"), widgets::count_label(enabled_params))),
-        (Section::Auth, tr("Authorization").to_string()),
-        (Section::Headers, format!("{}{}", tr("Headers"), widgets::count_label(enabled_headers))),
-        (Section::Body, tr("Body").to_string()),
-        (Section::Scripts, format!("{}{}", tr("Scripts"), widgets::count_label(script_count))),
-        (Section::Settings, format!("{}{}", tr("Settings"), widgets::count_label(overridden))),
-        (Section::Docs, format!("{}{}", tr("Docs"), widgets::count_label(item.examples.len()))),
-    ];
-    ui.add_space(4.0);
-    // The sections keep the width of the editor even when the tab row is
-    // wider than a narrow window.
-    let area = ui.available_rect_before_wrap();
-    // With the response maximized only the section tabs show; picking one
-    // brings the editor back.
-    if tab.panel == PanelMode::Maximized {
-        let mut picked = false;
-        ui.horizontal(|ui| {
-            let strip_w = (ui.available_width() - 120.0).max(120.0);
-            ui.allocate_ui_with_layout(vec2(strip_w, 34.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                picked = kit::tab_strip_ex(ui, &mut tab.section, &items, &dots);
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if kit::ghost(ui, Some(icons::CARET_DOWN), tr("Show editor")).clicked() {
-                    picked = true;
-                }
-            });
-        });
-        if picked {
-            tab.panel = PanelMode::Normal;
-        }
-        return;
-    }
-    kit::tab_strip_ex(ui, &mut tab.section, &items, &dots);
-    ui.add_space(10.0);
-    let rect = Rect::from_min_max(pos2(area.left(), ui.cursor().top()), pos2(area.right(), area.bottom()));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        egui::ScrollArea::vertical().id_salt(("req-sections", &id)).auto_shrink([false; 2]).show(ui, |ui| {
-            match tab.section {
-                Section::Scripts => scripts_editor(ui, tab, &mut item.scripts, &ectx.vars, actions),
-                Section::Docs => docs_editor(ui, item),
-                section => {
-                    let http = item.request.as_http_mut().expect("http request");
-                    sections_http(ui, tab, section, http, &id, ectx, actions);
-                }
             }
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
+            url_bar(ui, rect, tab, http, ectx, actions);
         });
     });
 }
 
-fn sections_http(
+/// The 38 px URL bar: the method picker on the left, then the URL (with
+/// variable chips) fading out at the right edge.
+fn url_bar(
     ui: &mut Ui,
+    rect: Rect,
     tab: &mut RequestTab,
-    section: Section,
     http: &mut HttpRequest,
-    id: &str,
     ectx: &EditCtx,
     actions: &mut Actions,
 ) {
-    match section {
-        Section::Params => {
-            let mut params = http.params.clone();
-            if widgets::kv_table(
-                ui,
-                "params",
-                &mut params,
-                &ectx.vars,
-                KvOptions {
-                    title: Some(tr("Query parameters")),
-                    show_description: true,
-                    allow_add: true,
-                    key_hint: tr("Key"),
-                    value_hint: tr("Value"),
-                    ..Default::default()
-                },
-            ) {
-                http.params = params;
-                http.sync_url_from_params();
-            }
-            if !http.path_vars.is_empty() {
-                ui.add_space(14.0);
-                let mut vars = http.path_vars.clone();
-                if widgets::kv_table(
-                    ui,
-                    "path-vars",
-                    &mut vars,
-                    &ectx.vars,
-                    KvOptions {
-                        title: Some(tr("Path variables")),
-                        show_description: true,
-                        readonly_keys: true,
-                        allow_add: false,
-                        ..Default::default()
-                    },
-                ) {
-                    http.path_vars = vars;
-                }
-            }
-        }
-        Section::Auth => {
-            let (changed, action) = crate::auth_ui::auth_editor(
-                ui,
-                &mut http.auth,
-                crate::auth_ui::AuthUiCtx {
-                    is_root: false,
-                    inherited: ectx.inherited.clone(),
-                    owner_id: id,
-                    token: ectx.token.clone(),
-                    fetching: ectx.fetching,
-                    vars: &ectx.vars,
-                },
-            );
-            let _ = changed;
-            match action {
-                crate::auth_ui::AuthAction::GetToken => actions.get_token = true,
-                crate::auth_ui::AuthAction::ClearToken => actions.clear_token = true,
-                crate::auth_ui::AuthAction::None => {}
-            }
-        }
-        Section::Headers => {
-            let mut headers = http.headers.clone();
-            if widgets::kv_table(
-                ui,
-                "headers",
-                &mut headers,
-                &ectx.vars,
-                KvOptions {
-                    title: Some(tr("Request headers")),
-                    key_suggestions: Some(widgets::COMMON_HEADERS),
-                    show_description: true,
-                    allow_add: true,
-                    key_hint: tr("Key"),
-                    value_hint: tr("Value"),
-                    ..Default::default()
-                },
-            ) {
-                http.headers = headers;
-            }
-            ui.add_space(16.0);
-            auto_headers(ui, http, &ectx.defaults);
-        }
-        Section::Body => body_editor(ui, tab, http, ectx, actions),
-        Section::Settings => settings_editor(ui, &mut http.settings, &ectx.defaults),
-        Section::Scripts | Section::Docs => {}
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    ui.painter().rect_filled(rect, CornerRadius::same(9), p.surface);
+    // Method.
+    let mg = ui.painter().layout_no_wrap(
+        http.method.clone(),
+        theme::semibold(12.5),
+        theme::method_color(&http.method, dark),
+    );
+    let mw = (13.0 + mg.size().x + 6.0 + 11.0 + 10.0).max(93.0);
+    let mrect = Rect::from_min_size(rect.min, vec2(mw, rect.height()));
+    let mresp = ui.interact(mrect, ui.make_persistent_id("method"), Sense::click());
+    mresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &http.method));
+    widgets::a11y_name(&mresp, tr("Method"));
+    if mresp.hovered() {
+        ui.painter().rect_filled(mrect.shrink(1.0), CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, p.hover);
+    }
+    ui.painter().galley(pos2(mrect.left() + 13.0, mrect.center().y - mg.size().y / 2.0), mg, Color32::PLACEHOLDER);
+    ui.painter().text(
+        pos2(mrect.right() - 10.0, mrect.center().y),
+        Align2::RIGHT_CENTER,
+        icons::CARET_DOWN,
+        theme::icon_font(11.0),
+        p.text_faint,
+    );
+    ui.painter().vline(mrect.right() - 0.5, rect.y_range().shrink(1.0), Stroke::new(1.0, p.border));
+    egui::Popup::menu(&mresp).width(180.0).show(|ui| method_menu(ui, &mut http.method));
+    // URL.
+    let urect =
+        Rect::from_min_max(pos2(mrect.right() + 3.0, rect.top() + 1.0), pos2(rect.right() - 1.0, rect.bottom() - 1.0));
+    let mut url = http.url.clone();
+    let mut field = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_center_size(urect.center(), vec2(urect.width(), 34.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    field.set_clip_rect(urect.intersect(ui.clip_rect()));
+    let r = widgets::var_cell(
+        &mut field,
+        "url",
+        &mut url,
+        &ectx.vars,
+        tr("Enter a URL or paste a cURL command"),
+        urect.width(),
+    );
+    if std::mem::take(&mut tab.focus_url) {
+        r.request_focus();
+    }
+    if r.changed() {
+        actions.curl_warnings = url_edited(http, url);
+    }
+    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        actions.send = true;
+    }
+    let focused = r.has_focus();
+    if !focused {
+        // A long URL fades out at the right edge.
+        let fade = Rect::from_min_max(pos2(urect.right() - 28.0, urect.top()), urect.max);
+        kit::fade(ui.painter(), fade, p.surface, true);
+    }
+    if focused {
+        kit::focus_ring(ui, rect, 9);
+    } else {
+        ui.painter().rect_stroke(rect, CornerRadius::same(9), Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
     }
 }
 
-/// Headers the client adds by itself, in a collapsible, muted table. Default
-/// headers can be switched off; calculated ones are shown with a lock.
-fn auto_headers(ui: &mut Ui, http: &mut HttpRequest, defaults: &ternarywire_core::settings::RequestDefaults) {
+/// Methods (with their colors) and a custom method.
+fn method_menu(ui: &mut Ui, method: &mut String) {
+    for m in widgets::METHODS {
+        let item = kit::MenuItem { method: Some(m), label: m, selected: method == m, ..Default::default() };
+        if kit::menu_item_ex(ui, item).clicked() {
+            *method = m.to_string();
+        }
+    }
+    kit::menu_sep(ui);
     let p = theme::pal(ui);
-    // (name, value, Some(on) when it can be switched off)
-    let mut rows: Vec<(String, String, Option<bool>)> = Vec::new();
-    for (k, v) in defaults.default_headers() {
-        let disabled = http.settings.disabled_default_headers.iter().any(|d| d.eq_ignore_ascii_case(k));
-        rows.push((k.to_string(), v, Some(!disabled)));
-    }
-    let ct = match http.body.mode {
-        BodyMode::Raw => Some(http.body.raw_language.content_type().to_string()),
-        BodyMode::UrlEncoded => Some("application/x-www-form-urlencoded".into()),
-        BodyMode::FormData => Some("multipart/form-data; boundary=<calculated>".into()),
-        BodyMode::GraphQl => Some("application/json".into()),
-        _ => None,
+    ui.horizontal(|ui| {
+        ui.set_height(30.0);
+        ui.add_space(9.0);
+        ui.label(RichText::new(icons::PENCIL_SIMPLE).font(theme::icon_font(15.0)).color(p.text_muted));
+        ui.add_space(1.0);
+        let mut custom = if widgets::METHODS.contains(&method.as_str()) { String::new() } else { method.clone() };
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut custom)
+                .hint_text(RichText::new(format!("{} PROPFIND", tr("Custom…"))).color(p.text_faint))
+                .desired_width(ui.available_width() - 8.0)
+                .font(egui::FontId::proportional(12.5))
+                .margin(egui::Margin::symmetric(6, 3)),
+        );
+        widgets::a11y_name(&r, tr("Custom method"));
+        if r.changed() && !custom.trim().is_empty() {
+            *method = custom.trim().to_uppercase();
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Request sections
+// ---------------------------------------------------------------------------
+
+fn params_section(ui: &mut Ui, http: &mut HttpRequest, ectx: &EditCtx) {
+    kit::pane_body(ui, "params-body", |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut params = http.params.clone();
+        if widgets::kv_table(
+            ui,
+            "params",
+            &mut params,
+            &ectx.vars,
+            KvOptions {
+                title: Some(tr("Query parameters")),
+                show_description: true,
+                allow_add: true,
+                key_hint: tr("Key"),
+                value_hint: tr("Value"),
+                ..Default::default()
+            },
+        ) {
+            http.params = params;
+            http.sync_url_from_params();
+        }
+        ui.add_space(20.0);
+        let help = tr("Write :name in the URL path to add one; its value is filled in here.");
+        if http.path_vars.is_empty() {
+            ui.label(kit::section_title(tr("Path variables")));
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+            return;
+        }
+        let mut vars = http.path_vars.clone();
+        if widgets::kv_table(
+            ui,
+            "path-vars",
+            &mut vars,
+            &ectx.vars,
+            KvOptions {
+                title: Some(tr("Path variables")),
+                show_description: true,
+                readonly_keys: true,
+                allow_add: false,
+                ..Default::default()
+            },
+        ) {
+            http.path_vars = vars;
+        }
+        ui.add_space(8.0);
+        ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+    });
+}
+
+fn auth_section(ui: &mut Ui, http: &mut HttpRequest, id: &str, ectx: &EditCtx, actions: &mut Actions) {
+    let ctx = crate::auth_ui::AuthUiCtx {
+        is_root: false,
+        inherited: ectx.inherited.clone(),
+        owner_id: id,
+        token: ectx.token.clone(),
+        fetching: ectx.fetching,
+        vars: &ectx.vars,
     };
-    for (k, v) in [
-        ("Host", "<calculated when sent>".to_string()),
-        ("Accept-Encoding", "gzip, deflate, br".into()),
-        ("Content-Length", "<calculated>".into()),
-    ]
-    .into_iter()
-    .chain(ct.map(|c| ("Content-Type", c)))
-    {
-        rows.push((k.to_string(), v, None));
-    }
-    let id = ui.make_persistent_id("auto-headers");
-    let open = disclosure(ui, id, tr("Auto-generated headers"), Some(rows.len()), false);
-    if !open {
-        ui.label(kit::hint(ui, tr("Sent with every request; headers you set above override them.")));
-        return;
-    }
-    ui.add_space(6.0);
-    const CHECK: f32 = 34.0;
-    const HEAD: f32 = 28.0;
-    const ROW: f32 = 30.0;
-    let width = ui.available_width().max(240.0);
-    let left = ui.cursor().left();
-    let top = ui.cursor().top();
-    let key_w = (width - CHECK) * 0.36;
-    let xs = [left + CHECK, left + CHECK + key_w];
-    let mono = theme::mono(mono_size(ui));
-    let head = Rect::from_min_size(pos2(left, top), vec2(width, HEAD));
-    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.chrome);
-    for (x, label) in [(xs[0], tr("Key")), (xs[1], tr("Value"))] {
+    kit::toolbar(ui, |ui| crate::auth_ui::type_bar(ui, &mut http.auth, &ctx));
+    kit::pane_body(ui, "auth-body", |ui| {
+        let out = crate::auth_ui::auth_form(ui, &mut http.auth, &ctx, ectx.inherited_owner.is_some());
+        match out.action {
+            crate::auth_ui::AuthAction::GetToken => actions.get_token = true,
+            crate::auth_ui::AuthAction::ClearToken => actions.clear_token = true,
+            crate::auth_ui::AuthAction::None => {}
+        }
+        actions.open_parent_auth |= out.open_parent;
+    });
+}
+
+fn headers_section(ui: &mut Ui, http: &mut HttpRequest, ectx: &EditCtx) {
+    kit::pane_body(ui, "headers-body", |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut headers = http.headers.clone();
+        if widgets::kv_table(
+            ui,
+            "headers",
+            &mut headers,
+            &ectx.vars,
+            KvOptions {
+                title: Some(tr("Request headers")),
+                key_suggestions: Some(widgets::COMMON_HEADERS),
+                show_description: true,
+                allow_add: true,
+                key_hint: tr("Key"),
+                value_hint: tr("Value"),
+                ..Default::default()
+            },
+        ) {
+            http.headers = headers;
+        }
+        ui.add_space(14.0);
+        auto_headers(ui, http, &ectx.defaults);
+    });
+}
+
+/// Column x positions of a key/value grid (`.kv`): check | key | value |
+/// description | action, as `kv_table` lays them out.
+fn kv_columns(left: f32, width: f32) -> [f32; 4] {
+    const CHECK: f32 = 30.0;
+    const ACT: f32 = 30.0;
+    let cols = width - CHECK - ACT;
+    let key_w = cols / 3.3;
+    let val_w = cols * 1.3 / 3.3;
+    [left + CHECK, left + CHECK + key_w, left + CHECK + key_w + val_w, left + width - ACT]
+}
+
+/// Paints the header of a `.kv`-style grid (28 high on `well`).
+fn kv_head(ui: &Ui, rect: Rect, columns: &[(f32, &str)]) {
+    let p = theme::pal(ui);
+    ui.painter().rect_filled(rect, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.well);
+    for (x, label) in columns {
         ui.painter().text(
-            pos2(x + 10.0, head.center().y),
+            pos2(x + 9.0, rect.center().y),
             Align2::LEFT_CENTER,
-            label,
+            *label,
             theme::medium(11.5),
             p.text_muted,
         );
     }
+}
+
+/// Headers the client adds by itself, in a collapsible table like the
+/// request headers. Default headers can be switched off; calculated ones
+/// have a lock.
+fn auto_headers(ui: &mut Ui, http: &mut HttpRequest, defaults: &ternarywire_core::settings::RequestDefaults) {
+    let p = theme::pal(ui);
+    // (name, value, Some(on) when it can be switched off, description)
+    let mut rows: Vec<(String, String, Option<bool>, &str)> = Vec::new();
+    for (k, v) in defaults.default_headers() {
+        let disabled = http.settings.disabled_default_headers.iter().any(|d| d.eq_ignore_ascii_case(k));
+        rows.push((k.to_string(), v, Some(!disabled), tr("From Settings › Requests")));
+    }
+    let ct = match http.body.mode {
+        BodyMode::Raw => Some(http.body.raw_language.content_type().to_string()),
+        BodyMode::UrlEncoded => Some("application/x-www-form-urlencoded".into()),
+        BodyMode::FormData => Some(format!("multipart/form-data; boundary=<{}>", tr("calculated"))),
+        BodyMode::GraphQl => Some("application/json".into()),
+        _ => None,
+    };
+    for (k, v) in [
+        ("Host", tr("calculated when sent").to_string()),
+        ("Accept-Encoding", "gzip, deflate, br".into()),
+        ("Content-Length", tr("calculated").to_string()),
+    ]
+    .into_iter()
+    .chain(ct.map(|c| ("Content-Type", c)))
+    {
+        rows.push((k.to_string(), v, None, ""));
+    }
+    let id = ui.make_persistent_id("auto-headers");
+    let open = disclosure(ui, id, tr("Auto-generated headers"), Some(rows.len()), true);
+    ui.add_space(8.0);
+    if !open {
+        ui.add(
+            egui::Label::new(kit::hint(ui, tr("Sent with every request; headers you set above override them."))).wrap(),
+        );
+        return;
+    }
+    let width = ui.available_width().max(240.0);
+    let left = ui.cursor().left();
+    let top = ui.cursor().top();
+    let xs = kv_columns(left, width);
+    let head = Rect::from_min_size(pos2(left, top), vec2(width, size::TABLE_HEAD));
+    let bg = ui.painter().add(egui::Shape::Noop);
+    kv_head(ui, head, &[(xs[0], tr("Key")), (xs[1], tr("Value")), (xs[2], tr("Description"))]);
+    let mono = theme::mono(12.0);
     let mut y = head.bottom();
-    for (i, (k, v, on)) in rows.into_iter().enumerate() {
-        let row = Rect::from_min_size(pos2(left, y), vec2(width, ROW));
+    for (i, (k, v, on, desc)) in rows.into_iter().enumerate() {
+        let row = Rect::from_min_size(pos2(left, y), vec2(width, size::ROW));
         ui.painter().hline(left..=left + width, y, Stroke::new(1.0, p.border));
+        if ui.rect_contains_pointer(row) {
+            ui.painter().rect_filled(row.shrink2(vec2(1.0, 0.0)).with_min_y(y + 0.5), 0.0, p.well);
+        }
+        let check = Rect::from_center_size(pos2(left + 15.0, row.center().y + 0.5), vec2(15.0, 15.0));
         let faded = on == Some(false);
-        let color = if faded { p.text_faint } else { p.text_muted };
         match on {
-            Some(mut on) => {
-                let c = Rect::from_center_size(pos2(left + CHECK / 2.0 + 2.0, row.center().y), vec2(18.0, ROW - 6.0));
-                let r = ui.put(c, egui::Checkbox::without_text(&mut on));
+            Some(mut enabled) => {
+                let r = ui.put(check, |ui: &mut Ui| kit::check(ui, &mut enabled, ""));
                 widgets::a11y_name(&r, &format!("{} {k}", tr("Send")));
                 if r.changed() {
-                    if on {
+                    if enabled {
                         http.settings.disabled_default_headers.retain(|d| !d.eq_ignore_ascii_case(&k));
                     } else {
                         http.settings.disabled_default_headers.push(k.to_lowercase());
                     }
                 }
             }
-            None => {
-                let c = Rect::from_center_size(pos2(left + CHECK / 2.0 + 2.0, row.center().y), vec2(18.0, 18.0));
-                ui.painter().text(
-                    c.center(),
-                    Align2::CENTER_CENTER,
-                    icons::LOCK_SIMPLE,
-                    theme::icon_font(13.0),
-                    p.text_faint,
-                );
-                ui.interact(c, id.with(("lock", i)), Sense::hover())
-                    .on_hover_text(tr("Calculated when the request is sent"));
-            }
+            None => kit::paint_check(ui, check, true, false, false, false),
         }
-        let g = elide(ui, &k, mono.clone(), color, key_w - 20.0);
-        ui.painter().galley(pos2(xs[0] + 10.0, row.center().y - g.size().y / 2.0), g, color);
-        let g = elide(ui, &v, mono.clone(), color, left + width - xs[1] - 20.0);
-        ui.painter().galley(pos2(xs[1] + 10.0, row.center().y - g.size().y / 2.0), g, color);
-        y += ROW;
+        let key_color = if faded { p.text_faint } else { p.text };
+        let g = elide(ui, &k, mono.clone(), key_color, xs[1] - xs[0] - 40.0);
+        let key_end = xs[0] + 9.0 + g.size().x;
+        ui.painter().galley(pos2(xs[0] + 9.0, row.center().y - g.size().y / 2.0), g, key_color);
+        if on.is_none() {
+            let lock = Rect::from_center_size(pos2(key_end + 13.0, row.center().y), vec2(16.0, 16.0));
+            ui.painter().text(
+                lock.center(),
+                Align2::CENTER_CENTER,
+                icons::LOCK_SIMPLE,
+                theme::icon_font(12.0),
+                p.text_faint,
+            );
+            ui.interact(lock, id.with(("lock", i)), Sense::hover())
+                .on_hover_text(tr("Set by TernaryWire when the request is sent"));
+        }
+        let calculated = on.is_none() && (k == "Host" || k == "Content-Length");
+        let val_color = if faded || calculated { p.text_faint } else { p.text };
+        let font = if calculated { egui::FontId::proportional(12.5) } else { mono.clone() };
+        let g = elide(ui, &v, font, val_color, xs[2] - xs[1] - 18.0);
+        ui.painter().galley(pos2(xs[1] + 9.0, row.center().y - g.size().y / 2.0), g, val_color);
+        if !desc.is_empty() {
+            let g = elide(ui, desc, egui::FontId::proportional(12.5), p.text_muted, xs[3] - xs[2] - 18.0);
+            ui.painter().galley(pos2(xs[2] + 9.0, row.center().y - g.size().y / 2.0), g, p.text_muted);
+        }
+        y += size::ROW;
     }
     let table = Rect::from_min_max(pos2(left, top), pos2(left + width, y));
-    for x in xs {
-        ui.painter().vline(x, table.y_range(), Stroke::new(1.0, p.border));
+    ui.painter().set(bg, egui::Shape::rect_filled(table, CornerRadius::same(8), p.surface));
+    for x in &xs[..3] {
+        ui.painter().vline(*x, table.y_range(), Stroke::new(1.0, p.border));
     }
     ui.painter().rect_stroke(table, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
     ui.advance_cursor_after_rect(table);
-    ui.add_space(6.0);
-    ui.label(kit::hint(
-        ui,
-        tr("Headers you set explicitly override these. Cookies from the jar are added automatically."),
-    ));
+    ui.add_space(8.0);
+    ui.add(
+        egui::Label::new(kit::hint(
+            ui,
+            tr("Headers you set above override these. Cookies from the jar are added automatically."),
+        ))
+        .wrap(),
+    );
 }
 
 /// Formats JSON that may contain `{{variables}}` outside of strings.
@@ -1160,137 +1551,188 @@ pub fn beautify_json_with_vars(text: &str) -> Option<String> {
     Some(pretty)
 }
 
-/// Label of a body type in the type selector; the long urlencoded name is
-/// shortened when space is tight.
-fn body_mode_label(mode: BodyMode, narrow: bool) -> &'static str {
+/// Short label of a body type in the mode switch (the long names in its
+/// tooltip).
+fn body_mode_label(mode: BodyMode) -> &'static str {
     match mode {
-        BodyMode::None => tr("none"),
-        BodyMode::UrlEncoded if narrow => "urlencoded",
-        m => m.label(),
+        BodyMode::None => tr("None"),
+        BodyMode::FormData => tr("Form"),
+        BodyMode::UrlEncoded => tr("URL-encoded"),
+        BodyMode::Raw => tr("Raw"),
+        BodyMode::Binary => tr("Binary"),
+        BodyMode::GraphQl => "GraphQL",
     }
 }
 
-fn body_editor(ui: &mut Ui, tab: &mut RequestTab, http: &mut HttpRequest, ectx: &EditCtx, actions: &mut Actions) {
-    let width = ui.available_width();
-    let raw = http.body.mode == BodyMode::Raw;
-    // The raw language tools share the row when there is room for them.
-    let tools_inline = width >= 760.0;
-    ui.horizontal(|ui| {
-        ui.set_min_height(30.0);
-        let items: Vec<(BodyMode, &str)> =
-            BodyMode::ALL.iter().map(|m| (*m, body_mode_label(*m, width < 720.0))).collect();
-        kit::segmented(ui, &mut http.body.mode, &items);
-        if raw && tools_inline {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| raw_tools(ui, &mut http.body));
+fn body_section(ui: &mut Ui, tab: &mut RequestTab, http: &mut HttpRequest, ectx: &EditCtx, actions: &mut Actions) {
+    let mode = http.body.mode;
+    kit::toolbar(ui, |ui| {
+        let items: Vec<(BodyMode, &str)> = BodyMode::ALL.iter().map(|m| (*m, body_mode_label(*m))).collect();
+        let r = ui.scope(|ui| kit::segmented_sm(ui, &mut http.body.mode, &items)).response;
+        r.on_hover_text("none · multipart/form-data · application/x-www-form-urlencoded · raw · binary · GraphQL");
+        // The tools end at the right edge; when the row is too narrow they
+        // follow the modes and are cut at the pane's edge (like the prototype).
+        let id = ui.make_persistent_id("body-tools-w");
+        let tools_w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
+        ui.add_space((ui.available_width() - tools_w).max(0.0));
+        // In a child the bar does not grow with: tools past the edge are cut.
+        let start = ui.cursor().left();
+        let row = ui.max_rect();
+        let mut tools = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(pos2(start, row.top()), pos2(start + 2000.0, row.bottom())))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        tools.spacing_mut().item_spacing.x = 8.0;
+        match mode {
+            BodyMode::Raw => raw_tools(&mut tools, &mut http.body),
+            BodyMode::GraphQl => graphql_tools(&mut tools, tab, &mut http.body),
+            _ => {}
+        }
+        let w = (tools.cursor().left() - start - 8.0).max(0.0);
+        if (w - tools_w).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(id, w));
+            ui.ctx().request_repaint();
         }
     });
-    if raw && !tools_inline {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| raw_tools(ui, &mut http.body));
-    }
-    ui.add_space(8.0);
     let body: &mut Body = &mut http.body;
     match body.mode {
         BodyMode::None => {
-            ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                let p = theme::pal(ui);
-                let (rect, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 22.0, p.subtle);
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    icons::FILE_TEXT,
-                    theme::icon_font(20.0),
-                    p.text_muted,
+            center_v(ui, ui.make_persistent_id("no-body"), |ui| {
+                empty_block(
+                    ui,
+                    icons::FILE,
+                    false,
+                    tr("This request does not have a body"),
+                    tr("Choose a body type above to send data with the request."),
+                    |_| {},
                 );
-                ui.add_space(6.0);
-                ui.label(RichText::new(tr("This request does not have a body")).font(theme::semibold(13.5)));
-                ui.label(kit::hint(ui, tr("Choose a body type above to send data with the request.")));
             });
         }
         BodyMode::Raw => {
             let lang = Lang::from_raw(body.raw_language);
-            let rows = editor_rows(ui, 8);
-            widgets::code_editor(ui, "raw-body", &mut body.raw, lang, Some(&ectx.vars), rows, false);
+            editor_well(ui, "raw-body-well", 12.0, |ui, rows| {
+                widgets::code_editor_gutter(ui, "raw-body", &mut body.raw, lang, Some(&ectx.vars), rows, false, None);
+            });
         }
         BodyMode::UrlEncoded => {
-            let mut rows = body.urlencoded.clone();
-            if widgets::kv_table(
-                ui,
-                "urlencoded",
-                &mut rows,
-                &ectx.vars,
-                KvOptions {
-                    title: Some(tr("Form fields")),
-                    show_description: true,
-                    allow_add: true,
-                    key_hint: tr("Key"),
-                    value_hint: tr("Value"),
-                    ..Default::default()
-                },
-            ) {
-                body.urlencoded = rows;
-            }
-            ui.add_space(6.0);
-            ui.label(kit::hint(ui, tr("Sent as application/x-www-form-urlencoded.")));
+            kit::pane_body(ui, "urlenc-body", |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut rows = body.urlencoded.clone();
+                if widgets::kv_table(
+                    ui,
+                    "urlencoded",
+                    &mut rows,
+                    &ectx.vars,
+                    KvOptions {
+                        show_description: true,
+                        allow_add: true,
+                        key_hint: tr("Key"),
+                        value_hint: tr("Value"),
+                        ..Default::default()
+                    },
+                ) {
+                    body.urlencoded = rows;
+                }
+                ui.add_space(14.0);
+                ui.label(kit::hint(ui, tr("Sent as application/x-www-form-urlencoded.")));
+            });
         }
         BodyMode::FormData => {
-            ui.horizontal(|ui| {
-                ui.set_height(26.0);
-                ui.label(kit::section_title(tr("Form fields")));
+            kit::pane_body(ui, "form-body", |ui| {
+                let mut rows = body.form_data.clone();
+                if form_data_table(ui, "formdata", &mut rows, &ectx.vars) {
+                    body.form_data = rows;
+                }
+                ui.add(
+                    egui::Label::new(kit::hint(
+                        ui,
+                        tr("Sent as multipart/form-data. Switch a field to File to upload files."),
+                    ))
+                    .wrap(),
+                );
             });
-            ui.add_space(4.0);
-            let mut rows = body.form_data.clone();
-            if form_data_table(ui, "formdata", &mut rows, &ectx.vars) {
-                body.form_data = rows;
-            }
-            ui.add_space(6.0);
-            ui.label(kit::hint(ui, tr("Sent as multipart/form-data. Switch a field to File to upload files.")));
         }
-        BodyMode::Binary => binary_body(ui, body),
-        BodyMode::GraphQl => graphql_editor(ui, tab, body, ectx, actions),
+        BodyMode::Binary => kit::pane_body(ui, "binary-body", |ui| binary_body(ui, body)),
+        BodyMode::GraphQl => graphql_body(ui, tab, body, ectx, actions),
     }
 }
 
-/// Number of text rows that fill the space left in the section (at least
-/// `min`), so editors use the panel instead of a fixed height.
-fn editor_rows(ui: &Ui, min: usize) -> usize {
-    let row = mono_size(ui) * 1.36;
-    (((ui.available_height() - 14.0) / row).floor() as usize).clamp(min, 60)
+/// Rows a code editor asks for to fill `height`: it sizes itself by the
+/// font's row height (its lines are then drawn 20 apart), plus 16 of margins.
+fn fill_rows(ui: &Ui, height: f32) -> usize {
+    let row = ui.fonts_mut(|f| f.row_height(&theme::mono(mono_size(ui)))).max(1.0);
+    (((height - 16.0) / row).floor() as usize).max(1)
 }
 
-/// Raw body language picker, JSON validity and Beautify.
-fn raw_tools(ui: &mut Ui, body: &mut Body) {
-    let lang_label = format!("{}  {}", body.raw_language.label(), icons::CARET_DOWN);
-    let r = kit::button_ex(ui, kit::Kind::Secondary, Some(icons::CODE), &lang_label, true)
-        .on_hover_text(tr("Language of the raw body (sets the Content-Type)"));
-    egui::Popup::menu(&r).show(|ui| {
-        for l in RawLanguage::ALL {
-            let mark = if body.raw_language == l { icons::CHECK } else { "    " };
-            if ui.button(format!("{mark}  {}", l.label())).clicked() {
-                body.raw_language = l;
-                ui.close();
-            }
-        }
+/// A `well` filling the space left in the pane (12 px from its sides,
+/// `bottom` above its end), scrolling its content. `add` gets the number of
+/// 20 px lines that fill it.
+fn editor_well(ui: &mut Ui, id: &str, bottom: f32, add: impl FnOnce(&mut Ui, usize)) {
+    let p = theme::pal(ui);
+    let avail = ui.available_rect_before_wrap();
+    let rect = Rect::from_min_max(
+        pos2(avail.left() + size::PAD, avail.top()),
+        pos2(avail.right() - size::PAD, (avail.bottom() - bottom).max(avail.top() + 60.0)),
+    );
+    ui.painter().rect_filled(rect, CornerRadius::same(8), p.well);
+    let inner = rect.shrink(1.0);
+    let rows = fill_rows(ui, inner.height());
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)), |ui| {
+        ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().id_salt(id).auto_shrink([false; 2]).show(ui, |ui| add(ui, rows));
     });
+    ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    // The space under it (`bottom`) is the caller's.
+    ui.advance_cursor_after_rect(Rect::from_min_max(avail.min, pos2(avail.right(), rect.bottom())));
+}
+
+fn raw_language_icon(l: RawLanguage) -> &'static str {
+    match l {
+        RawLanguage::Json => icons::BRACKETS_CURLY,
+        RawLanguage::Xml | RawLanguage::Html => icons::BRACKETS_ANGLE,
+        RawLanguage::JavaScript => icons::CODE,
+        RawLanguage::Text => icons::TEXT_AA,
+    }
+}
+
+/// Raw body: JSON validity, Beautify and the language picker.
+fn raw_tools(ui: &mut Ui, body: &mut Body) {
     if body.raw_language == RawLanguage::Json {
         let valid = body.raw.trim().is_empty() || beautify_json_with_vars(&body.raw).is_some();
+        if !valid {
+            kit::pill_ex(
+                ui,
+                tr("Invalid JSON"),
+                Tone::Err,
+                PillOpts { icon: Some(icons::WARNING_CIRCLE), ..Default::default() },
+            )
+            .on_hover_text(tr("The body is not valid JSON; it is sent as typed."));
+        }
         if kit::ghost(ui, Some(icons::SPARKLE), tr("Beautify")).clicked()
             && let Some(p) = beautify_json_with_vars(&body.raw)
         {
             body.raw = p;
         }
-        if !valid {
-            let p = theme::pal(ui);
-            kit::pill(ui, &format!("{} {}", icons::WARNING_CIRCLE, tr("Invalid JSON")), p.err)
-                .on_hover_text(tr("The body is not valid JSON; it is sent as typed."));
-        }
     }
+    let label = body.raw_language.label();
+    let tw =
+        ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), Color32::PLACEHOLDER).size().x;
+    let r = kit::select_box(ui, Some(raw_language_icon(body.raw_language)), label, 8.0 + 14.0 + 6.0 + tw + 24.0, true)
+        .on_hover_text(tr("Language of the raw body (sets the Content-Type)"));
+    egui::Popup::menu(&r).width(170.0).align(egui::RectAlign::BOTTOM_END).show(|ui| {
+        for l in RawLanguage::ALL {
+            let item = kit::MenuItem { checked: Some(body.raw_language == l), label: l.label(), ..Default::default() };
+            if kit::menu_item_ex(ui, item).clicked() {
+                body.raw_language = l;
+            }
+        }
+    });
 }
 
-/// multipart/form-data fields in the visual language of `widgets::kv_table`:
-/// enable box, key, Text/File type, value (or files), content type.
+/// multipart/form-data fields in the grid of `widgets::kv_table`: enable
+/// box, key, Text/File type (its menu also sets the part's content type),
+/// value (or files).
 fn form_data_table(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -1305,57 +1747,55 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
     use egui::TextEdit;
     let p = theme::pal(ui);
     let mut changed = false;
-    const CHECK: f32 = 34.0;
-    const DEL: f32 = 32.0;
-    const HEAD: f32 = 28.0;
-    const ROW: f32 = 32.0;
-    const KIND: f32 = 84.0;
-    let width = ui.available_width().max(320.0);
+    const CHECK: f32 = 30.0;
+    const DEL: f32 = 30.0;
+    const KIND: f32 = 74.0;
+    let row_h = size::ROW;
+    let width = ui.available_width().max(300.0);
     let left = ui.cursor().left();
     let top = ui.cursor().top();
     let cols = width - CHECK - DEL - KIND;
-    let (key_w, val_w) = (cols * 0.3, cols * 0.46);
-    let xs = [
-        left + CHECK,
-        left + CHECK + key_w,
-        left + CHECK + key_w + KIND,
-        left + CHECK + key_w + KIND + val_w,
-        left + width - DEL,
-    ];
-    let mono = theme::mono(mono_size(ui));
-    let head = Rect::from_min_size(pos2(left, top), vec2(width, HEAD));
-    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.chrome);
-    for (x, label) in [(xs[0], tr("Key")), (xs[1], tr("Type")), (xs[2], tr("Value")), (xs[3], tr("Content-Type"))] {
-        ui.painter().text(
-            pos2(x + 10.0, head.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            theme::medium(11.5),
-            p.text_muted,
-        );
+    let key_w = cols / 2.3;
+    let xs = [left + CHECK, left + CHECK + key_w, left + CHECK + key_w + KIND, left + width - DEL];
+    let mono = theme::mono(12.0);
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let head = Rect::from_min_size(pos2(left, top), vec2(width, size::TABLE_HEAD));
+    kv_head(ui, head, &[(xs[0], tr("Key")), (xs[1], tr("Type")), (xs[2], tr("Value"))]);
+    if !rows.is_empty() {
+        let all = rows.iter().all(|r| r.enabled);
+        let some = rows.iter().any(|r| r.enabled);
+        let c = Rect::from_center_size(pos2(left + CHECK / 2.0, head.center().y), vec2(15.0, 15.0));
+        let r = ui.interact(c, id.with("all"), Sense::click());
+        widgets::a11y_name(&r, tr("Enabled"));
+        kit::paint_check(ui, c, all, some && !all, r.hovered(), ui.is_enabled());
+        if r.clicked() {
+            for row in rows.iter_mut() {
+                row.enabled = !all;
+            }
+            changed = true;
+        }
     }
     let mut y = head.bottom();
     let mut remove = None;
     let n = rows.len();
     let ring = |ui: &Ui, r: Rect| {
-        ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(1.5, p.accent), StrokeKind::Outside);
+        ui.painter().rect_stroke(r.shrink(1.0), CornerRadius::same(4), Stroke::new(1.5, p.accent), StrokeKind::Inside);
     };
     for i in 0..=n {
         let is_new = i == n;
         let mut row = if is_new { FormField::text("", "") } else { rows[i].clone() };
         let mut row_changed = false;
-        let row_rect = Rect::from_min_size(pos2(left, y), vec2(width, ROW));
+        let row_rect = Rect::from_min_size(pos2(left, y), vec2(width, row_h));
         ui.painter().hline(left..=left + width, y, Stroke::new(1.0, p.border));
         let hovered = ui.rect_contains_pointer(row_rect);
         if hovered && !is_new {
-            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.5)), 0.0, p.faint_row());
+            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.0)).with_min_y(y + 0.5), 0.0, p.well);
         }
-        let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 4.0, y + 3.0), pos2(x1 - 4.0, y + ROW - 3.0));
+        let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 1.0, y + 1.0), pos2(x1, y + row_h));
         ui.push_id(i, |ui| {
             if !is_new {
-                let c =
-                    Rect::from_center_size(pos2(left + CHECK / 2.0 + 2.0, row_rect.center().y), vec2(18.0, ROW - 6.0));
-                let r = ui.put(c, egui::Checkbox::without_text(&mut row.enabled));
+                let c = Rect::from_center_size(pos2(left + CHECK / 2.0, row_rect.center().y + 0.5), vec2(15.0, 15.0));
+                let r = ui.put(c, |ui: &mut Ui| kit::check(ui, &mut row.enabled, ""));
                 widgets::a11y_name(&r, &format!("{} {}", tr("Enabled"), i + 1));
                 row_changed |= r.changed();
             }
@@ -1366,11 +1806,11 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
             let r = ui.put(
                 key_rect,
                 TextEdit::singleline(&mut row.key)
-                    .hint_text(if is_new { tr("Key") } else { "" })
+                    .hint_text(RichText::new(if is_new { tr("Key") } else { "" }).color(p.text_faint))
                     .font(mono.clone())
                     .text_color(text_color)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::symmetric(6, 2))
+                    // egui ignores `margin` when a frame is given: it goes in the frame.
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(9, 0)))
                     .min_size(vec2(0.0, key_rect.height()))
                     .align(Align2::LEFT_CENTER)
                     .desired_width(key_rect.width()),
@@ -1380,54 +1820,73 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
                 ring(ui, key_rect);
             }
             row_changed |= r.changed();
-            // Type
-            let kind_rect = cell(xs[1], xs[2]);
-            let (icon, label) = match row.kind {
-                FormFieldKind::Text => (icons::TEXT_AA, tr("Text")),
-                FormFieldKind::File => (icons::FILE, tr("File")),
-            };
-            let r = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(kind_rect), |ui| {
-                    ui.centered_and_justified(|ui| {
-                        kit::button_ex(
-                            ui,
-                            kit::Kind::Ghost,
-                            Some(icon),
-                            &format!("{label} {}", icons::CARET_DOWN),
-                            true,
-                        )
+            // Type (and content type)
+            if !is_new {
+                let kind_rect = cell(xs[1], xs[2]);
+                let label = match row.kind {
+                    FormFieldKind::Text => tr("Text"),
+                    FormFieldKind::File => tr("File"),
+                };
+                let sel = Rect::from_center_size(kind_rect.center(), vec2(kind_rect.width() - 8.0, 26.0));
+                let r = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(sel), |ui| {
+                        kit::select_box_ex(ui, None, None, label, sel.width(), true, true)
                     })
-                    .inner
-                })
-                .inner;
-            egui::Popup::menu(&r).show(|ui| {
-                for (k, icon, label) in
-                    [(FormFieldKind::Text, icons::TEXT_AA, tr("Text")), (FormFieldKind::File, icons::FILE, tr("File"))]
-                {
-                    if ui.button(kit::with_icon(icon, label)).clicked() {
-                        if row.kind != k {
+                    .inner;
+                let r = match &row.content_type {
+                    Some(ct) => r.on_hover_text(format!("{}: {ct}", tr("Content-Type"))),
+                    None => r,
+                };
+                egui::Popup::menu(&r).width(200.0).show(|ui| {
+                    for (k, icon, label) in [
+                        (FormFieldKind::Text, icons::TEXT_AA, tr("Text")),
+                        (FormFieldKind::File, icons::FILE, tr("File")),
+                    ] {
+                        let item =
+                            kit::MenuItem { icon: Some(icon), label, selected: row.kind == k, ..Default::default() };
+                        if kit::menu_item_ex(ui, item).clicked() && row.kind != k {
                             row.kind = k;
                             row_changed = true;
                         }
-                        ui.close();
                     }
-                }
-            });
+                    kit::menu_sep(ui);
+                    kit::menu_header(ui, tr("Content-Type"));
+                    let mut ct = row.content_type.clone().unwrap_or_default();
+                    let r = ui.add(
+                        TextEdit::singleline(&mut ct)
+                            .hint_text(RichText::new(tr("Auto")).color(p.text_faint))
+                            .font(theme::mono(12.0))
+                            .margin(egui::Margin::symmetric(8, 4))
+                            .desired_width(f32::INFINITY),
+                    );
+                    widgets::a11y_name(&r, &format!("{} {}", tr("Content-Type"), i + 1));
+                    if r.changed() {
+                        row.content_type = (!ct.trim().is_empty()).then_some(ct);
+                        row_changed = true;
+                    }
+                });
+            }
             // Value
             let val_rect = cell(xs[2], xs[3]);
             match row.kind {
                 FormFieldKind::Text => {
                     let r = ui
-                        .scope_builder(egui::UiBuilder::new().max_rect(val_rect), |ui| {
-                            widgets::var_cell(
-                                ui,
-                                "v",
-                                &mut row.value,
-                                vars,
-                                if is_new { tr("Value") } else { "" },
-                                val_rect.width(),
-                            )
-                        })
+                        .scope_builder(
+                            egui::UiBuilder::new().max_rect(val_rect).layout(Layout::left_to_right(Align::Center)),
+                            |ui| {
+                                if faded {
+                                    ui.visuals_mut().override_text_color = Some(p.text_faint);
+                                }
+                                widgets::var_cell(
+                                    ui,
+                                    "v",
+                                    &mut row.value,
+                                    vars,
+                                    if is_new { tr("Value") } else { "" },
+                                    val_rect.width(),
+                                )
+                            },
+                        )
                         .inner;
                     widgets::a11y_name(&r, &format!("{} {}", tr("Value"), i + 1));
                     if r.has_focus() {
@@ -1436,49 +1895,52 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
                     row_changed |= r.changed();
                 }
                 FormFieldKind::File => {
-                    let names = row
-                        .files
-                        .iter()
-                        .map(|f| {
-                            std::path::Path::new(f)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| f.clone())
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     let r = ui
                         .scope_builder(egui::UiBuilder::new().max_rect(val_rect), |ui| {
                             ui.horizontal_centered(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
+                                ui.add_space(5.0);
                                 if row.files.is_empty() {
-                                    kit::button_ex(
-                                        ui,
-                                        kit::Kind::Ghost,
-                                        Some(icons::UPLOAD_SIMPLE),
-                                        tr("Select files"),
-                                        true,
-                                    )
+                                    kit::ghost(ui, Some(icons::UPLOAD_SIMPLE), tr("Select files"))
                                 } else {
-                                    let name_w = (ui.available_width() - 26.0).max(40.0);
-                                    let g = elide(
-                                        ui,
-                                        &format!("{}  {names}", icons::FILE),
-                                        mono.clone(),
-                                        text_color,
-                                        name_w - 8.0,
-                                    );
-                                    let (rect, resp) = ui.allocate_exact_size(vec2(name_w, 22.0), Sense::click());
+                                    let names = row
+                                        .files
+                                        .iter()
+                                        .map(|f| {
+                                            std::path::Path::new(f)
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| f.clone())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let bytes: u64 = row
+                                        .files
+                                        .iter()
+                                        .filter_map(|f| std::fs::metadata(f).ok())
+                                        .map(|m| m.len())
+                                        .sum();
+                                    let text = format!("{names} · {}", ternarywire_core::util::human_bytes(bytes));
+                                    let name_w = (ui.available_width() - 30.0).max(40.0);
+                                    let (rect, resp) = ui.allocate_exact_size(vec2(name_w, 24.0), Sense::click());
                                     if resp.hovered() {
-                                        ui.painter().rect_filled(rect, CornerRadius::same(4), p.hover);
+                                        ui.painter().rect_filled(rect, CornerRadius::same(5), p.hover);
                                     }
+                                    ui.painter().text(
+                                        pos2(rect.left() + 4.0, rect.center().y),
+                                        Align2::LEFT_CENTER,
+                                        icons::FILE,
+                                        theme::icon_font(13.0),
+                                        p.text_faint,
+                                    );
+                                    let g =
+                                        elide(ui, &text, egui::FontId::proportional(12.5), text_color, name_w - 26.0);
                                     ui.painter().galley(
-                                        pos2(rect.left() + 4.0, rect.center().y - g.size().y / 2.0),
+                                        pos2(rect.left() + 22.0, rect.center().y - g.size().y / 2.0),
                                         g,
                                         text_color,
                                     );
-                                    let clear = kit::icon_button_ex(ui, icons::X, tr("Clear files"), false, 22.0);
-                                    if clear.clicked() {
+                                    if kit::icon_button_sm(ui, icons::X, tr("Clear files")).clicked() {
                                         row.files.clear();
                                         row_changed = true;
                                     }
@@ -1496,50 +1958,24 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
                     }
                 }
             }
-            // Content type
-            let ct_rect = cell(xs[3], xs[4]);
-            let mut ct = row.content_type.clone().unwrap_or_default();
-            let r = ui.put(
-                ct_rect,
-                TextEdit::singleline(&mut ct)
-                    .hint_text(if is_new || row.content_type.is_none() { tr("Auto") } else { "" })
-                    .font(mono.clone())
-                    .text_color(text_color)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::symmetric(6, 2))
-                    .min_size(vec2(0.0, ct_rect.height()))
-                    .align(Align2::LEFT_CENTER)
-                    .desired_width(ct_rect.width()),
-            );
-            widgets::a11y_name(&r, &format!("{} {}", tr("Content-Type"), i + 1));
-            if r.has_focus() {
-                ring(ui, ct_rect);
-            }
-            if r.changed() {
-                row.content_type = (!ct.is_empty()).then_some(ct);
-                row_changed = true;
-            }
             if !is_new && hovered {
-                let d = Rect::from_center_size(pos2(xs[4] + DEL / 2.0, row_rect.center().y), vec2(24.0, 24.0));
+                let d = Rect::from_center_size(pos2(xs[3] + DEL / 2.0, row_rect.center().y), vec2(22.0, 22.0));
                 let r = ui
                     .scope_builder(egui::UiBuilder::new().max_rect(d), |ui| {
-                        kit::icon_button_ex(ui, icons::TRASH, tr("Remove"), false, 24.0)
+                        kit::icon_button_sm(ui, icons::TRASH, tr("Remove"))
                     })
                     .inner;
+                widgets::a11y_name(&r, &format!("{} {}", tr("Remove"), i + 1));
                 if r.clicked() {
                     remove = Some(i);
                 }
             }
         });
-        y += ROW;
+        y += row_h;
         if row_changed {
             changed = true;
             if is_new {
-                if !row.key.is_empty()
-                    || !row.value.is_empty()
-                    || !row.files.is_empty()
-                    || row.kind == FormFieldKind::File
-                {
+                if !row.key.is_empty() || !row.value.is_empty() {
                     row.enabled = true;
                     rows.push(row);
                 }
@@ -1549,12 +1985,12 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
         }
     }
     let table = Rect::from_min_max(pos2(left, top), pos2(left + width, y));
-    for x in &xs[..4] {
+    ui.painter().set(bg, egui::Shape::rect_filled(table, CornerRadius::same(8), p.surface));
+    for x in &xs[..3] {
         ui.painter().vline(*x, table.y_range(), Stroke::new(1.0, p.border));
     }
     ui.painter().rect_stroke(table, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
     ui.advance_cursor_after_rect(table);
-    let _ = id;
     if let Some(i) = remove {
         rows.remove(i);
         changed = true;
@@ -1562,114 +1998,161 @@ fn form_data_table_inner(ui: &mut Ui, id: egui::Id, rows: &mut Vec<FormField>, v
     changed
 }
 
-/// A file picked as the whole request body.
+/// A file picked as the whole request body: a card with the file and its
+/// size, and its path under it.
 fn binary_body(ui: &mut Ui, body: &mut Body) {
     let p = theme::pal(ui);
     let path = body.binary_path.trim().to_string();
     let meta = (!path.is_empty()).then(|| std::fs::metadata(&path).ok()).flatten();
+    let missing = !path.is_empty() && meta.is_none();
     kit::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
             let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-            let color = if path.is_empty() || meta.is_some() { p.text_muted } else { p.err };
-            ui.painter().rect_filled(rect, CornerRadius::same(8), p.subtle);
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, icons::FILE, theme::icon_font(20.0), color);
-            ui.add_space(4.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                if path.is_empty() {
-                    ui.label(RichText::new(tr("No file selected")).font(theme::medium(13.5)));
-                    ui.label(kit::hint(ui, tr("The file's bytes are sent as the request body.")));
-                } else {
-                    let name = std::path::Path::new(&path)
-                        .file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone());
-                    ui.label(RichText::new(name).font(theme::medium(13.5)));
-                    match &meta {
-                        Some(m) => ui.label(kit::hint(ui, &ternarywire_core::util::human_bytes(m.len()))),
-                        None => ui.label(RichText::new(tr("File not found")).small().color(p.err)),
-                    };
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !path.is_empty() && kit::icon_button(ui, icons::X, tr("Remove file")).clicked() {
+            let (fg, bg) = if missing { (p.err, p.err_soft) } else { (p.accent_text, p.accent_soft) };
+            ui.painter().rect_filled(rect, CornerRadius::same(10), bg);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, icons::FILE_ARROW_UP, theme::icon_font(20.0), fg);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if !path.is_empty() && kit::icon_button_sm(ui, icons::X, tr("Remove file")).clicked() {
                     body.binary_path.clear();
                 }
                 let label = if path.is_empty() { tr("Choose file…") } else { tr("Change…") };
-                if kit::secondary(ui, Some(icons::UPLOAD_SIMPLE), label).clicked()
+                if kit::button(ui, Kind::Secondary, Size::Sm, label, ButtonOpts::default()).clicked()
                     && let Some(f) = rfd::FileDialog::new().pick_file()
                 {
                     body.binary_path = f.display().to_string();
                 }
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add_space(3.0);
+                    let name = if path.is_empty() {
+                        tr("No file selected").to_string()
+                    } else {
+                        std::path::Path::new(&path)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.clone())
+                    };
+                    ui.add(egui::Label::new(RichText::new(name).font(theme::medium(13.0)).color(p.text)).truncate());
+                    match &meta {
+                        Some(m) => ui.add(
+                            egui::Label::new(kit::hint(
+                                ui,
+                                &format!(
+                                    "{} · {}",
+                                    ternarywire_core::util::human_bytes(m.len()),
+                                    tr("the file's bytes are sent as the request body")
+                                ),
+                            ))
+                            .truncate(),
+                        ),
+                        None if missing => ui.label(RichText::new(tr("File not found")).size(12.0).color(p.err)),
+                        None => ui.add(
+                            egui::Label::new(kit::hint(ui, tr("The file's bytes are sent as the request body.")))
+                                .truncate(),
+                        ),
+                    };
+                });
             });
         });
-        ui.add_space(10.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut body.binary_path)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace)
-                .margin(egui::Margin::symmetric(8, 5))
-                .hint_text("/path/to/file"),
-        );
     });
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut body.binary_path)
+            .desired_width(f32::INFINITY)
+            .font(theme::mono(12.0))
+            .min_size(vec2(0.0, 26.0))
+            .align(Align2::LEFT_CENTER)
+            .margin(egui::Margin::symmetric(8, 0))
+            .hint_text(RichText::new("/path/to/file").color(p.text_faint)),
+    );
+    widgets::a11y_name(&r, tr("File path"));
 }
 
-fn graphql_editor(ui: &mut Ui, tab: &mut RequestTab, body: &mut Body, ectx: &EditCtx, actions: &mut Actions) {
+/// GraphQL toolbar tools: Prettify and the schema explorer toggle.
+fn graphql_tools(ui: &mut Ui, tab: &mut RequestTab, body: &mut Body) {
+    if kit::ghost(ui, Some(icons::SPARKLE), tr("Prettify")).clicked() {
+        body.graphql.query = prettify_graphql(&body.graphql.query);
+    }
+    let open = tab.graphql.explorer_open;
+    if kit::icon_button_ex(ui, icons::BOOK_OPEN, tr("Schema explorer"), open, 22.0).clicked() {
+        tab.graphql.explorer_open = !open;
+    }
+}
+
+/// Query above Variables in one frame, with the schema explorer as a drawer
+/// on its right.
+fn graphql_body(ui: &mut Ui, tab: &mut RequestTab, body: &mut Body, ectx: &EditCtx, actions: &mut Actions) {
     let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_min_height(28.0);
-        if tab.graphql.loading {
-            ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-            ui.label(widgets::muted(ui, tr("Fetching schema…")));
-        } else if kit::button_ex(ui, kit::Kind::Secondary, Some(icons::ARROWS_CLOCKWISE), tr("Fetch schema"), true)
-            .on_hover_text(tr("Run an introspection query against the URL"))
-            .clicked()
-        {
-            actions.fetch_schema = true;
-        }
-        if let Some(schema) = &tab.graphql.schema {
-            let types = schema.types.len();
-            kit::pill(ui, &format!("{} {}", icons::CHECK, trf("{} types", &[&types])), p.ok);
-        }
-        if let Some(e) = &tab.graphql.error {
-            ui.add(
-                egui::Label::new(RichText::new(format!("{} {e}", icons::WARNING_CIRCLE)).small().color(p.err))
-                    .truncate(),
-            );
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if tab.graphql.schema.is_some()
-                && kit::icon_toggle(ui, icons::TREE_STRUCTURE, tr("Schema explorer"), tab.graphql.explorer_open)
-                    .clicked()
-            {
-                tab.graphql.explorer_open = !tab.graphql.explorer_open;
-            }
-            if kit::ghost(ui, Some(icons::SPARKLE), tr("Prettify")).clicked() {
-                body.graphql.query = prettify_graphql(&body.graphql.query);
-            }
-        });
-    });
-    ui.add_space(6.0);
-    let rows = editor_rows(ui, 10).saturating_sub(1);
+    let avail = ui.available_rect_before_wrap();
+    let rect = Rect::from_min_max(
+        pos2(avail.left() + size::PAD, avail.top()),
+        pos2(avail.right() - size::PAD, (avail.bottom() - 12.0).max(avail.top() + 140.0)),
+    );
+    let explorer_w = if tab.graphql.explorer_open && rect.width() >= 224.0 + 160.0 { 224.0 } else { 0.0 };
+    let left = Rect::from_min_max(rect.min, pos2(rect.right() - explorer_w, rect.bottom()));
+    const HEAD: f32 = 30.0;
+    let editors = (left.height() - 2.0 * HEAD).max(40.0);
+    let q_h = (editors * 1.4 / 1.9).round();
+    let qh = Rect::from_min_size(left.min, vec2(left.width(), HEAD));
+    let q_rect = Rect::from_min_size(pos2(left.left(), qh.bottom()), vec2(left.width(), q_h));
+    let vh = Rect::from_min_size(pos2(left.left(), q_rect.bottom()), vec2(left.width(), HEAD));
+    let v_rect = Rect::from_min_max(pos2(left.left(), vh.bottom()), left.max);
+    let painter = ui.painter().clone();
+    painter.rect_filled(qh, CornerRadius { nw: 8, ne: if explorer_w > 0.0 { 0 } else { 8 }, sw: 0, se: 0 }, p.well);
+    painter.rect_filled(vh, 0.0, p.well);
+    painter.hline(qh.x_range(), qh.bottom() - 0.5, Stroke::new(1.0, p.border));
+    painter.hline(vh.x_range(), vh.top() + 0.5, Stroke::new(1.0, p.border));
+    painter.hline(vh.x_range(), vh.bottom() - 0.5, Stroke::new(1.0, p.border));
+    let eyebrow = |r: Rect, text: &str| {
+        let g = painter.layout_no_wrap(text.to_uppercase(), theme::semibold(10.5), p.text_faint);
+        painter.galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, p.text_faint);
+    };
+    eyebrow(qh, tr("Query"));
+    eyebrow(vh, tr("Variables"));
+    painter.text(
+        pos2(vh.right() - 10.0, vh.center().y),
+        Align2::RIGHT_CENTER,
+        "JSON",
+        egui::FontId::proportional(11.0),
+        p.text_faint,
+    );
+    if tab.graphql.schema.is_some() {
+        let g = painter.layout_no_wrap(tr("Schema loaded").to_string(), egui::FontId::proportional(11.0), p.text_faint);
+        let x = qh.right() - 10.0 - g.size().x;
+        painter.galley(pos2(x, qh.center().y - g.size().y / 2.0), g, p.text_faint);
+        painter.text(
+            pos2(x - 4.0, qh.center().y),
+            Align2::RIGHT_CENTER,
+            icons::CHECK_CIRCLE,
+            theme::icon_font(12.0),
+            p.ok,
+        );
+    }
     let schema = tab.graphql.schema.clone();
-    let show_explorer = tab.graphql.explorer_open && schema.is_some();
-    ui.columns(if show_explorer { 3 } else { 2 }, |cols| {
-        cols[0].label(kit::section_title(tr("Query")));
-        let provider = |text: &str, cursor: usize| -> Option<(usize, Vec<widgets::CompletionItem>)> {
-            let schema = schema.as_ref()?;
-            let word_start = widgets::word_start(&text[..cursor], |c| c.is_alphanumeric() || c == '_');
-            if word_start == cursor {
-                return None;
-            }
-            let items: Vec<widgets::CompletionItem> = ternarywire_convert::graphql::suggest(schema, text, cursor)
-                .into_iter()
-                .map(|s| (s.label, s.insert, s.detail))
-                .collect();
-            Some((word_start, items))
-        };
-        widgets::code_editor_with(
-            &mut cols[0],
+    let provider = |text: &str, cursor: usize| -> Option<(usize, Vec<widgets::CompletionItem>)> {
+        let schema = schema.as_ref()?;
+        let word_start = widgets::word_start(&text[..cursor], |c| c.is_alphanumeric() || c == '_');
+        if word_start == cursor {
+            return None;
+        }
+        let items: Vec<widgets::CompletionItem> = ternarywire_convert::graphql::suggest(schema, text, cursor)
+            .into_iter()
+            .map(|s| (s.label, s.insert, s.detail))
+            .collect();
+        Some((word_start, items))
+    };
+    let editor = |ui: &mut Ui, r: Rect, salt: &str, add: &mut dyn FnMut(&mut Ui, usize)| {
+        let rows = fill_rows(ui, r.height());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Min)), |ui| {
+            ui.set_clip_rect(r.intersect(ui.clip_rect()));
+            egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false; 2]).show(ui, |ui| add(ui, rows));
+        });
+    };
+    editor(ui, q_rect, "gql-query-scroll", &mut |ui, rows| {
+        widgets::code_editor_gutter(
+            ui,
             "gql-query",
             &mut body.graphql.query,
             Lang::GraphQl,
@@ -1678,62 +2161,176 @@ fn graphql_editor(ui: &mut Ui, tab: &mut RequestTab, body: &mut Body, ectx: &Edi
             false,
             Some(&provider),
         );
-        cols[1].label(kit::section_title(tr("GraphQL Variables")));
-        widgets::code_editor(
-            &mut cols[1],
+    });
+    editor(ui, v_rect, "gql-vars-scroll", &mut |ui, rows| {
+        widgets::code_editor_gutter(
+            ui,
             "gql-vars",
             &mut body.graphql.variables,
             Lang::Json,
             Some(&ectx.vars),
             rows,
             false,
+            None,
         );
-        if show_explorer {
-            let schema = schema.unwrap();
-            let ui = &mut cols[2];
+    });
+    if explorer_w > 0.0 {
+        let er = Rect::from_min_max(pos2(left.right(), rect.top()), rect.max);
+        painter.rect_filled(er, CornerRadius { nw: 0, sw: 0, ne: 8, se: 8 }, p.well);
+        painter.vline(er.left() + 0.5, er.y_range(), Stroke::new(1.0, p.border));
+        schema_explorer(ui, er.shrink2(vec2(0.0, 1.0)), tab, body, actions);
+    }
+    painter.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.advance_cursor_after_rect(avail);
+}
+
+/// The schema drawer: types, a filter, and the root fields with a button
+/// that writes an operation for each.
+fn schema_explorer(ui: &mut Ui, rect: Rect, tab: &mut RequestTab, body: &mut Body, actions: &mut Actions) {
+    let p = theme::pal(ui);
+    let head = Rect::from_min_size(pos2(rect.left() + 1.0, rect.top()), vec2(rect.width() - 1.0, 35.0));
+    ui.painter().hline(head.x_range(), head.bottom() + 0.5, Stroke::new(1.0, p.border));
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(head.shrink2(vec2(10.0, 0.0))).layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(kit::section_title(tr("Schema")));
-            kit::search_field(ui, "gql-filter", &mut tab.graphql.filter, tr("Filter fields"), ui.available_width());
-            ui.add_space(4.0);
-            let filter = tab.graphql.filter.to_lowercase();
-            egui::ScrollArea::vertical().id_salt("gql-explorer").max_height(rows as f32 * 17.0).show(ui, |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if kit::icon_button_sm(ui, icons::X, tr("Close schema")).clicked() {
+                    tab.graphql.explorer_open = false;
+                }
+                if tab.graphql.schema.is_some()
+                    && !tab.graphql.loading
+                    && kit::icon_button_sm(ui, icons::ARROWS_CLOCKWISE, tr("Fetch schema")).clicked()
+                {
+                    actions.fetch_schema = true;
+                }
+                if let Some(s) = &tab.graphql.schema {
+                    ui.add_space(4.0);
+                    kit::tone_pill(ui, &trf("{} types", &[&s.types.len()]), Tone::Ok);
+                }
+            });
+        },
+    );
+    let body_rect = Rect::from_min_max(pos2(rect.left() + 1.0, head.bottom() + 1.0), rect.max);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect).layout(Layout::top_down(Align::Min)), |ui| {
+        ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let Some(schema) = tab.graphql.schema.clone() else {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(body_rect.width() - 24.0);
+                ui.spacing_mut().item_spacing.y = 8.0;
+                if tab.graphql.loading {
+                    ui.add(egui::Spinner::new().size(16.0).color(p.accent));
+                    ui.label(kit::hint(ui, tr("Fetching schema…")));
+                } else {
+                    ui.add(
+                        egui::Label::new(kit::hint(
+                            ui,
+                            tr("Load the schema for completions and to insert operations."),
+                        ))
+                        .wrap(),
+                    );
+                    let r = kit::button(
+                        ui,
+                        Kind::Secondary,
+                        Size::Sm,
+                        tr("Fetch schema"),
+                        ButtonOpts { icon: Some(icons::ARROWS_CLOCKWISE), ..Default::default() },
+                    );
+                    if r.on_hover_text(tr("Run an introspection query against the URL")).clicked() {
+                        actions.fetch_schema = true;
+                    }
+                }
+                if let Some(e) = &tab.graphql.error {
+                    ui.add(egui::Label::new(RichText::new(e).size(11.5).color(p.err)).wrap());
+                }
+            });
+            return;
+        };
+        egui::Frame::new().inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            kit::search_field_sm(ui, "gql-filter", &mut tab.graphql.filter, tr("Filter fields"), ui.available_width());
+        });
+        let filter = tab.graphql.filter.to_lowercase();
+        egui::ScrollArea::vertical().id_salt("gql-explorer").auto_shrink([false; 2]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin { left: 6, right: 6, top: 0, bottom: 8 }).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let w = ui.available_width();
                 for (op, label) in [("query", "Query"), ("mutation", "Mutation"), ("subscription", "Subscription")] {
                     let Some(root_type) = schema.root(op).and_then(|r| schema.get(r)) else { continue };
                     let id = ui.make_persistent_id(("gql-root", op));
-                    if !disclosure(ui, id, label, Some(root_type.fields.len()), op == "query") && filter.is_empty() {
+                    let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(op != "subscription"));
+                    let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+                    widgets::a11y_button(&resp, label);
+                    if resp.clicked() {
+                        open = !open;
+                        ui.data_mut(|d| d.insert_temp(id, open));
+                    }
+                    let caret = if open || !filter.is_empty() { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+                    ui.painter().text(
+                        pos2(r.left() + 10.0, r.center().y),
+                        Align2::CENTER_CENTER,
+                        caret,
+                        theme::icon_font(11.0),
+                        p.text_faint,
+                    );
+                    let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text);
+                    let gx = r.left() + 20.0;
+                    let gw = g.size().x;
+                    ui.painter().galley(pos2(gx, r.center().y - g.size().y / 2.0), g, p.text);
+                    ui.painter().text(
+                        pos2(gx + gw + 6.0, r.center().y),
+                        Align2::LEFT_CENTER,
+                        root_type.fields.len().to_string(),
+                        egui::FontId::proportional(11.0),
+                        p.text_faint,
+                    );
+                    if !open && filter.is_empty() {
                         continue;
                     }
                     for field in &root_type.fields {
                         if !filter.is_empty() && !field.name.to_lowercase().contains(&filter) {
                             continue;
                         }
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            if widgets::small_icon_button(ui, icons::PLUS, tr("Insert an operation for this field"))
-                                .clicked()
-                            {
-                                body.graphql.query = ternarywire_convert::graphql::skeleton(&schema, op, &field.name);
-                                body.graphql.variables =
-                                    ternarywire_convert::graphql::skeleton_variables(&schema, op, &field.name);
-                            }
-                            let name = RichText::new(&field.name).monospace();
-                            let name = if field.deprecated { name.strikethrough().color(p.text_faint) } else { name };
-                            ui.add(egui::Label::new(name).selectable(false));
-                            ui.add(
-                                egui::Label::new(RichText::new(field.ty.display()).monospace().color(p.text_muted))
-                                    .selectable(false)
-                                    .truncate(),
-                            );
-                        })
-                        .response
-                        .on_hover_text(field.description.clone().unwrap_or_default());
+                        let (row, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
+                        let plus =
+                            Rect::from_min_size(pos2(row.left() + 18.0, row.center().y - 11.0), vec2(22.0, 22.0));
+                        let add = kit::icon_button_sm(
+                            &mut ui.new_child(egui::UiBuilder::new().max_rect(plus)),
+                            icons::PLUS,
+                            tr("Insert an operation for this field"),
+                        );
+                        if add.clicked() {
+                            body.graphql.query = ternarywire_convert::graphql::skeleton(&schema, op, &field.name);
+                            body.graphql.variables =
+                                ternarywire_convert::graphql::skeleton_variables(&schema, op, &field.name);
+                        }
+                        let x = plus.right() + 6.0;
+                        let name_color = if field.deprecated { p.text_faint } else { p.text };
+                        let ng = elide(ui, &field.name, theme::mono(11.5), name_color, (row.right() - x) * 0.6);
+                        let nw = ng.size().x;
+                        ui.painter().galley(pos2(x, row.center().y - ng.size().y / 2.0), ng, name_color);
+                        if field.deprecated {
+                            ui.painter().hline(x..=x + nw, row.center().y, Stroke::new(1.0, p.text_faint));
+                        }
+                        let tx = x + nw + 6.0;
+                        if tx < row.right() - 12.0 {
+                            let tg =
+                                elide(ui, &field.ty.display(), theme::mono(11.0), p.text_faint, row.right() - tx - 4.0);
+                            ui.painter().galley(pos2(tx, row.center().y - tg.size().y / 2.0), tg, p.text_faint);
+                        }
+                        if let Some(d) = field.description.as_ref().filter(|d| !d.is_empty()) {
+                            resp.on_hover_text(d);
+                        }
                     }
                     ui.add_space(4.0);
                 }
             });
-        }
+        });
     });
 }
-
 /// The tokens of a GraphQL document for [`prettify_graphql`]: braces on
 /// their own, strings (`"…"`, `"""…"""`) and comments whole (they may hold
 /// braces and spaces), the rest split on whitespace.
@@ -1830,7 +2427,19 @@ fn prettify_graphql(q: &str) -> String {
     out.trim().to_string()
 }
 
-fn scripts_editor(
+// ---------------------------------------------------------------------------
+// Scripts
+// ---------------------------------------------------------------------------
+
+fn script_code(scripts: &mut ternarywire_core::model::Scripts, event: ScriptEvent) -> &mut String {
+    match event {
+        ScriptEvent::PreRequest => &mut scripts.pre_request,
+        ScriptEvent::PostResponse => &mut scripts.post_response,
+        ScriptEvent::OnMessage => &mut scripts.on_message,
+    }
+}
+
+fn scripts_section(
     ui: &mut Ui,
     tab: &mut RequestTab,
     scripts: &mut ternarywire_core::model::Scripts,
@@ -1839,19 +2448,15 @@ fn scripts_editor(
 ) {
     let has_response = tab.result.as_ref().is_some_and(|r| r.exec.response.is_some());
     let post = tab.script_event == ScriptEvent::PostResponse;
-    script_event_bar_with(
-        ui,
-        &mut tab.script_event,
-        scripts,
-        tr("JavaScript with the Postman-compatible pm API"),
-        if post { 150.0 } else { 0.0 },
-        |ui| {
-            if !post {
-                return;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let event = &mut tab.script_event;
+    kit::toolbar(ui, |ui| {
+        script_event_seg(ui, event, scripts);
+        let event = *event;
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            snippets_button(ui, event, script_code(scripts, event));
+            if post {
                 let r = ui
-                    .add_enabled_ui(has_response, |ui| kit::ghost(ui, Some(icons::SPARKLE), tr("Generate tests")))
+                    .add_enabled_ui(has_response, |ui| kit::ghost(ui, Some(icons::TEST_TUBE), tr("Generate tests")))
                     .inner;
                 let r = if has_response {
                     r.on_hover_text(tr("Write tests for the status, time, content type and body shape of the response"))
@@ -1861,128 +2466,158 @@ fn scripts_editor(
                 if r.clicked() {
                     actions.generate_tests = true;
                 }
-            });
-        },
-    );
-    script_panel(ui, tab.script_event, scripts, vars);
-}
-
-/// Pre-request / Post-response switch with a dot on the scripts that have
-/// code, and a line of help. Shared with the folder and collection settings.
-pub(crate) fn script_event_bar(
-    ui: &mut Ui,
-    event: &mut ScriptEvent,
-    scripts: &ternarywire_core::model::Scripts,
-    help: &str,
-) {
-    script_event_bar_with(ui, event, scripts, help, 0.0, |_| {});
-}
-
-/// [`script_event_bar`] with controls (`trailing_w` wide) on the right of
-/// the row.
-fn script_event_bar_with(
-    ui: &mut Ui,
-    event: &mut ScriptEvent,
-    scripts: &ternarywire_core::model::Scripts,
-    help: &str,
-    trailing_w: f32,
-    trailing: impl FnOnce(&mut Ui),
-) {
-    let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_min_height(30.0);
-        let pre = tr("Pre-request");
-        let post = tr("Post-response");
-        let r = ui.scope(|ui| {
-            kit::segmented(ui, event, &[(ScriptEvent::PreRequest, pre), (ScriptEvent::PostResponse, post)]);
+            }
         });
-        // Dots on segments with code (segments are text width + 20).
-        let seg = |text: &str| {
-            ui.painter()
-                .layout_no_wrap(text.to_string(), theme::medium(small_size(ui) + 0.5), Color32::PLACEHOLDER)
-                .size()
-                .x
-                + 20.0
-        };
-        let (w_pre, w_post) = (seg(pre), seg(post));
-        let rect = r.response.rect;
-        for (has, right) in [
-            (!scripts.pre_request.trim().is_empty(), rect.left() + 2.0 + w_pre),
-            (!scripts.post_response.trim().is_empty(), rect.left() + 2.0 + w_pre + w_post),
-        ] {
-            if has {
-                ui.painter().circle_filled(pos2(right - 6.0, rect.top() + 7.0), 2.5, p.ok);
-            }
-        }
-        ui.add_space(4.0);
-        if trailing_w == 0.0 {
-            ui.add(egui::Label::new(kit::hint(ui, help)).truncate());
-        } else {
-            // The help gives way to the trailing controls.
-            let help_w = ui.available_width() - trailing_w - 8.0;
-            if help_w > 60.0 {
-                ui.allocate_ui_with_layout(
-                    vec2(help_w, 30.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.add(egui::Label::new(kit::hint(ui, help)).truncate());
-                    },
-                );
-            }
-            trailing(ui);
-        }
     });
-    ui.add_space(8.0);
-}
-
-/// Script editor with snippets, shared with folder/collection tabs.
-pub fn script_panel(ui: &mut Ui, event: ScriptEvent, scripts: &mut ternarywire_core::model::Scripts, vars: &VarCtx) {
-    let code = match event {
-        ScriptEvent::PreRequest => &mut scripts.pre_request,
-        ScriptEvent::PostResponse => &mut scripts.post_response,
-        ScriptEvent::OnMessage => &mut scripts.on_message,
-    };
-    let width = ui.available_width();
-    let rows = editor_rows(ui, 10);
-    let editor_id = ("script", event == ScriptEvent::PreRequest);
-    let editor = |ui: &mut Ui, code: &mut String| {
-        widgets::code_editor_with(
+    let event = tab.script_event;
+    let code = script_code(scripts, event);
+    editor_well(ui, if event == ScriptEvent::PreRequest { "pre-script" } else { "post-script" }, 38.0, |ui, rows| {
+        widgets::code_editor_gutter(
             ui,
-            editor_id,
+            ("script", event == ScriptEvent::PreRequest),
             code,
             Lang::JavaScript,
             Some(vars),
             rows,
             false,
             Some(&widgets::pm_completions),
-        )
+        );
+    });
+    ui.add_space(8.0);
+    kit::bar_ex(ui, 24.0, 14.0, false, |ui| {
+        let p = theme::pal(ui);
+        ui.label(RichText::new(icons::INFO).font(theme::icon_font(13.0)).color(p.text_faint));
+        ui.add(
+            egui::Label::new(kit::hint(
+                ui,
+                &format!(
+                    "{} · {}",
+                    tr("JavaScript with the Postman-compatible pm API"),
+                    tr("type pm. for completions")
+                ),
+            ))
+            .truncate(),
+        );
+    });
+}
+
+/// Pre-request / Post-response (small segmented), with a dot on the
+/// scripts that have code.
+fn script_event_seg(ui: &mut Ui, event: &mut ScriptEvent, scripts: &ternarywire_core::model::Scripts) {
+    let p = theme::pal(ui);
+    let pre = tr("Pre-request");
+    let post = tr("Post-response");
+    let r = ui
+        .scope(|ui| kit::segmented_sm(ui, event, &[(ScriptEvent::PreRequest, pre), (ScriptEvent::PostResponse, post)]));
+    // Segments are their text (medium 11.5) plus 16 wide, 1 apart.
+    let seg = |text: &str| {
+        ui.painter().layout_no_wrap(text.to_string(), theme::medium(11.5), Color32::PLACEHOLDER).size().x + 16.0
     };
-    if width >= 640.0 {
-        // Editor on the left, snippets in a side panel of the same height.
-        let side_w = (width * 0.28).clamp(220.0, 280.0);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            let editor_w = width - side_w - 12.0;
-            let r = ui.allocate_ui_with_layout(vec2(editor_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.set_width(editor_w);
-                editor(ui, code);
-            });
-            let h = r.response.rect.height();
-            snippets_panel(ui, event, code, side_w, h);
-        });
-    } else {
-        let r = kit::button_ex(ui, kit::Kind::Ghost, Some(icons::LIGHTNING), tr("Snippets"), true);
-        egui::Popup::menu(&r).width(260.0).show(|ui| {
-            for s in crate::snippets::SNIPPETS.iter().filter(|s| event == ScriptEvent::PostResponse || !s.post_only) {
-                if ui.button(s.title).on_hover_text(RichText::new(s.code).monospace()).clicked() {
+    let (w_pre, w_post) = (seg(pre), seg(post));
+    let rect = r.response.rect;
+    for (has, right) in [
+        (!scripts.pre_request.trim().is_empty(), rect.left() + 2.0 + w_pre),
+        (!scripts.post_response.trim().is_empty(), rect.left() + 3.0 + w_pre + w_post),
+    ] {
+        if has {
+            // In the top right corner of the segment (26 high, centered).
+            ui.painter().circle_filled(pos2(right - 5.0, rect.center().y - 7.0), 2.5, p.ok);
+        }
+    }
+}
+
+/// The Snippets menu button: ready-made snippets by group and the pm API
+/// reference.
+fn snippets_button(ui: &mut Ui, event: ScriptEvent, code: &mut String) {
+    let r = kit::button(
+        ui,
+        Kind::Secondary,
+        Size::Sm,
+        tr("Snippets"),
+        ButtonOpts { icon: Some(icons::LIGHTNING), caret: true, ..Default::default() },
+    );
+    egui::Popup::menu(&r)
+        .width(260.0)
+        .align(egui::RectAlign::BOTTOM_END)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| snippets_menu(ui, event, code));
+}
+
+fn snippets_menu(ui: &mut Ui, event: ScriptEvent, code: &mut String) {
+    let p = theme::pal(ui);
+    let filter_id = ui.make_persistent_id(("snippet-filter", event == ScriptEvent::PreRequest));
+    let mut filter: String = ui.data(|d| d.get_temp(filter_id).unwrap_or_default());
+    egui::Frame::new().inner_margin(egui::Margin { left: 4, right: 4, top: 2, bottom: 4 }).show(ui, |ui| {
+        if kit::search_field_sm(ui, filter_id.with("field"), &mut filter, tr("Filter snippets"), ui.available_width())
+            .changed()
+        {
+            ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+        }
+    });
+    let needle = filter.to_lowercase();
+    let max_h = (ui.ctx().content_rect().height() * 0.55).clamp(200.0, 420.0);
+    egui::ScrollArea::vertical().id_salt("snippets").max_height(max_h).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut any = false;
+        for group in crate::snippets::Group::ALL {
+            let mut shown = crate::snippets::SNIPPETS
+                .iter()
+                .filter(|s| s.group == group)
+                .filter(|s| event == ScriptEvent::PostResponse || !s.post_only)
+                .filter(|s| needle.is_empty() || s.title.to_lowercase().contains(&needle))
+                .peekable();
+            if shown.peek().is_none() {
+                continue;
+            }
+            kit::menu_header(ui, group.label());
+            for s in shown {
+                any = true;
+                let item = kit::MenuItem { icon: Some(icons::PLUS), label: s.title, ..Default::default() };
+                if kit::menu_item_ex(ui, item).on_hover_text(RichText::new(s.code).monospace()).clicked() {
                     insert_snippet(code, s.code);
-                    ui.close();
                 }
             }
+        }
+        if !any {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(9.0);
+                ui.label(kit::hint(ui, tr("No snippets match.")));
+            });
+            ui.add_space(6.0);
+        }
+    });
+    kit::menu_sep(ui);
+    let api = kit::menu_item_ex(
+        ui,
+        kit::MenuItem {
+            icon: Some(icons::BOOK_OPEN),
+            label: tr("pm API reference"),
+            submenu: true,
+            ..Default::default()
+        },
+    );
+    egui::containers::menu::SubMenu::new().show(ui, &api, |ui| {
+        ui.set_min_width(300.0);
+        egui::ScrollArea::vertical().id_salt("pm-api").max_height(max_h).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (sig, doc) in crate::snippets::PM_COMPLETIONS {
+                if !needle.is_empty() && !sig.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
+                if resp.hovered() {
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), p.hover);
+                }
+                let w = rect.width() - 18.0;
+                let g = elide(ui, sig, theme::mono(11.5), p.text, w);
+                ui.painter().galley(pos2(rect.left() + 9.0, rect.top() + 5.0), g, p.text);
+                let g = elide(ui, tr(doc), egui::FontId::proportional(11.5), p.text_muted, w);
+                ui.painter().galley(pos2(rect.left() + 9.0, rect.bottom() - 5.0 - g.size().y), g, p.text_muted);
+                resp.on_hover_text(*doc);
+            }
         });
-        ui.add_space(4.0);
-        editor(ui, code);
-    }
+    });
 }
 
 fn insert_snippet(code: &mut String, snippet: &str) {
@@ -1992,77 +2627,12 @@ fn insert_snippet(code: &mut String, snippet: &str) {
     code.push_str(snippet);
 }
 
-/// The snippet list and pm API reference beside a script editor.
-fn snippets_panel(ui: &mut Ui, event: ScriptEvent, code: &mut String, width: f32, height: f32) {
-    let p = theme::pal(ui);
-    let filter_id = ui.make_persistent_id(("snippet-filter", event == ScriptEvent::PreRequest));
-    let mut filter: String = ui.data(|d| d.get_temp(filter_id).unwrap_or_default());
-    egui::Frame::new()
-        .fill(p.chrome)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(10))
-        .show(ui, |ui| {
-            ui.set_width(width - 20.0);
-            ui.set_height((height - 20.0).max(120.0));
-            ui.vertical(|ui| snippets_list(ui, event, code, filter_id, &mut filter));
-        });
-}
-
-fn snippets_list(ui: &mut Ui, event: ScriptEvent, code: &mut String, filter_id: egui::Id, filter: &mut String) {
-    let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(icons::LIGHTNING).font(theme::icon_font(14.0)).color(p.accent_text));
-        ui.label(RichText::new(tr("Snippets")).font(theme::semibold(13.0)));
-    });
-    ui.add_space(2.0);
-    if kit::search_field(ui, filter_id.with("field"), filter, tr("Filter snippets"), ui.available_width()).changed() {
-        ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
-    }
-    ui.add_space(4.0);
-    let needle = filter.to_lowercase();
-    egui::ScrollArea::vertical().id_salt(("snips", event == ScriptEvent::PreRequest)).auto_shrink([false; 2]).show(
-        ui,
-        |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let mut any = false;
-            for s in crate::snippets::SNIPPETS
-                .iter()
-                .filter(|s| event == ScriptEvent::PostResponse || !s.post_only)
-                .filter(|s| needle.is_empty() || s.title.to_lowercase().contains(&needle))
-            {
-                any = true;
-                if list_row(ui, icons::PLUS, s.title, false).on_hover_text(RichText::new(s.code).monospace()).clicked()
-                {
-                    insert_snippet(code, s.code);
-                }
-            }
-            if !any {
-                ui.label(kit::hint(ui, tr("No snippets match.")));
-            }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::BOOK_OPEN).font(theme::icon_font(13.0)).color(p.text_muted));
-                ui.label(RichText::new(tr("pm API")).font(theme::medium(12.0)).color(p.text_muted));
-            });
-            ui.add_space(4.0);
-            for (sig, doc) in crate::snippets::PM_COMPLETIONS {
-                if needle.is_empty() || sig.to_lowercase().contains(&needle) {
-                    ui.add(egui::Label::new(RichText::new(*sig).monospace().size(10.5).color(p.text_muted)).truncate())
-                        .on_hover_text(*doc);
-                    ui.add_space(3.0);
-                }
-            }
-        },
-    );
-}
-
 /// A clickable row of a side list: icon, text, hover fill (accent fill when
 /// `selected`).
+#[allow(dead_code)] // Shared with the other views' side lists.
 pub(crate) fn list_row(ui: &mut Ui, icon: &str, text: &str, selected: bool) -> egui::Response {
     let p = theme::pal(ui);
-    let h = 26.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), size::TREE_ROW), Sense::click());
     widgets::a11y_button(&resp, text);
     if ui.is_rect_visible(rect) {
         let hovered = resp.hovered();
@@ -2071,19 +2641,30 @@ pub(crate) fn list_row(ui: &mut Ui, icon: &str, text: &str, selected: bool) -> e
         } else if hovered {
             ui.painter().rect_filled(rect, CornerRadius::same(6), p.hover);
         }
-        let icon_color = if hovered || selected { p.accent_text } else { p.text_faint };
+        let icon_color = if selected {
+            p.accent_text
+        } else if hovered {
+            p.text
+        } else {
+            p.text_muted
+        };
         ui.painter().text(
-            pos2(rect.left() + 12.0, rect.center().y),
+            pos2(rect.left() + 9.0 + 8.0, rect.center().y),
             Align2::CENTER_CENTER,
             icon,
-            theme::icon_font(13.0),
+            theme::icon_font(15.0),
             icon_color,
         );
-        let g = elide(ui, text, egui::FontId::proportional(small_size(ui) + 0.5), p.text, rect.width() - 32.0);
-        ui.painter().galley(pos2(rect.left() + 26.0, rect.center().y - g.size().y / 2.0), g, p.text);
+        let color = if selected { p.accent_text } else { p.text };
+        let g = elide(ui, text, egui::FontId::proportional(12.5), color, rect.width() - 42.0);
+        ui.painter().galley(pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, color);
     }
     resp
 }
+
+// ---------------------------------------------------------------------------
+// Settings, Docs
+// ---------------------------------------------------------------------------
 
 /// Number of settings this request overrides.
 fn settings_overridden(s: &RequestSettings) -> usize {
@@ -2104,89 +2685,100 @@ fn settings_overridden(s: &RequestSettings) -> usize {
 }
 
 /// An on/off setting that can also follow the app default.
-fn tri_state(ui: &mut Ui, label: &str, help: &str, value: &mut Option<bool>, default: bool) {
+fn tri_state(ui: &mut Ui, rows: &mut kit::GroupRows, label: &str, help: &str, value: &mut Option<bool>, default: bool) {
     ui.push_id(label, |ui| {
-        form_row(ui, label, help, |ui| {
+        rows.row(ui, label, help, |ui| {
             let default_label = if default { tr("Default (on)") } else { tr("Default (off)") };
-            kit::segmented(ui, value, &[(None, default_label), (Some(true), tr("On")), (Some(false), tr("Off"))]);
+            kit::segmented_sm(ui, value, &[(None, default_label), (Some(true), tr("On")), (Some(false), tr("Off"))]);
         });
     });
 }
 
-/// A number setting; empty means the default.
+/// A number setting (empty: the default), right-aligned in a small field.
 fn number_setting<T: std::str::FromStr + ToString + Copy>(
     ui: &mut Ui,
+    rows: &mut kit::GroupRows,
     label: &str,
     help: &str,
     value: &mut Option<T>,
     default: &str,
     unit: &str,
 ) {
-    form_row(ui, label, help, |ui| {
-        ui.horizontal(|ui| {
-            let mut v = value.map(|v| v.to_string()).unwrap_or_default();
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut v)
-                        .hint_text(default)
-                        .desired_width(90.0)
-                        .margin(egui::Margin::symmetric(8, 5)),
-                )
-                .changed()
-            {
-                *value = v.trim().parse().ok();
-            }
-            if !unit.is_empty() {
-                ui.label(widgets::muted(ui, unit));
-            }
-        });
+    rows.row(ui, label, help, |ui| {
+        if !unit.is_empty() {
+            ui.label(RichText::new(unit).size(12.5).color(theme::pal(ui).text_faint));
+        }
+        let mut v = value.map(|v| v.to_string()).unwrap_or_default();
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut v)
+                .hint_text(RichText::new(default).color(theme::pal(ui).text_faint))
+                .desired_width(if unit.is_empty() { 64.0 } else { 74.0 })
+                .font(egui::FontId::proportional(12.0))
+                .min_size(vec2(0.0, 26.0))
+                .align(Align2::RIGHT_CENTER)
+                .margin(egui::Margin::symmetric(8, 0)),
+        );
+        widgets::a11y_name(&r, label);
+        if r.changed() {
+            *value = v.trim().parse().ok();
+        }
     });
 }
 
-fn settings_editor(ui: &mut Ui, s: &mut RequestSettings, d: &ternarywire_core::settings::RequestDefaults) {
-    let width = ui.available_width().min(860.0);
-    ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.set_width(width);
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
-            ui.label(kit::hint(ui, tr("These settings apply to this request only and override the app settings.")));
-            if settings_overridden(s) > 0 {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if kit::ghost(ui, Some(icons::ARROW_COUNTER_CLOCKWISE), tr("Reset to defaults")).clicked() {
-                        let disabled = std::mem::take(&mut s.disabled_default_headers);
-                        *s = RequestSettings { disabled_default_headers: disabled, ..Default::default() };
-                    }
-                });
+fn settings_section(ui: &mut Ui, s: &mut RequestSettings, d: &ternarywire_core::settings::RequestDefaults) {
+    let overridden = settings_overridden(s) > 0;
+    kit::toolbar(ui, |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let r = ui
+                .add_enabled_ui(overridden, |ui| {
+                    kit::ghost(ui, Some(icons::ARROW_COUNTER_CLOCKWISE), tr("Reset to defaults"))
+                })
+                .inner;
+            if r.clicked() {
+                let disabled = std::mem::take(&mut s.disabled_default_headers);
+                *s = RequestSettings { disabled_default_headers: disabled, ..Default::default() };
             }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(kit::hint(
+                        ui,
+                        tr("These apply to this request only and override the app settings."),
+                    ))
+                    .truncate(),
+                );
+            });
         });
-        ui.add_space(8.0);
-        settings_group(ui, tr("Redirects"), |ui| {
+    });
+    kit::pane_body(ui, "settings-body", |ui| {
+        ui.spacing_mut().item_spacing.y = 18.0;
+        kit::group(ui, tr("Redirects"), "", |ui, rows| {
             tri_state(
                 ui,
+                rows,
                 tr("Follow redirects"),
                 tr("Follow 3xx responses to their Location."),
                 &mut s.follow_redirects,
                 d.follow_redirects,
             );
-            form_divider(ui);
             tri_state(
                 ui,
+                rows,
                 tr("Follow original HTTP method"),
                 tr("Redirect with the original method instead of switching to GET."),
                 &mut s.follow_original_method,
                 false,
             );
-            form_divider(ui);
             tri_state(
                 ui,
+                rows,
                 tr("Keep Authorization header on redirect"),
                 tr("Also send it when the redirect goes to another host."),
                 &mut s.follow_auth_header,
                 false,
             );
-            form_divider(ui);
             number_setting(
                 ui,
+                rows,
                 tr("Maximum redirects"),
                 tr("Stop after this many redirects."),
                 &mut s.max_redirects,
@@ -2194,28 +2786,27 @@ fn settings_editor(ui: &mut Ui, s: &mut RequestSettings, d: &ternarywire_core::s
                 "",
             );
         });
-        ui.add_space(14.0);
-        settings_group(ui, tr("Connection"), |ui| {
+        kit::group(ui, tr("Connection"), "", |ui, rows| {
             tri_state(
                 ui,
+                rows,
                 tr("Verify SSL certificates"),
                 tr("Reject servers whose TLS certificate is not trusted."),
                 &mut s.verify_ssl,
                 d.verify_ssl,
             );
-            form_divider(ui);
             number_setting(
                 ui,
+                rows,
                 tr("Request timeout"),
                 tr("Cancel the request after this long; 0 waits forever."),
                 &mut s.timeout_ms,
                 tr("default"),
                 "ms",
             );
-            form_divider(ui);
-            form_row(ui, tr("HTTP version"), tr("HTTP/2 is used only with servers that support it."), |ui| {
+            rows.row(ui, tr("HTTP version"), tr("HTTP/2 is used only with servers that support it."), |ui| {
                 let mut v = if s.http_version == Some(HttpVersion::Auto) { None } else { s.http_version };
-                if kit::segmented(
+                if kit::segmented_sm(
                     ui,
                     &mut v,
                     &[(None, tr("Auto")), (Some(HttpVersion::Http1), "HTTP/1.x"), (Some(HttpVersion::Http2), "HTTP/2")],
@@ -2224,484 +2815,601 @@ fn settings_editor(ui: &mut Ui, s: &mut RequestSettings, d: &ternarywire_core::s
                 }
             });
         });
-        ui.add_space(14.0);
-        settings_group(ui, tr("Request"), |ui| {
+        kit::group(ui, tr("Request"), "", |ui, rows| {
             tri_state(
                 ui,
+                rows,
                 tr("Encode URL automatically"),
                 tr("Percent-encode reserved characters in the path and query."),
                 &mut s.encode_url,
                 d.encode_url,
             );
-            form_divider(ui);
             tri_state(
                 ui,
+                rows,
                 tr("Disable cookie jar"),
                 tr("Do not send stored cookies or keep the ones this response sets."),
                 &mut s.disable_cookies,
                 false,
             );
         });
-        ui.add_space(8.0);
     });
 }
 
-fn docs_editor(ui: &mut Ui, item: &mut RequestItem) {
+fn docs_section(ui: &mut Ui, tab: &mut RequestTab, item: &mut RequestItem) {
     let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(26.0);
+    kit::toolbar(ui, |ui| {
         ui.label(kit::section_title(tr("Description")));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            kit::segmented_sm(ui, &mut tab.docs_preview, &[(false, tr("Write")), (true, tr("Preview"))]);
+        });
     });
-    ui.add_space(2.0);
-    widgets::code_editor(ui, "desc", &mut item.description, Lang::Text, None, 5, false);
-    ui.label(kit::hint(ui, tr("Shown in the generated collection documentation.")));
-    ui.add_space(16.0);
-    ui.horizontal(|ui| {
-        ui.set_height(26.0);
-        ui.label(kit::section_title(tr("Examples")));
-        if !item.examples.is_empty() {
-            kit::pill(ui, &item.examples.len().to_string(), p.text_muted);
+    let preview = tab.docs_preview;
+    kit::pane_body(ui, "docs-body", |ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        if preview {
+            egui::Frame::new()
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(CornerRadius::same(theme::RADIUS))
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_min_height(5.0 * 19.5);
+                    if item.description.trim().is_empty() {
+                        ui.label(RichText::new(tr("No description yet.")).color(p.text_faint));
+                    } else {
+                        markdown_preview(ui, &item.description);
+                    }
+                });
+        } else {
+            let r = ui.add(
+                egui::TextEdit::multiline(&mut item.description)
+                    .desired_rows(5)
+                    .desired_width(f32::INFINITY)
+                    .font(egui::FontId::proportional(13.0))
+                    .margin(egui::Margin::symmetric(10, 8))
+                    .hint_text(RichText::new(tr("Describe what the request does…")).color(p.text_faint)),
+            );
+            widgets::a11y_name(&r, tr("Description"));
+        }
+        ui.label(kit::hint(ui, tr("Markdown. Shown in the generated collection documentation.")));
+        hrow(ui, 22.0, |ui| {
+            ui.label(kit::section_title(tr("Examples")));
+            if !item.examples.is_empty() {
+                kit::tone_pill(ui, &item.examples.len().to_string(), Tone::Neutral);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(kit::hint(ui, tr("Also served by the mock server")));
+            });
+        });
+        if item.examples.is_empty() {
+            kit::banner(
+                ui,
+                Tone::Neutral,
+                icons::BOOKMARK_SIMPLE,
+                tr("Use “Save as example” on a response to document it and to serve it from a mock server."),
+            );
+        }
+        let mut remove = None;
+        for (i, ex) in item.examples.iter_mut().enumerate() {
+            ui.push_id(ex.id.clone(), |ui| {
+                if example_card(ui, ex) {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            item.examples.remove(i);
         }
     });
-    ui.add_space(4.0);
-    if item.examples.is_empty() {
-        banner(
-            ui,
-            icons::BOOKMARK_SIMPLE,
-            p.text_muted,
-            tr("Use “Save as example” on a response to document it and to serve it from a mock server."),
-        );
-    }
-    let dark = ui.visuals().dark_mode;
-    let mut remove = None;
-    for (i, ex) in item.examples.iter_mut().enumerate() {
-        ui.push_id(&ex.id, |ui| {
-            kit::card(ui).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let id = ui.make_persistent_id("ex-open");
-                let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(false));
-                let head = ui.horizontal(|ui| {
-                    ui.set_height(28.0);
-                    let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+}
+
+/// One saved example: status, name and language; open, its name, status
+/// and body can be edited. Returns true when it should be deleted.
+fn example_card(ui: &mut Ui, ex: &mut Example) -> bool {
+    let p = theme::pal(ui);
+    let mut delete = false;
+    kit::card(ui).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let id = ui.make_persistent_id("ex-open");
+        let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(false));
+        let head = hrow(ui, 22.0, |ui| {
+            let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+            ui.add(
+                egui::Label::new(RichText::new(caret).font(theme::icon_font(12.0)).color(p.text_faint))
+                    .selectable(false),
+            );
+            kit::pill_ex(ui, &ex.status.to_string(), theme::status_tone(ex.status), PillOpts::default());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if kit::icon_button_sm(ui, icons::TRASH, tr("Delete example")).clicked() {
+                    delete = true;
+                }
+                if let Some(l) = &ex.language {
+                    ui.label(RichText::new(l.to_uppercase()).size(11.0).color(p.text_faint));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(
-                        egui::Label::new(RichText::new(caret).font(theme::icon_font(12.0)).color(p.text_muted))
-                            .selectable(false),
-                    );
-                    kit::pill(ui, &ex.status.to_string(), theme::status_color(ex.status, dark));
-                    ui.add(
-                        egui::Label::new(RichText::new(&ex.name).font(theme::medium(13.5)))
+                        egui::Label::new(RichText::new(&ex.name).font(theme::medium(13.0)).color(p.text))
                             .selectable(false)
                             .truncate(),
                     );
-                    if let Some(l) = &ex.language {
-                        ui.label(widgets::muted(ui, l.to_uppercase()).small());
-                    }
                 });
-                let toggle = ui.interact(head.response.rect, id.with("head"), Sense::click());
-                widgets::a11y_button(&toggle, &ex.name);
-                if toggle.clicked() {
-                    open = !open;
-                    ui.data_mut(|d| d.insert_temp(id, open));
-                }
-                if open {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(widgets::muted(ui, tr("Name")));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut ex.name)
-                                .desired_width((ui.available_width() - 200.0).max(120.0))
-                                .margin(egui::Margin::symmetric(8, 5)),
-                        );
-                        ui.label(widgets::muted(ui, tr("Status")));
-                        let mut code = ex.status.to_string();
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut code)
-                                    .desired_width(50.0)
-                                    .margin(egui::Margin::symmetric(8, 5)),
-                            )
-                            .changed()
-                            && let Ok(c) = code.parse()
-                        {
-                            ex.status = c;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if kit::icon_button(ui, icons::TRASH, tr("Delete example")).clicked() {
-                                remove = Some(i);
-                            }
-                        });
-                    });
-                    ui.add_space(6.0);
-                    let lang = match ex.language.as_deref() {
-                        Some("json") => Lang::Json,
-                        Some("xml") | Some("html") => Lang::Xml,
-                        _ => Lang::Text,
-                    };
-                    widgets::code_editor(ui, "ex-body", &mut ex.body, lang, None, 6, false);
-                }
             });
         });
-        ui.add_space(6.0);
-    }
-    if let Some(i) = remove {
-        item.examples.remove(i);
+        let toggle_rect = Rect::from_min_max(
+            head.response.rect.min,
+            pos2(head.response.rect.right() - 60.0, head.response.rect.bottom()),
+        );
+        let toggle = ui.interact(toggle_rect, id.with("head"), Sense::click());
+        widgets::a11y_button(&toggle, &ex.name);
+        if toggle.clicked() {
+            open = !open;
+            ui.data_mut(|d| d.insert_temp(id, open));
+        }
+        if !open {
+            return;
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(RichText::new(tr("Name")).size(12.0).color(p.text_muted));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut ex.name)
+                    .desired_width((ui.available_width() - 120.0).max(100.0))
+                    .font(egui::FontId::proportional(12.0))
+                    .min_size(vec2(0.0, 26.0))
+                    .align(Align2::LEFT_CENTER)
+                    .margin(egui::Margin::symmetric(8, 0)),
+            );
+            widgets::a11y_name(&r, tr("Name"));
+            ui.label(RichText::new(tr("Status")).size(12.0).color(p.text_muted));
+            let mut code = ex.status.to_string();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut code)
+                    .desired_width(44.0)
+                    .font(egui::FontId::proportional(12.0))
+                    .min_size(vec2(0.0, 26.0))
+                    .align(Align2::LEFT_CENTER)
+                    .margin(egui::Margin::symmetric(8, 0)),
+            );
+            widgets::a11y_name(&r, tr("Status"));
+            if r.changed()
+                && let Ok(c) = code.parse()
+            {
+                ex.status = c;
+            }
+        });
+        ui.add_space(8.0);
+        let lang = match ex.language.as_deref() {
+            Some("json") => Lang::Json,
+            Some("xml") | Some("html") => Lang::Xml,
+            _ => Lang::Text,
+        };
+        kit::well(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // The editor without its own frame: the well is the frame.
+            let v = ui.visuals_mut();
+            v.text_edit_bg_color = Some(Color32::TRANSPARENT);
+            v.extreme_bg_color = Color32::TRANSPARENT;
+            v.selection.stroke = Stroke::NONE;
+            for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+                w.bg_stroke = Stroke::NONE;
+            }
+            widgets::code_editor(ui, "ex-body", &mut ex.body, lang, None, 6, false);
+        });
+    });
+    delete
+}
+
+/// A light Markdown rendering: headings (`#`), bullet lists (`-`, `*`),
+/// paragraphs with `code`, **bold** and *italic*.
+fn markdown_preview(ui: &mut Ui, text: &str) {
+    let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.y = 6.0;
+    for line in text.lines() {
+        let t = line.trim_end();
+        if t.trim().is_empty() {
+            ui.add_space(2.0);
+            continue;
+        }
+        let level = t.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&level) && t[level..].starts_with(' ') {
+            let size = match level {
+                1 => 17.0,
+                2 => 15.0,
+                _ => 13.5,
+            };
+            ui.add(egui::Label::new(RichText::new(t[level..].trim()).font(theme::semibold(size)).color(p.text)).wrap());
+            continue;
+        }
+        let trimmed = t.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(4.0);
+                ui.label(RichText::new("•").color(p.text_muted));
+                ui.add(egui::Label::new(inline_markdown(ui, rest)).wrap());
+            });
+            continue;
+        }
+        ui.add(egui::Label::new(inline_markdown(ui, t)).wrap());
     }
 }
 
-fn subscription_panel(ui: &mut Ui, sub: &GqlSubscription, actions: &mut Actions) {
+/// `code`, **bold** and *italic* spans of one line of Markdown.
+fn inline_markdown(ui: &Ui, text: &str) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
     let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(34.0);
-        icon_tile(ui, icons::BROADCAST, if sub.done { p.text_muted } else { p.ok }, 28.0);
-        ui.label(RichText::new(tr("Subscription")).font(theme::semibold(14.0)));
-        let color = if sub.status.starts_with("Error") {
-            p.err
-        } else if sub.done {
-            p.text_muted
-        } else {
-            p.ok
+    let mut job = LayoutJob::default();
+    let plain = TextFormat::simple(egui::FontId::proportional(13.0), p.text);
+    let mut rest = text;
+    while !rest.is_empty() {
+        let next = ["`", "**", "*"]
+            .iter()
+            .filter_map(|m| rest.find(m).map(|i| (i, *m)))
+            .min_by_key(|(i, m)| (*i, -(m.len() as i32)));
+        let Some((i, marker)) = next else {
+            job.append(rest, 0.0, plain.clone());
+            break;
         };
-        kit::pill(ui, &sub.status, color);
-        kit::metric(ui, icons::CHATS, &trf("{} events", &[&sub.messages.len()]));
-        kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(sub.started.elapsed().as_secs_f64() * 1000.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (icon, label) = if sub.done { (icons::X, tr("Close")) } else { (icons::STOP, tr("Stop")) };
-            if kit::secondary(ui, Some(icon), label).clicked() {
-                actions.cancel = true;
+        let after = &rest[i + marker.len()..];
+        let Some(end) = after.find(marker) else {
+            job.append(rest, 0.0, plain.clone());
+            break;
+        };
+        job.append(&rest[..i], 0.0, plain.clone());
+        let inner = &after[..end];
+        let format = match marker {
+            "`" => TextFormat { font_id: theme::mono(12.0), color: p.text, background: p.subtle, ..Default::default() },
+            "**" => TextFormat::simple(theme::semibold(13.0), p.text),
+            _ => TextFormat { italics: true, ..plain.clone() },
+        };
+        job.append(inner, 0.0, format);
+        rest = &after[end + marker.len()..];
+    }
+    job
+}
+
+// ---------------------------------------------------------------------------
+// Response pane
+// ---------------------------------------------------------------------------
+
+fn response_pane(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &mut Actions) {
+    if tab.panel == PanelMode::Minimized && ectx.side_layout {
+        minimized_rail(ui, tab);
+        return;
+    }
+    if let Some(sub) = &tab.gql_sub {
+        let mut panel = tab.panel;
+        subscription_panel(ui, sub, &mut panel, ectx.side_layout, actions);
+        tab.panel = panel;
+        return;
+    }
+    status_row(ui, tab, ectx, actions);
+    if tab.panel == PanelMode::Minimized {
+        return;
+    }
+    response_tabs(ui, tab);
+    response_content(ui, tab, ectx, actions);
+}
+
+/// Pass/fail of the result's tests, for the status row and the Tests tab.
+fn tests_tone(exec: &Execution) -> Tone {
+    if exec.tests_failed() > 0 || !exec.script_errors.is_empty() { Tone::Err } else { Tone::Ok }
+}
+
+/// A Phosphor icon turning around its center (spinners).
+fn spinning_icon(ui: &Ui, center: egui::Pos2, icon: &str, size: f32, color: Color32) {
+    let t = ui.input(|i| i.time) as f32;
+    let g = ui.painter().layout_no_wrap(icon.to_string(), theme::icon_font(size), color);
+    let half = g.size() / 2.0;
+    let angle = t * 6.0;
+    let rot = egui::emath::Rot2::from_angle(angle);
+    let mut shape = egui::epaint::TextShape::new(center - rot * half, g, color);
+    shape.angle = angle;
+    ui.painter().add(shape);
+    ui.ctx().request_repaint();
+}
+
+/// A large pill (24) with a spinning icon: "Sending…".
+fn spinner_pill(ui: &mut Ui, text: &str, tone: Tone) {
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(tone);
+    let g = ui.painter().layout_no_wrap(text.to_string(), theme::medium(12.0), fg);
+    let (rect, _) = ui.allocate_exact_size(vec2(9.0 + 13.0 + 5.0 + g.size().x + 9.0, 24.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(12), bg);
+    spinning_icon(ui, pos2(rect.left() + 9.0 + 6.5, rect.center().y), icons::CIRCLE_NOTCH, 13.0, fg);
+    ui.painter().galley(pos2(rect.left() + 27.0, rect.center().y - g.size().y / 2.0), g, fg);
+}
+
+/// The status row (56): status, time, size and tests on the left; save as
+/// example, ⋯, maximize and minimize on the right.
+fn status_row(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &mut Actions) {
+    let p = theme::pal(ui);
+    let minimized = tab.panel == PanelMode::Minimized;
+    if minimized {
+        // The whole bar brings the response back.
+        let r = Rect::from_min_size(ui.available_rect_before_wrap().min, vec2(ui.available_width(), size::ACTION_ROW));
+        let bar = ui
+            .interact(r, ui.make_persistent_id("resp-min-bar"), Sense::click())
+            .on_hover_text(tr("Show the response"));
+        widgets::a11y_button(&bar, tr("Show the response"));
+        if bar.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if bar.clicked() {
+            tab.panel = PanelMode::Normal;
+        }
+    }
+    let side = ectx.side_layout;
+    kit::bar_ex(ui, size::ACTION_ROW, 10.0, true, |ui| {
+        ui.add_space(4.0);
+        let exec = tab.result.as_ref().map(|r| &r.exec);
+        if let Some(r) = &tab.running {
+            spinner_pill(ui, tr("Sending…"), Tone::Info);
+            ui.label(
+                RichText::new(format!("{:.2} s", r.started.elapsed().as_secs_f64()))
+                    .font(theme::mono(12.0))
+                    .color(p.text_muted),
+            );
+        } else if let Some(resp) = exec.and_then(|e| e.response.as_ref()) {
+            let exec = exec.expect("result");
+            kit::status_pill(ui, resp.status, &resp.status_text).on_hover_text(format!(
+                "{}{}",
+                resp.version,
+                resp.remote_addr.as_ref().map(|a| format!(" · {a}")).unwrap_or_default()
+            ));
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let time = kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(resp.timings.total_ms));
+                let time =
+                    ui.interact(time.rect, ui.make_persistent_id("timing"), Sense::click()).on_hover_text(tr("Timing"));
+                egui::Popup::menu(&time)
+                    .width(280.0)
+                    .show(|ui| timing_popover(ui, resp.timings.ttfb_ms, resp.timings.total_ms));
+                kit::metric(ui, icons::ARROW_LINE_DOWN, &ternarywire_core::util::human_bytes(resp.total_size()))
+                    .on_hover_ui(|ui| {
+                        ui.label(trf("Headers: {}", &[&ternarywire_core::util::human_bytes(resp.header_size)]));
+                        let body = ternarywire_core::util::human_bytes(resp.body.len());
+                        ui.label(if resp.body.is_file() {
+                            trf("Body: {} (stored on disk)", &[&body])
+                        } else {
+                            trf("Body: {}", &[&body])
+                        });
+                    });
+                if !exec.tests.is_empty() {
+                    let tone = tests_tone(exec);
+                    let (fg, _) = p.tone(tone);
+                    let icon = if tone == Tone::Err { icons::X_CIRCLE } else { icons::CHECK_CIRCLE };
+                    let text = trf("{}/{} tests", &[&exec.tests_passed(), &exec.tests.len()]);
+                    let m = kit::metric_colored(ui, icon, &text, Some(fg));
+                    let m = ui
+                        .interact(m.rect, ui.make_persistent_id("tests-metric"), Sense::click())
+                        .on_hover_text(tr("Tests"));
+                    widgets::a11y_button(&m, &text);
+                    if m.clicked() {
+                        tab.resp_section = RespSection::Tests;
+                        tab.panel = if minimized { PanelMode::Normal } else { tab.panel };
+                    }
+                }
+            });
+        } else if let Some(err) = exec.and_then(|e| e.error.as_ref()) {
+            kit::pill_ex(
+                ui,
+                tr(err.kind_label()),
+                Tone::Err,
+                PillOpts { large: true, icon: Some(icons::WARNING_CIRCLE), ..Default::default() },
+            );
+        } else if exec.is_some_and(|e| e.skipped) {
+            kit::pill_ex(ui, tr("Skipped"), Tone::Neutral, PillOpts { large: true, ..Default::default() });
+        } else {
+            ui.label(RichText::new(tr("Response")).font(theme::semibold(13.0)).color(p.text));
+            ui.label(RichText::new("·").color(p.text_faint));
+            ui.label(kit::hint(ui, tr("Not sent yet")));
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let maximized = tab.panel == PanelMode::Maximized;
+            if minimized {
+                let icon = if side { icons::CARET_LEFT } else { icons::CARET_UP };
+                if kit::icon_button_sm(ui, icon, tr("Restore layout")).clicked() {
+                    tab.panel = PanelMode::Normal;
+                }
+            } else {
+                let icon = if side { icons::CARET_RIGHT } else { icons::CARET_DOWN };
+                if kit::icon_button_sm(ui, icon, tr("Minimize response")).clicked() {
+                    tab.panel = PanelMode::Minimized;
+                }
+            }
+            let (icon, tip) = if maximized {
+                (icons::ARROWS_IN, tr("Restore layout"))
+            } else {
+                (icons::ARROWS_OUT, tr("Maximize response"))
+            };
+            if kit::icon_button_ex(ui, icon, tip, maximized, 22.0).clicked() {
+                tab.panel = if maximized { PanelMode::Normal } else { PanelMode::Maximized };
+            }
+            ui.add_space(-4.0);
+            kit::vdivider(ui, 18.0);
+            ui.add_space(-4.0);
+            let exec = tab.result.as_ref().map(|r| &r.exec);
+            let has_response = tab.running.is_none() && exec.is_some_and(|e| e.response.is_some());
+            let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
+            egui::Popup::menu(&more)
+                .width(250.0)
+                .align(egui::RectAlign::BOTTOM_END)
+                .show(|ui| response_menu(ui, exec.filter(|_| has_response), actions));
+            if has_response && kit::icon_button_sm(ui, icons::BOOKMARK_SIMPLE, tr("Save as example")).clicked() {
+                actions.save_example = true;
             }
         });
     });
-    ui.add_space(6.0);
-    if sub.messages.is_empty() {
-        kit::empty_state(
-            ui,
-            icons::BROADCAST,
-            tr("Waiting for events"),
-            tr("Events the server sends appear here."),
-            |_| {},
-        );
-        return;
-    }
-    egui::ScrollArea::vertical().id_salt("gql-sub").stick_to_bottom(true).auto_shrink([false; 2]).show(ui, |ui| {
-        for (at, text) in &sub.messages {
-            let t = chrono::DateTime::from_timestamp_millis(*at)
-                .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
-                .unwrap_or_default();
-            kit::card(ui).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(format!("{} {t}", icons::ARROW_DOWN)).small().color(p.text_muted));
-                ui.add(egui::Label::new(RichText::new(text).monospace()).selectable(true));
-            });
-            ui.add_space(6.0);
+}
+
+/// The ⋯ menu of the response (disabled until there is a response).
+fn response_menu(ui: &mut Ui, exec: Option<&Execution>, actions: &mut Actions) {
+    let entry = |icon, label| kit::MenuItem { icon: Some(icon), label, ..Default::default() };
+    ui.add_enabled_ui(exec.is_some(), |ui| {
+        if kit::menu_item_ex(ui, entry(icons::BOOKMARK_SIMPLE, tr("Save as example"))).clicked() {
+            actions.save_example = true;
+        }
+        if kit::menu_item_ex(ui, entry(icons::TEST_TUBE, tr("Generate tests")))
+            .on_hover_text(tr("Write tests for the status, time, content type and body shape of the response"))
+            .clicked()
+        {
+            actions.generate_tests = true;
+        }
+        if kit::menu_item_ex(ui, entry(icons::ARROW_CLOCKWISE, tr("Re-run tests")))
+            .on_hover_text(tr("Run post-response scripts again on this response"))
+            .clicked()
+        {
+            actions.rerun_tests = true;
+        }
+        kit::menu_sep(ui);
+        if kit::menu_item_ex(ui, entry(icons::PUSH_PIN, tr("Keep as compare baseline")))
+            .on_hover_text(tr("Compare the next responses with this one"))
+            .clicked()
+        {
+            actions.pin_baseline = true;
+        }
+        if exec.is_some_and(|e| e.prepared.is_some())
+            && kit::menu_item_ex(ui, entry(icons::TERMINAL, tr("Copy as cURL (as sent)")))
+                .on_hover_text(tr("The request that produced this response, with variables and auth applied"))
+                .clicked()
+        {
+            actions.copy_curl = true;
+        }
+        if let Some(e) = exec.filter(|e| e.visualization.is_some())
+            && kit::menu_item_ex(ui, entry(icons::ARROW_SQUARE_OUT, tr("Open visualization in browser"))).clicked()
+        {
+            open_visualization(e);
         }
     });
 }
 
-/// Maximize and minimize buttons of the response panel (added right to
-/// left: minimize ends up rightmost).
-fn panel_controls(ui: &mut Ui, panel: &mut PanelMode, side: bool) {
-    let (min_icon, min_tip) =
-        if side { (icons::CARET_RIGHT, tr("Minimize response")) } else { (icons::CARET_DOWN, tr("Minimize response")) };
-    if kit::icon_button(ui, min_icon, min_tip).clicked() {
-        *panel = PanelMode::Minimized;
-    }
-    let maximized = *panel == PanelMode::Maximized;
-    let (icon, tip) =
-        if maximized { (icons::ARROWS_IN, tr("Restore layout")) } else { (icons::ARROWS_OUT, tr("Maximize response")) };
-    if kit::icon_toggle(ui, icon, tip, maximized).clicked() {
-        *panel = if maximized { PanelMode::Normal } else { PanelMode::Maximized };
-    }
-}
-
-/// [`panel_controls`] in the top right corner, over the content (empty
-/// and loading states, which have no header row).
-fn corner_controls(ui: &mut Ui, panel: &mut PanelMode, side: bool) {
-    let r = ui.max_rect();
-    let rect = Rect::from_min_max(pos2(r.right() - 64.0, r.top()), pos2(r.right(), r.top() + 28.0));
-    let mut child =
-        ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    child.spacing_mut().item_spacing.x = 4.0;
-    panel_controls(&mut child, panel, side);
-}
-
-/// The minimized response panel: a bar with the outcome and the buttons
-/// to bring it back (a narrow rail when the response is beside the request).
-fn minimized_panel(ui: &mut Ui, tab: &mut RequestTab, side: bool) {
+/// The phases of the response time as bars on one scale.
+fn waterfall(ui: &mut Ui, ttfb: f64, total: f64, label_w: f32, value_w: f32, font: f32, rows: &[(&str, &str)]) {
     let p = theme::pal(ui);
-    let rect = ui.max_rect();
-    let bar = ui.interact(rect, ui.make_persistent_id("resp-min-bar"), Sense::click());
-    if bar.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let total = total.max(ttfb).max(0.001);
+    let phases = [(0.0, ttfb, p.accent), (ttfb, (total - ttfb).max(0.0), p.ok)];
+    for ((label, help), (start, dur, color)) in rows.iter().zip(phases) {
+        let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+        let g = elide(ui, label, egui::FontId::proportional(font), p.text_muted, label_w - 8.0);
+        ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, p.text_muted);
+        let track = Rect::from_min_max(
+            pos2(row.left() + label_w + 12.0, row.center().y - 5.0),
+            pos2(row.right() - value_w - 12.0, row.center().y + 5.0),
+        );
+        let x0 = track.left() + track.width() * (start / total) as f32;
+        let w = (track.width() * (dur / total) as f32).max(3.0).min(track.right() - x0).max(1.0);
+        ui.painter().rect_filled(
+            Rect::from_min_size(pos2(x0, track.top()), vec2(w, track.height())),
+            CornerRadius::same(3),
+            color,
+        );
+        ui.painter().text(
+            pos2(row.right(), row.center().y),
+            Align2::RIGHT_CENTER,
+            fmt_ms(dur),
+            theme::mono(font),
+            p.text,
+        );
+        resp.on_hover_text(*help);
+        ui.add_space(8.0);
     }
-    let bar = bar.on_hover_text(tr("Show the response"));
-    widgets::a11y_button(&bar, tr("Show the response"));
-    let mut restore = bar.clicked();
-    let resp = tab.result.as_ref().and_then(|r| r.exec.response.as_ref());
-    let failed = tab.result.as_ref().is_some_and(|r| r.exec.error.is_some());
-    if side {
-        ui.vertical_centered(|ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            if kit::icon_button(ui, icons::CARET_LEFT, tr("Restore layout")).clicked() {
-                restore = true;
-            }
-            if kit::icon_button(ui, icons::ARROWS_OUT, tr("Maximize response")).clicked() {
-                tab.panel = PanelMode::Maximized;
-            }
-            ui.add_space(4.0);
-            if tab.running.is_some() {
-                ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-            } else if let Some(resp) = resp {
-                let color = theme::status_color(resp.status, ui.visuals().dark_mode);
-                ui.label(RichText::new(resp.status.to_string()).font(theme::semibold(11.5)).color(color))
-                    .on_hover_text(format!("{} {}", resp.status, resp.status_text));
-            } else if failed {
-                ui.label(RichText::new(icons::WARNING_CIRCLE).font(theme::icon_font(15.0)).color(p.err));
-            }
-        });
-    } else {
+}
+
+/// The popover of the time metric.
+fn timing_popover(ui: &mut Ui, ttfb: f64, total: f64) {
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(9, 7)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
         ui.horizontal(|ui| {
-            ui.set_height(30.0);
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add(egui::Label::new(RichText::new(tr("Response")).font(theme::semibold(13.5))).selectable(false));
-            if tab.running.is_some() {
-                ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-                ui.label(widgets::muted(ui, tr("Sending request…")));
-            } else if let Some(resp) = resp {
-                kit::status_pill(ui, resp.status, &resp.status_text);
-                kit::metric(ui, icons::TIMER, &ternarywire_core::util::human_ms(resp.timings.total_ms));
-                kit::metric(ui, icons::DOWNLOAD_SIMPLE, &ternarywire_core::util::human_bytes(resp.total_size()));
-                if let Some(r) = &tab.result
-                    && !r.exec.tests.is_empty()
-                {
-                    let (passed, failed, _) = test_counts(&r.exec.tests);
-                    let color = if failed > 0 { p.err } else { p.ok };
-                    ui.label(
-                        RichText::new(format!("{} {passed}/{}", icons::TEST_TUBE, passed + failed))
-                            .font(theme::medium(small_size(ui) + 0.5))
-                            .color(color),
-                    )
-                    .on_hover_text(tr("Test Results"));
-                }
-            } else if let Some(err) = tab.result.as_ref().and_then(|r| r.exec.error.as_ref()) {
-                kit::pill(ui, &format!("{} {}", icons::WARNING_CIRCLE, tr(err.kind_label())), p.err);
-            } else {
-                ui.label(widgets::muted(ui, tr("No response yet")));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                if kit::icon_button(ui, icons::CARET_UP, tr("Restore layout")).clicked() {
-                    restore = true;
-                }
-                if kit::icon_button(ui, icons::ARROWS_OUT, tr("Maximize response")).clicked() {
-                    tab.panel = PanelMode::Maximized;
-                }
+            ui.label(kit::section_title(tr("Timing")));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(fmt_ms(total.max(ttfb))).font(theme::mono(12.5)).strong());
             });
         });
-    }
-    if restore {
-        tab.panel = PanelMode::Normal;
-    }
+        ui.add_space(10.0);
+        waterfall(
+            ui,
+            ttfb,
+            total,
+            100.0,
+            50.0,
+            11.5,
+            &[
+                (
+                    tr("TTFB"),
+                    tr("From sending the request to the first response byte: connecting, TLS and the server's work."),
+                ),
+                (tr("Download"), tr("Receiving the response body.")),
+            ],
+        );
+    });
 }
 
-fn response_panel(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &mut Actions) {
-    if tab.panel == PanelMode::Minimized {
-        minimized_panel(ui, tab, ectx.side_layout);
-        return;
+/// Body | Headers n | Cookies n | Tests p/t | Details | Compare | Visualize.
+fn response_tabs(ui: &mut Ui, tab: &mut RequestTab) {
+    let exec = tab.result.as_ref().filter(|_| tab.running.is_none()).map(|r| &r.exec);
+    let resp = exec.and_then(|e| e.response.as_ref());
+    let mut items = vec![
+        Tab::new(RespSection::Body, tr("Body")),
+        Tab::new(RespSection::Headers, tr("Headers")).count(resp.map(|r| r.headers.len()).unwrap_or(0)),
+        Tab::new(RespSection::Cookies, tr("Cookies"))
+            .count(resp.map(|r| r.headers_all("set-cookie").count()).unwrap_or(0)),
+    ];
+    let tests = Tab::new(RespSection::Tests, tr("Tests"));
+    items.push(match exec {
+        Some(e) if !e.tests.is_empty() || !e.script_errors.is_empty() => {
+            tests.badge(format!("{}/{}", e.tests_passed(), e.tests.len()), tests_tone(e))
+        }
+        _ => tests,
+    });
+    items.push(Tab::new(RespSection::Details, tr("Details")));
+    let comparable = tab.prev.is_some() && resp.is_some();
+    if comparable {
+        items.push(Tab::new(RespSection::Compare, tr("Compare")).icon(icons::GIT_DIFF));
+    } else if tab.resp_section == RespSection::Compare && exec.is_some() {
+        tab.resp_section = RespSection::Body;
     }
-    if let Some(sub) = &tab.gql_sub {
-        subscription_panel(ui, sub, actions);
-        return;
+    if exec.is_some_and(|e| e.visualization.is_some()) {
+        items.push(Tab::new(RespSection::Visualize, tr("Visualize")));
+    } else if tab.resp_section == RespSection::Visualize && exec.is_some() {
+        tab.resp_section = RespSection::Body;
     }
-    if tab.running.is_some() || tab.result.is_none() {
-        corner_controls(ui, &mut tab.panel, ectx.side_layout);
-    }
+    pane_tabs_with(ui, &mut tab.resp_section, &items, |_| {});
+}
+
+fn response_content(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &mut Actions) {
     if let Some(r) = &tab.running {
-        ui.add_space(28.0);
-        ui.vertical_centered(|ui| {
-            ui.add(egui::Spinner::new().size(22.0).color(theme::pal(ui).accent));
-            ui.add_space(6.0);
-            ui.label(RichText::new(tr("Sending request…")).font(theme::medium(13.5)));
-            ui.label(widgets::muted(ui, ternarywire_core::util::human_ms(r.started.elapsed().as_secs_f64() * 1000.0)));
-            ui.add_space(6.0);
-            if crate::kit::secondary(ui, Some(crate::icons::STOP), tr("Cancel")).clicked() {
-                actions.cancel = true;
-            }
+        let elapsed = r.started.elapsed();
+        let _ = elapsed;
+        center_v(ui, ui.make_persistent_id("resp-loading"), |ui| {
+            let body = if ectx.host.is_empty() {
+                String::new()
+            } else {
+                trf("Waiting for the first byte from {}", &[&ectx.host])
+            };
+            empty_block(ui, icons::CIRCLE_NOTCH, true, tr("Sending request…"), &body, |ui| {
+                let r = kit::button(
+                    ui,
+                    Kind::Secondary,
+                    Size::Sm,
+                    tr("Cancel"),
+                    ButtonOpts { icon: Some(icons::STOP), ..Default::default() },
+                );
+                if r.clicked() {
+                    actions.cancel = true;
+                }
+            });
         });
         return;
     }
     let Some(result) = &mut tab.result else {
-        crate::kit::empty_state(
-            ui,
-            crate::icons::PAPER_PLANE_RIGHT,
-            tr("No response yet"),
-            tr("Enter a URL and press Send to see the response here."),
-            |ui| {
-                ui.horizontal(|ui| {
-                    let w = 140.0;
-                    ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-                    crate::kit::kbd(ui, "⌘↩");
-                    ui.label(widgets::muted(ui, tr("to send")));
-                });
-            },
-        );
+        empty_response(ui, ectx, actions);
         return;
     };
     let exec = &result.exec;
-    let tests_total = exec.tests.len();
-    let tests_passed = exec.tests.iter().filter(|t| t.passed && !t.skipped).count();
-    let resp_headers = exec.response.as_ref().map(|r| r.headers.len()).unwrap_or(0);
-    let cookies = exec.response.as_ref().map(|r| r.headers_all("set-cookie").count()).unwrap_or(0);
-    let tests_label = if tests_total == 0 && exec.script_errors.is_empty() {
-        tr("Test Results").to_string()
-    } else {
-        format!("{} ({tests_passed}/{tests_total})", tr("Test Results"))
-    };
-    let items = vec![
-        (RespSection::Body, tr("Body").to_string()),
-        (RespSection::Headers, format!("{}{}", tr("Headers"), widgets::count_label(resp_headers))),
-        (RespSection::Cookies, format!("{}{}", tr("Cookies"), widgets::count_label(cookies))),
-        (RespSection::Tests, tests_label),
-        (RespSection::Details, tr("Details").to_string()),
-    ];
-    let mut items = items;
-    if exec.visualization.is_some() {
-        items.push((RespSection::Visualize, tr("Visualize").to_string()));
-    } else if tab.resp_section == RespSection::Visualize {
-        tab.resp_section = RespSection::Body;
-    }
-    let comparable = tab.prev.is_some() && exec.response.is_some();
-    if comparable {
-        items.push((RespSection::Compare, tr("Compare").to_string()));
-    } else if tab.resp_section == RespSection::Compare {
-        tab.resp_section = RespSection::Body;
-    }
-    // Tabs and the status row share a line when both fit (the tabs'
-    // width as `kit::tab_strip` measures it, the status row's estimated).
-    let tabs_w: f32 = items
-        .iter()
-        .map(|(_, label)| {
-            let font = theme::medium(body_size(ui));
-            let w = ui.painter().layout_no_wrap(label.clone(), font, Color32::PLACEHOLDER).size().x;
-            w + 22.0
-        })
-        .sum();
-    let status_w = if exec.response.is_some() { 360.0 } else { 220.0 };
-    let narrow = ui.available_width() < tabs_w + status_w;
-    let panel = &mut tab.panel;
-    let side = ectx.side_layout;
-    let mut pin_baseline = false;
-    let mut status_row = |ui: &mut Ui, actions: &mut Actions| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            panel_controls(ui, panel, side);
-            kit::vdivider(ui, 18.0);
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if let Some(resp) = &exec.response {
-                let more = crate::kit::icon_button(ui, crate::icons::DOTS_THREE, tr("More actions"));
-                egui::Popup::menu(&more).show(|ui| {
-                    if ui.button(crate::kit::with_icon(crate::icons::BOOKMARK_SIMPLE, tr("Save as example"))).clicked()
-                    {
-                        actions.save_example = true;
-                        ui.close();
-                    }
-                    if ui
-                        .button(crate::kit::with_icon(crate::icons::SPARKLE, tr("Generate tests")))
-                        .on_hover_text(tr(
-                            "Write tests for the status, time, content type and body shape of the response",
-                        ))
-                        .clicked()
-                    {
-                        actions.generate_tests = true;
-                        ui.close();
-                    }
-                    if ui
-                        .button(crate::kit::with_icon(crate::icons::GIT_DIFF, tr("Keep as compare baseline")))
-                        .on_hover_text(tr("Compare the next responses with this one"))
-                        .clicked()
-                    {
-                        pin_baseline = true;
-                        ui.close();
-                    }
-                    if exec.prepared.is_some()
-                        && ui
-                            .button(crate::kit::with_icon(crate::icons::TERMINAL, tr("Copy as cURL (as sent)")))
-                            .on_hover_text(tr(
-                                "The request that produced this response, with variables and auth applied",
-                            ))
-                            .clicked()
-                    {
-                        actions.copy_curl = true;
-                        ui.close();
-                    }
-                    if ui
-                        .button(crate::kit::with_icon(crate::icons::ARROW_CLOCKWISE, tr("Re-run tests")))
-                        .on_hover_text(tr("Run post-response scripts again on this response"))
-                        .clicked()
-                    {
-                        actions.rerun_tests = true;
-                        ui.close();
-                    }
-                    if exec.visualization.is_some()
-                        && ui
-                            .button(crate::kit::with_icon(
-                                crate::icons::ARROW_SQUARE_OUT,
-                                tr("Open visualization in browser"),
-                            ))
-                            .clicked()
-                    {
-                        open_visualization(exec);
-                        ui.close();
-                    }
-                });
-                let size = ternarywire_core::util::human_bytes(resp.total_size());
-                let time = ternarywire_core::util::human_ms(resp.timings.total_ms);
-                crate::kit::metric(ui, crate::icons::DOWNLOAD_SIMPLE, &size).on_hover_ui(|ui| {
-                    ui.label(trf("Headers: {}", &[&ternarywire_core::util::human_bytes(resp.header_size)]));
-                    let body = ternarywire_core::util::human_bytes(resp.body.len());
-                    ui.label(if resp.body.is_file() {
-                        trf("Body: {} (stored on disk)", &[&body])
-                    } else {
-                        trf("Body: {}", &[&body])
-                    });
-                });
-                crate::kit::metric(ui, crate::icons::TIMER, &time).on_hover_ui(|ui| {
-                    ui.label(trf("Time to first byte: {}", &[&ternarywire_core::util::human_ms(resp.timings.ttfb_ms)]));
-                    ui.label(trf(
-                        "Download: {}",
-                        &[&ternarywire_core::util::human_ms(resp.timings.total_ms - resp.timings.ttfb_ms)],
-                    ));
-                    ui.label(trf("Total: {}", &[&ternarywire_core::util::human_ms(resp.timings.total_ms)]));
-                });
-                crate::kit::status_pill(ui, resp.status, &resp.status_text).on_hover_text(format!(
-                    "{}{}",
-                    resp.version,
-                    resp.remote_addr.as_ref().map(|a| format!(" · {a}")).unwrap_or_default()
-                ));
-            } else if let Some(err) = &exec.error {
-                let p = theme::pal(ui);
-                kit::pill(ui, &format!("{} {}", icons::WARNING_CIRCLE, tr(err.kind_label())), p.err);
-            } else if exec.skipped {
-                let p = theme::pal(ui);
-                kit::pill(ui, tr("Skipped"), p.text_muted);
-            }
-        });
-    };
-    if narrow {
-        ui.horizontal(|ui| status_row(ui, actions));
-        widgets::sub_tabs(ui, &mut tab.resp_section, &items);
-    } else {
-        ui.horizontal(|ui| {
-            widgets::sub_tabs(ui, &mut tab.resp_section, &items);
-            status_row(ui, actions);
-        });
-    }
-    if pin_baseline && let Some(resp) = &exec.response {
-        tab.prev = Some(Box::new(crate::response_diff::Snapshot { resp: resp.clone(), at: result.at }));
-        tab.prev_pinned = true;
-        tab.compare.reset();
-        tab.resp_section = RespSection::Compare;
-    }
-    ui.add_space(8.0);
     match tab.resp_section {
         RespSection::Compare => {
             if let (Some(prev), Some(resp)) = (&tab.prev, &exec.response) {
@@ -2715,62 +3423,189 @@ fn response_panel(ui: &mut Ui, tab: &mut RequestTab, ectx: &EditCtx, actions: &m
                 }
             }
         }
-        RespSection::Body => {
-            if let Some(resp) = exec.response.as_ref().filter(|r| r.body.is_empty()) {
-                kit::empty_state(
-                    ui,
-                    icons::FILE,
-                    tr("No body"),
-                    &trf("The server answered {} {} without a body.", &[&resp.status, &resp.status_text]),
-                    |_| {},
-                );
-            } else if let Some(resp) = &exec.response {
-                if let Some(a) = crate::body_view::show(ui, &mut result.body, resp, ectx.max_pretty) {
-                    actions.value_action = Some(a.into());
-                }
-            } else if let Some(err) = &exec.error {
+        RespSection::Body | RespSection::Headers | RespSection::Cookies if exec.response.is_none() => {
+            if let Some(err) = &exec.error {
                 error_state(ui, err, actions);
             } else if exec.skipped {
-                kit::empty_state(
-                    ui,
-                    icons::ARROW_RIGHT,
-                    tr("Request skipped"),
-                    tr("The request was skipped by pm.execution.skipRequest()."),
-                    |_| {},
-                );
+                center_v(ui, ui.make_persistent_id("resp-skipped"), |ui| {
+                    empty_block(
+                        ui,
+                        icons::ARROW_RIGHT,
+                        false,
+                        tr("Request skipped"),
+                        tr("The request was skipped by pm.execution.skipRequest()."),
+                        |_| {},
+                    );
+                });
+            } else {
+                no_response(ui);
             }
         }
-        RespSection::Headers => match &exec.response {
-            Some(resp) => response_headers(ui, resp),
-            None => no_response(ui),
-        },
-        RespSection::Cookies => match &exec.response {
-            Some(resp) => response_cookies(ui, resp),
-            None => no_response(ui),
-        },
-        RespSection::Tests => tests_view(
-            ui,
-            tab_tests_filter(&mut tab.test_filter),
-            exec,
-            &mut tab.section,
-            &mut tab.script_event,
-            actions,
-        ),
-        RespSection::Details => details_view(ui, exec),
-        RespSection::Visualize => visualize_view(ui, &mut tab.viz, exec),
+        RespSection::Body => {
+            let resp = exec.response.as_ref().expect("response");
+            if resp.body.is_empty() {
+                center_v(ui, ui.make_persistent_id("resp-no-body"), |ui| {
+                    empty_block(
+                        ui,
+                        icons::FILE,
+                        false,
+                        tr("No body"),
+                        &trf("The server answered {} {} without a body.", &[&resp.status, &resp.status_text]),
+                        |_| {},
+                    );
+                });
+            } else if let Some(a) = crate::body_view::show(ui, &mut result.body, resp, ectx.max_pretty) {
+                actions.value_action = Some(a.into());
+            }
+        }
+        RespSection::Headers => response_headers(ui, exec.response.as_ref().expect("response")),
+        RespSection::Cookies => response_cookies(ui, exec.response.as_ref().expect("response"), actions),
+        RespSection::Tests => {
+            tests_view(ui, &mut tab.test_filter, exec, &mut tab.section, &mut tab.script_event, actions)
+        }
+        RespSection::Details => details_view(ui, exec, actions),
+        RespSection::Visualize => {
+            kit::pane_body(ui, "visualize", |ui| visualize_view(ui, &mut tab.viz, exec));
+        }
     }
 }
 
-/// Placeholder for response sections when the request failed before a
-/// response arrived.
+/// Centers `add` vertically in the space left (its height is measured on
+/// the previous frame).
+fn center_v<R>(ui: &mut Ui, id: egui::Id, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let h: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
+    let avail = ui.available_height();
+    ui.vertical_centered(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add_space(((avail - h) / 2.0).max(16.0));
+        let top = ui.cursor().top();
+        let r = add(ui);
+        let nh = ui.min_rect().bottom() - top;
+        if (nh - h).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(id, nh));
+            ui.ctx().request_repaint();
+        }
+        r
+    })
+    .inner
+}
+
+/// An empty state (`.empty`): an icon in a 52 px soft square, a title, a
+/// line of explanation and actions, centered horizontally.
+fn empty_block(ui: &mut Ui, icon: &str, spinning: bool, title: &str, body: &str, actions: impl FnOnce(&mut Ui)) {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    if spinning {
+        spinning_icon(ui, rect.center(), icon, 24.0, p.text_muted);
+    } else {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(24.0), p.text_muted);
+    }
+    ui.add_space(14.0);
+    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+    if !body.is_empty() {
+        ui.add_space(6.0);
+        ui.scope(|ui| {
+            ui.set_max_width(320.0);
+            ui.add(egui::Label::new(RichText::new(body).size(12.5).color(p.text_muted)).halign(Align::Center).wrap());
+        });
+    }
+    // Actions are centered by measuring them on the previous frame.
+    let id = ui.make_persistent_id(("empty-actions", title));
+    let w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
+    ui.add_space(16.0);
+    let r = ui
+        .allocate_ui_with_layout(vec2(w.max(1.0), 30.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let start = ui.cursor().left();
+            actions(ui);
+            ui.min_rect().right() - start
+        })
+        .inner;
+    if (r - w).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, r.max(0.0)));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Nothing sent yet: the shortcut and the last requests from History.
+fn empty_response(ui: &mut Ui, ectx: &EditCtx, actions: &mut Actions) {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    center_v(ui, ui.make_persistent_id("resp-empty"), |ui| {
+        empty_block(
+            ui,
+            icons::PAPER_PLANE_RIGHT,
+            false,
+            tr("No response yet"),
+            tr("Enter a URL and press Send to see the response here."),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                kit::kbd(ui, "⌘");
+                kit::kbd(ui, "↩");
+                ui.label(kit::hint(ui, tr("to send")));
+            },
+        );
+        if ectx.recent.is_empty() {
+            return;
+        }
+        // The empty state's 24 px padding, then 18.
+        ui.add_space(42.0);
+        let w = (ui.available_width() * 0.8).min(360.0);
+        ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(w);
+            ui.label(kit::eyebrow(ui, tr("Last sent from History")));
+            ui.add_space(6.0);
+            for r in &ectx.recent {
+                let (row, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+                let resp = resp.on_hover_text(tr("Open in a new tab"));
+                widgets::a11y_button(&resp, &format!("{} {}", r.method, r.path));
+                ui.painter().rect_filled(row, CornerRadius::same(6), if resp.hovered() { p.hover } else { p.well });
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let cy = row.center().y;
+                let mg = ui.painter().layout_no_wrap(
+                    widgets::method_short(&r.method).to_string(),
+                    theme::semibold(10.5),
+                    theme::method_color(&r.method, dark),
+                );
+                ui.painter().galley(pos2(row.left() + 8.0, cy - mg.size().y / 2.0), mg.clone(), Color32::PLACEHOLDER);
+                let mut right = row.right() - 8.0;
+                let tg = ui.painter().layout_no_wrap(r.when.clone(), egui::FontId::proportional(11.0), p.text_faint);
+                right -= tg.size().x;
+                ui.painter().galley(pos2(right, cy - tg.size().y / 2.0), tg, p.text_faint);
+                let (status, color) = match r.status {
+                    Some(s) => (s.to_string(), theme::status_color(s, dark)),
+                    None => (tr("Failed").to_string(), p.err),
+                };
+                let sg = ui.painter().layout_no_wrap(status, egui::FontId::proportional(11.0), color);
+                right -= 8.0 + sg.size().x;
+                ui.painter().galley(pos2(right, cy - sg.size().y / 2.0), sg, color);
+                let x = row.left() + 8.0 + mg.size().x + 8.0;
+                let g = elide(ui, &r.path, theme::mono(11.5), p.text, (right - 8.0 - x).max(20.0));
+                ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
+                if resp.clicked() {
+                    actions.open_history = Some(r.id.clone());
+                }
+                ui.add_space(4.0);
+            }
+        });
+    });
+}
+
+/// Placeholder for response sections when no response arrived.
 fn no_response(ui: &mut Ui) {
-    kit::empty_state(
-        ui,
-        icons::WARNING_CIRCLE,
-        tr("No response"),
-        tr("The request failed before a response arrived; see Body for the error."),
-        |_| {},
-    );
+    center_v(ui, ui.make_persistent_id("resp-none"), |ui| {
+        empty_block(
+            ui,
+            icons::WARNING_CIRCLE,
+            false,
+            tr("No response"),
+            tr("The request failed before a response arrived; see Body for the error."),
+            |_| {},
+        );
+    });
 }
 
 /// What to try next for a failed request.
@@ -2792,100 +3627,155 @@ fn error_hint(kind: ternarywire_http::error::HttpErrorKind) -> Option<&'static s
     })
 }
 
-/// The request could not be sent: icon, cause, next step, details.
+/// The checklist of a failed request: the main hint, then the usual
+/// suspects for its kind of error.
+fn error_checklist(kind: ternarywire_http::error::HttpErrorKind) -> Vec<&'static str> {
+    use ternarywire_http::error::HttpErrorKind as K;
+    let mut out: Vec<&'static str> = error_hint(kind).into_iter().collect();
+    let proxy = tr("Using a proxy? Check Settings › Proxy.");
+    let env = tr("Switch environment with ⌘E if this should go to another server.");
+    match kind {
+        K::Dns | K::ConnectionRefused | K::Timeout => out.extend([proxy, env]),
+        K::ConnectionReset | K::Tls => out.push(proxy),
+        K::InvalidUrl => out.extend([tr("Undefined variables are sent as typed; Details lists them."), env]),
+        _ => {}
+    }
+    out
+}
+
+/// The icon and short category of a failed request.
+fn error_kind_look(kind: ternarywire_http::error::HttpErrorKind) -> (&'static str, &'static str) {
+    use ternarywire_http::error::HttpErrorKind as K;
+    match kind {
+        K::Dns | K::ConnectionRefused | K::ConnectionReset | K::Proxy => (icons::PLUG, tr("Connection")),
+        K::Timeout => (icons::HOURGLASS, tr("Connection")),
+        K::Certificate | K::Tls => (icons::LOCK_SIMPLE, "TLS"),
+        K::InvalidUrl | K::InvalidHeader => (icons::LINK, tr("Request")),
+        K::TooManyRedirects => (icons::ARROW_BEND_UP_LEFT, tr("Redirects")),
+        K::File => (icons::FILE, tr("File")),
+        _ => (icons::WARNING_CIRCLE, tr("Error")),
+    }
+}
+
+/// The request could not be sent: a card with the cause, a checklist and
+/// the next steps.
 fn error_state(ui: &mut Ui, err: &ternarywire_http::error::HttpError, actions: &mut Actions) {
     let p = theme::pal(ui);
     let detail_id = ui.make_persistent_id("err-detail");
     let mut show_detail: bool = ui.data(|d| d.get_temp(detail_id).unwrap_or(false));
+    let has_detail = err.detail != err.message;
     egui::ScrollArea::vertical().id_salt("err-scroll").auto_shrink([false; 2]).show(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.12).clamp(8.0, 60.0));
-            let (rect, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-            ui.painter().circle_filled(rect.center(), 28.0, theme::soft(p.err, 0.12));
-            ui.painter().text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                icons::WARNING_CIRCLE,
-                theme::icon_font(26.0),
-                p.err,
-            );
-            ui.add_space(10.0);
-            ui.label(RichText::new(tr("Could not send request")).font(theme::semibold(15.0)));
-            ui.add_space(4.0);
-            kit::pill(ui, tr(err.kind_label()), p.err);
-            ui.add_space(6.0);
-            let w = ui.available_width().min(560.0);
-            ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Center), |ui| {
-                ui.label(RichText::new(&err.message).color(p.text));
-                if let Some(hint) = error_hint(err.kind) {
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(hint).color(p.text_muted));
-                }
-            });
-            ui.add_space(12.0);
-            let has_detail = err.detail != err.message;
-            let w = if has_detail { 260.0 } else { 120.0 };
-            ui.allocate_ui_with_layout(vec2(w, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                if kit::secondary(ui, Some(icons::ARROW_CLOCKWISE), tr("Try again")).clicked() {
-                    actions.send = true;
-                }
-                if has_detail {
-                    let label = if show_detail { tr("Hide details") } else { tr("Show details") };
-                    if kit::ghost(ui, Some(icons::TERMINAL), label).clicked() {
-                        show_detail = !show_detail;
-                        ui.data_mut(|d| d.insert_temp(detail_id, show_detail));
+        center_v(ui, ui.make_persistent_id("err-center"), |ui| {
+            let w = (ui.available_width() - 40.0).min(440.0);
+            ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(w);
+                kit::card(ui).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let (icon, category) = error_kind_look(err.kind);
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 20.0, p.err_soft);
+                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(20.0), p.err);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(tr("Could not send request"))
+                                        .font(theme::semibold(14.0))
+                                        .color(p.text),
+                                );
+                                kit::tone_pill(ui, category, Tone::Err);
+                            });
+                            ui.add(egui::Label::new(RichText::new(&err.message).size(13.0).color(p.text_muted)).wrap());
+                        });
+                    });
+                    let lines = error_checklist(err.kind);
+                    if !lines.is_empty() {
+                        ui.add_space(14.0);
+                        for (i, line) in lines.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(6.0);
+                            }
+                            ui.horizontal_top(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                ui.label(RichText::new(icons::CHECK).font(theme::icon_font(13.0)).color(p.text_faint));
+                                ui.add(egui::Label::new(RichText::new(*line).size(12.5).color(p.text)).wrap());
+                            });
+                        }
                     }
-                }
-            });
-            if show_detail && has_detail {
-                ui.add_space(10.0);
-                let w = ui.available_width().min(680.0);
-                ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    egui::Frame::new()
-                        .fill(p.chrome)
-                        .stroke(Stroke::new(1.0, p.border))
-                        .corner_radius(CornerRadius::same(8))
-                        .inner_margin(egui::Margin::same(12))
-                        .show(ui, |ui| {
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let opts = ButtonOpts { icon: Some(icons::ARROW_CLOCKWISE), ..Default::default() };
+                        if kit::button(ui, Kind::Primary, Size::Sm, tr("Try again"), opts).clicked() {
+                            actions.send = true;
+                        }
+                        if has_detail {
+                            let (label, icon) = if show_detail {
+                                (tr("Hide details"), icons::CARET_UP)
+                            } else {
+                                (tr("Show details"), icons::CARET_DOWN)
+                            };
+                            if kit::ghost(ui, Some(icon), label).clicked() {
+                                show_detail = !show_detail;
+                                ui.data_mut(|d| d.insert_temp(detail_id, show_detail));
+                            }
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if kit::ghost(ui, Some(icons::TERMINAL_WINDOW), tr("Open console")).clicked() {
+                                actions.open_console = true;
+                            }
+                        });
+                    });
+                    if show_detail && has_detail {
+                        ui.add_space(12.0);
+                        kit::well(ui).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.add(
-                                egui::Label::new(RichText::new(&err.detail).monospace().size(11.5).color(p.text_muted))
-                                    .selectable(true),
+                                egui::Label::new(
+                                    RichText::new(&err.detail).font(theme::mono(11.5)).color(p.text_muted),
+                                )
+                                .selectable(true)
+                                .wrap(),
                             );
                         });
+                    }
                 });
-            }
+            });
         });
     });
 }
 
-/// Response headers as a read-only table with copy actions.
+/// A toolbar with a muted count on the left and actions on the right
+/// (added right to left).
+fn count_toolbar(ui: &mut Ui, count: &str, right: impl FnOnce(&mut Ui)) {
+    kit::toolbar(ui, |ui| {
+        ui.label(kit::hint(ui, count));
+        ui.with_layout(Layout::right_to_left(Align::Center), right);
+    });
+}
+
+/// Response headers: the count and Copy all, then a read-only table.
 fn response_headers(ui: &mut Ui, resp: &ternarywire_core::response::HttpResponse) {
     if resp.headers.is_empty() {
-        kit::empty_state(ui, icons::LIST, tr("No headers"), tr("The response has no headers."), |_| {});
+        center_v(ui, ui.make_persistent_id("no-headers"), |ui| {
+            empty_block(ui, icons::LIST, false, tr("No headers"), tr("The response has no headers."), |_| {});
+        });
         return;
     }
     let count =
         if resp.headers.len() == 1 { tr("1 header").to_string() } else { trf("{} headers", &[&resp.headers.len()]) };
-    table_toolbar(ui, &count, || resp.headers.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n"));
+    count_toolbar(ui, &count, |ui| {
+        if kit::ghost(ui, Some(icons::COPY), tr("Copy all")).clicked() {
+            ui.ctx().copy_text(resp.headers.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n"));
+        }
+    });
     let rows: Vec<Vec<String>> = resp.headers.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect();
-    egui::ScrollArea::vertical().id_salt("resp-headers").auto_shrink([false; 2]).show(ui, |ui| {
-        read_table(ui, "resp-headers", &[tr("Key"), tr("Value")], &[0.32, 0.68], &rows);
+    kit::pane_body(ui, "resp-headers", |ui| {
+        read_table(ui, "resp-headers", &[tr("Name"), tr("Value")], &[0.38, 0.62], &rows);
     });
-}
-
-/// A muted count on the left and "Copy all" on the right, above a table.
-fn table_toolbar(ui: &mut Ui, count: &str, all_text: impl FnOnce() -> String) {
-    ui.horizontal(|ui| {
-        ui.set_height(26.0);
-        ui.label(widgets::muted(ui, count).small());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if kit::ghost(ui, Some(icons::COPY), tr("Copy all")).clicked() {
-                ui.ctx().copy_text(all_text());
-            }
-        });
-    });
-    ui.add_space(4.0);
 }
 
 /// `Set-Cookie` headers split into name, value and attributes.
@@ -2896,16 +3786,41 @@ fn parse_set_cookie(c: &str) -> Vec<String> {
     vec![n.trim().to_string(), v.trim().to_string(), attrs]
 }
 
-fn response_cookies(ui: &mut Ui, resp: &ternarywire_core::response::HttpResponse) {
+fn response_cookies(ui: &mut Ui, resp: &ternarywire_core::response::HttpResponse, actions: &mut Actions) {
     let rows: Vec<Vec<String>> = resp.headers_all("set-cookie").map(parse_set_cookie).collect();
     if rows.is_empty() {
-        kit::empty_state(ui, icons::COOKIE, tr("No cookies"), tr("No cookies were set by this response."), |_| {});
+        center_v(ui, ui.make_persistent_id("no-cookies"), |ui| {
+            empty_block(
+                ui,
+                icons::COOKIE,
+                false,
+                tr("No cookies"),
+                tr("No cookies were set by this response."),
+                |ui| {
+                    let opts = ButtonOpts { icon: Some(icons::COOKIE), ..Default::default() };
+                    if kit::button(ui, Kind::Ghost, Size::Sm, tr("Open cookie jar"), opts).clicked() {
+                        actions.open_cookies = true;
+                    }
+                },
+            );
+        });
         return;
     }
-    let count = if rows.len() == 1 { tr("1 cookie").to_string() } else { trf("{} cookies", &[&rows.len()]) };
-    table_toolbar(ui, &count, || resp.headers_all("set-cookie").collect::<Vec<_>>().join("\n"));
-    egui::ScrollArea::vertical().id_salt("resp-cookies").auto_shrink([false; 2]).show(ui, |ui| {
-        read_table(ui, "resp-cookies", &[tr("Name"), tr("Value"), tr("Attributes")], &[0.24, 0.38, 0.38], &rows);
+    let count = if rows.len() == 1 {
+        tr("1 cookie set by this response").to_string()
+    } else {
+        trf("{} cookies set by this response", &[&rows.len()])
+    };
+    count_toolbar(ui, &count, |ui| {
+        if kit::ghost(ui, Some(icons::COOKIE), tr("Open cookie jar")).clicked() {
+            actions.open_cookies = true;
+        }
+        if kit::ghost(ui, Some(icons::COPY), tr("Copy all")).clicked() {
+            ui.ctx().copy_text(resp.headers_all("set-cookie").collect::<Vec<_>>().join("\n"));
+        }
+    });
+    kit::pane_body(ui, "resp-cookies", |ui| {
+        read_table(ui, "resp-cookies", &[tr("Name"), tr("Value"), tr("Attributes")], &[0.26, 0.34, 0.40], &rows);
     });
 }
 
@@ -2918,7 +3833,6 @@ fn visualize_view(
 ) {
     use std::hash::{Hash, Hasher};
     let Some(v) = &exec.visualization else { return };
-    let p = theme::pal(ui);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     v.template.hash(&mut h);
     v.data.to_string().hash(&mut h);
@@ -2936,10 +3850,10 @@ fn visualize_view(
             }
             if doc.needs_browser() {
                 let mut open = false;
-                banner_with(
+                kit::banner_with(
                     ui,
+                    Tone::Info,
                     icons::INFO,
-                    p.info,
                     tr(
                         "This visualization uses scripts or external resources; open it in the browser for the full page.",
                     ),
@@ -2948,20 +3862,15 @@ fn visualize_view(
                 if open {
                     open_visualization(exec);
                 }
-                ui.add_space(8.0);
             }
             doc.show(ui, &mut |href: &str| {
                 widgets::open_web_link(href);
             });
         }
         Err(e) => {
-            banner(ui, icons::WARNING_CIRCLE, p.err, &format!("{}: {e}", tr("Visualizer template")));
+            kit::banner(ui, Tone::Err, icons::WARNING_CIRCLE, &format!("{}: {e}", tr("Visualizer template")));
         }
     }
-}
-
-fn tab_tests_filter(f: &mut TestFilter) -> &mut TestFilter {
-    f
 }
 
 fn event_label(e: ScriptEvent) -> &'static str {
@@ -2979,23 +3888,29 @@ pub(crate) fn test_counts(tests: &[TestResult]) -> (usize, usize, usize) {
     (passed, tests.len() - passed - skipped, skipped)
 }
 
-/// Pills with the pass/fail/skip counts (zero counts are muted).
+/// Pills with the pass/fail/skip counts (zero counts are neutral).
 pub(crate) fn test_count_pills(ui: &mut Ui, passed: usize, failed: usize, skipped: usize) {
-    let p = theme::pal(ui);
-    let muted_if_zero = |n: usize, c: Color32| if n == 0 { p.text_muted } else { c };
-    kit::pill(ui, &format!("{} {}", icons::CHECK, trf("{} passed", &[&passed])), muted_if_zero(passed, p.ok));
-    kit::pill(ui, &format!("{} {}", icons::X, trf("{} failed", &[&failed])), muted_if_zero(failed, p.err));
-    if skipped > 0 {
-        kit::pill(ui, &format!("{} {}", icons::MINUS, trf("{} skipped", &[&skipped])), p.text_muted);
-    }
+    let pill = |ui: &mut Ui, n: usize, text: String, tone: Tone, icon: &str| {
+        let (tone, icon) = if n == 0 { (Tone::Neutral, None) } else { (tone, Some(icon)) };
+        kit::pill_ex(ui, &text, tone, PillOpts { icon, ..Default::default() });
+    };
+    pill(ui, passed, trf("{} passed", &[&passed]), Tone::Ok, icons::CHECK);
+    pill(ui, failed, trf("{} failed", &[&failed]), Tone::Err, icons::X);
+    pill(ui, skipped, trf("{} skipped", &[&skipped]), Tone::Neutral, icons::MINUS);
 }
 
-/// A thin bar split into passed, failed and skipped parts.
+/// A thin bar split into passed, failed and skipped parts (6 high).
+#[allow(dead_code)] // Shared with the other views.
 pub(crate) fn test_ratio_bar(ui: &mut Ui, passed: usize, failed: usize, skipped: usize, width: f32) {
+    ratio_bar(ui, passed, failed, skipped, width, 6.0);
+}
+
+fn ratio_bar(ui: &mut Ui, passed: usize, failed: usize, skipped: usize, width: f32, height: f32) {
     let p = theme::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 6.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let total = (passed + failed + skipped).max(1) as f32;
-    ui.painter().rect_filled(rect, CornerRadius::same(3), p.subtle);
+    let r = CornerRadius::same((height / 2.0) as u8);
+    ui.painter().rect_filled(rect, r, p.subtle);
     let mut x = rect.left();
     let painter = ui.painter_at(rect);
     for (n, c) in [(passed, p.ok), (failed, p.err), (skipped, p.text_faint)] {
@@ -3003,7 +3918,7 @@ pub(crate) fn test_ratio_bar(ui: &mut Ui, passed: usize, failed: usize, skipped:
             continue;
         }
         let w = rect.width() * n as f32 / total;
-        painter.rect_filled(Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height())), CornerRadius::same(3), c);
+        painter.rect_filled(Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height())), r, c);
         x += w;
     }
 }
@@ -3016,50 +3931,63 @@ fn tests_view(
     script_event: &mut ScriptEvent,
     actions: &mut Actions,
 ) {
-    let p = theme::pal(ui);
     if exec.tests.is_empty() && exec.script_errors.is_empty() && exec.response.is_none() {
-        kit::empty_state(
-            ui,
-            icons::TEST_TUBE,
-            tr("Tests did not run"),
-            tr("Post-response tests run only when a response arrives."),
-            |_| {},
-        );
+        center_v(ui, ui.make_persistent_id("tests-none"), |ui| {
+            empty_block(
+                ui,
+                icons::TEST_TUBE,
+                false,
+                tr("Tests did not run"),
+                tr("Post-response tests run only when a response arrives."),
+                |_| {},
+            );
+        });
         return;
     }
     if exec.tests.is_empty() && exec.script_errors.is_empty() {
-        kit::empty_state(
-            ui,
-            icons::TEST_TUBE,
-            tr("No tests yet"),
-            tr("Add pm.test(...) calls in the Post-response script to check the response."),
-            |ui| {
-                // Two buttons, centered.
-                let w = 300.0;
-                ui.allocate_ui_with_layout(vec2(w, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    if kit::secondary(ui, Some(icons::SPARKLE), tr("Generate tests"))
-                        .on_hover_text(tr(
-                            "Write tests for the status, time, content type and body shape of the response",
-                        ))
-                        .clicked()
+        center_v(ui, ui.make_persistent_id("tests-empty"), |ui| {
+            empty_block(
+                ui,
+                icons::TEST_TUBE,
+                false,
+                tr("No tests yet"),
+                tr("Add pm.test(...) calls in the Post-response script to check the response."),
+                |ui| {
+                    let r = kit::button(
+                        ui,
+                        Kind::Secondary,
+                        Size::Sm,
+                        tr("Generate tests"),
+                        ButtonOpts { icon: Some(icons::TEST_TUBE), ..Default::default() },
+                    );
+                    if r.on_hover_text(tr(
+                        "Write tests for the status, time, content type and body shape of the response",
+                    ))
+                    .clicked()
                     {
                         actions.generate_tests = true;
                     }
-                    if kit::secondary(ui, Some(icons::PLUS), tr("Write a test")).clicked() {
+                    let r = kit::button(
+                        ui,
+                        Kind::Ghost,
+                        Size::Sm,
+                        tr("Write a test"),
+                        ButtonOpts { icon: Some(icons::PLUS), ..Default::default() },
+                    );
+                    if r.clicked() {
                         *section = Section::Scripts;
                         *script_event = ScriptEvent::PostResponse;
                     }
-                });
-            },
-        );
+                },
+            );
+        });
         return;
     }
     let (passed, failed, skipped) = test_counts(&exec.tests);
-    ui.horizontal(|ui| {
-        ui.set_height(28.0);
-        ui.spacing_mut().item_spacing.x = 6.0;
+    kit::toolbar(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
         test_count_pills(ui, passed, failed, skipped);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if kit::ghost(ui, Some(icons::ARROW_CLOCKWISE), tr("Re-run tests"))
                 .on_hover_text(tr("Run post-response scripts again on this response"))
                 .clicked()
@@ -3068,35 +3996,34 @@ fn tests_view(
             }
         });
     });
-    ui.add_space(6.0);
-    test_ratio_bar(ui, passed, failed, skipped, ui.available_width());
-    ui.add_space(10.0);
-    if !exec.tests.is_empty() {
-        let all = format!("{} {}", tr("All"), exec.tests.len());
-        let pass = format!("{} {passed}", tr("Passed"));
-        let fail = format!("{} {failed}", tr("Failed"));
-        let skip = format!("{} {skipped}", tr("Skipped"));
-        kit::segmented(
-            ui,
-            filter,
-            &[
-                (TestFilter::All, all.as_str()),
-                (TestFilter::Passed, pass.as_str()),
-                (TestFilter::Failed, fail.as_str()),
-                (TestFilter::Skipped, skip.as_str()),
-            ],
-        );
-        ui.add_space(8.0);
-    }
-    egui::ScrollArea::vertical().id_salt("tests").auto_shrink([false; 2]).show(ui, |ui| {
+    kit::pane_body(ui, "tests", |ui| {
+        ui.spacing_mut().item_spacing.y = 12.0;
+        ratio_bar(ui, passed, failed, skipped, ui.available_width(), 4.0);
+        if !exec.tests.is_empty() {
+            let all = format!("{} {}", tr("All"), exec.tests.len());
+            let pass = format!("{} {passed}", tr("Passed"));
+            let fail = format!("{} {failed}", tr("Failed"));
+            let skip = format!("{} {skipped}", tr("Skipped"));
+            ui.horizontal(|ui| {
+                kit::segmented_sm(
+                    ui,
+                    filter,
+                    &[
+                        (TestFilter::All, all.as_str()),
+                        (TestFilter::Passed, pass.as_str()),
+                        (TestFilter::Failed, fail.as_str()),
+                        (TestFilter::Skipped, skip.as_str()),
+                    ],
+                );
+            });
+        }
         for e in &exec.script_errors {
-            banner(
+            kit::banner(
                 ui,
+                Tone::Err,
                 icons::WARNING_CIRCLE,
-                p.err,
                 &format!("{}\n{}", trf("Script error in {} ({})", &[&event_label(e.event), &e.location]), e.message),
             );
-            ui.add_space(8.0);
         }
         let shown: Vec<&TestResult> = exec
             .tests
@@ -3109,22 +4036,27 @@ fn tests_view(
             })
             .collect();
         if shown.is_empty() && !exec.tests.is_empty() {
-            ui.add_space(8.0);
-            ui.label(widgets::muted(ui, tr("No tests match this filter.")));
+            ui.label(kit::hint(ui, tr("No tests match this filter.")));
             return;
         }
-        test_list(ui, &shown);
+        if test_list_ex(ui, &shown, true) {
+            *section = Section::Scripts;
+            *script_event = ScriptEvent::PostResponse;
+        }
     });
 }
 
-/// Tests as rows in one bordered list.
-pub(crate) fn test_list(ui: &mut Ui, tests: &[&TestResult]) {
-    if tests.is_empty() {
-        return;
+/// [`test_list`], with (`add_row`) a last row saying how to add tests.
+/// Returns true when that row was clicked.
+fn test_list_ex(ui: &mut Ui, tests: &[&TestResult], add_row: bool) -> bool {
+    if tests.is_empty() && !add_row {
+        return false;
     }
     let p = theme::pal(ui);
     let top = ui.cursor().min;
     let width = ui.available_width();
+    let mut clicked = false;
+    let bg = ui.painter().add(egui::Shape::Noop);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for (i, t) in tests.iter().enumerate() {
@@ -3134,69 +4066,96 @@ pub(crate) fn test_list(ui: &mut Ui, tests: &[&TestResult]) {
             }
             test_row(ui, t, width);
         }
+        if add_row {
+            if !tests.is_empty() {
+                let y = ui.cursor().min.y;
+                ui.painter().hline(top.x..=top.x + width, y, Stroke::new(1.0, p.border));
+            }
+            let (rect, resp) = ui.allocate_exact_size(vec2(width, 38.0), Sense::click());
+            widgets::a11y_button(
+                &resp,
+                tr("Add tests in Scripts › Post-response, or right-click a value in the body."),
+            );
+            if resp.hovered() {
+                ui.painter().rect_filled(rect.shrink(1.0), CornerRadius::same(8), p.well);
+            }
+            ui.painter().text(
+                pos2(rect.left() + 12.0 + 7.0, rect.center().y),
+                Align2::CENTER_CENTER,
+                icons::PLUS,
+                theme::icon_font(14.0),
+                p.text_faint,
+            );
+            let g = elide(
+                ui,
+                tr("Add tests in Scripts › Post-response, or right-click a value in the body."),
+                egui::FontId::proportional(12.0),
+                p.text_muted,
+                width - 50.0,
+            );
+            ui.painter().galley(pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+            clicked = resp.clicked();
+        }
     });
     let rect = Rect::from_min_max(top, pos2(top.x + width, ui.min_rect().bottom()));
-    ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.painter().set(bg, egui::Shape::rect_filled(rect, CornerRadius::same(9), p.surface));
+    ui.painter().rect_stroke(rect, CornerRadius::same(9), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    clicked
 }
 
 /// One test: status icon, name, PASS/FAIL/SKIP pill, failure message under it.
 fn test_row(ui: &mut Ui, t: &TestResult, width: f32) {
     let p = theme::pal(ui);
-    let (icon, color, label) = if t.skipped {
-        (icons::MINUS, p.text_muted, tr("SKIP"))
+    let (icon, tone, label) = if t.skipped {
+        (icons::MINUS, Tone::Neutral, tr("SKIP"))
     } else if t.passed {
-        (icons::CHECK_CIRCLE, p.ok, tr("PASS"))
+        (icons::CHECK_CIRCLE, Tone::Ok, tr("PASS"))
     } else {
-        (icons::X_CIRCLE, p.err, tr("FAIL"))
+        (icons::X_CIRCLE, Tone::Err, tr("FAIL"))
     };
-    let text_x = 36.0;
-    let text_w = (width - text_x - 76.0).max(60.0);
-    let name = ui.painter().layout(t.name.clone(), egui::FontId::proportional(body_size(ui)), p.text, text_w);
+    let (color, _) = p.tone(tone);
+    let text_x = 12.0 + 16.0 + 8.0;
+    let text_w = (width - text_x - 70.0).max(60.0);
+    let name = ui.painter().layout(t.name.clone(), egui::FontId::proportional(12.5), p.text, text_w);
     let err = t
         .error
         .as_ref()
         .filter(|e| !e.is_empty())
-        .map(|e| ui.painter().layout(e.clone(), theme::mono(mono_size(ui) - 0.5), p.text_muted, text_w));
-    let h = (9.0 + name.size().y + err.as_ref().map_or(0.0, |g| g.size().y + 3.0) + 9.0).max(34.0);
+        .map(|e| ui.painter().layout(e.clone(), theme::mono(11.5), p.text_muted, text_w));
+    let pad = 11.0;
+    let h = (pad + name.size().y + err.as_ref().map_or(0.0, |g| g.size().y + 3.0) + pad).max(38.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect.shrink(1.0), CornerRadius::same(7), p.faint_row());
+        ui.painter().rect_filled(rect.shrink(1.0), CornerRadius::same(8), p.well);
     }
-    let first_line = rect.top() + 9.0 + name.rows.first().map_or(name.size().y, |r| r.height()) / 2.0;
-    ui.painter().text(pos2(rect.left() + 18.0, first_line), Align2::CENTER_CENTER, icon, theme::icon_font(16.0), color);
-    ui.painter().galley(pos2(rect.left() + text_x, rect.top() + 9.0), name.clone(), p.text);
+    let first_line = if err.is_none() { rect.center().y } else { rect.top() + pad + name.size().y / 2.0 };
+    let name_top = if err.is_none() { rect.center().y - name.size().y / 2.0 } else { rect.top() + pad };
+    ui.painter().text(
+        pos2(rect.left() + 12.0 + 8.0, first_line),
+        Align2::CENTER_CENTER,
+        icon,
+        theme::icon_font(16.0),
+        color,
+    );
+    ui.painter().galley(pos2(rect.left() + text_x, name_top), name.clone(), p.text);
     if let Some(g) = err {
-        ui.painter().galley(pos2(rect.left() + text_x, rect.top() + 9.0 + name.size().y + 3.0), g, p.text_muted);
+        ui.painter().galley(pos2(rect.left() + text_x, name_top + name.size().y + 3.0), g, p.text_muted);
     }
-    paint_pill(ui, pos2(rect.right() - 12.0, first_line), label, color);
+    // The pill at the right edge, on the first line.
+    let pill_w = ui.painter().layout_no_wrap(label.to_string(), theme::medium(11.5), color).size().x + 14.0;
+    let pill_rect = Rect::from_min_size(pos2(rect.right() - 12.0 - pill_w, first_line - 10.0), vec2(pill_w, 20.0));
+    kit::tone_pill(&mut ui.new_child(egui::UiBuilder::new().max_rect(pill_rect)), label, tone);
     widgets::a11y_button(&resp, &format!("{label} {}", t.name));
     resp.context_menu(|ui| {
-        if ui.button(kit::with_icon(icons::COPY, tr("Copy test name"))).clicked() {
+        if kit::menu_item(ui, Some(icons::COPY), tr("Copy test name"), None).clicked() {
             ui.ctx().copy_text(t.name.clone());
-            ui.close();
         }
         if let Some(e) = &t.error
-            && ui.button(kit::with_icon(icons::COPY, tr("Copy message"))).clicked()
+            && kit::menu_item(ui, Some(icons::COPY), tr("Copy message"), None).clicked()
         {
             ui.ctx().copy_text(e.clone());
-            ui.close();
         }
     });
-}
-
-/// Paints a pill whose right edge is centered vertically on `right_center`.
-pub(crate) fn paint_pill(ui: &Ui, right_center: egui::Pos2, text: &str, color: Color32) -> Rect {
-    let dark = ui.visuals().dark_mode;
-    let galley = ui.painter().layout_no_wrap(text.to_string(), theme::medium(small_size(ui) - 0.5), color);
-    let size = galley.size() + vec2(14.0, 6.0);
-    let rect = Rect::from_min_size(pos2(right_center.x - size.x, right_center.y - size.y / 2.0), size);
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same((size.y / 2.0) as u8),
-        theme::soft(color, if dark { 0.18 } else { 0.11 }),
-    );
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
-    rect
 }
 
 /// Milliseconds with a precision that fits their size.
@@ -3210,199 +4169,207 @@ pub(crate) fn fmt_ms(ms: f64) -> String {
     }
 }
 
-/// A small heading inside a view: icon and section title.
-pub(crate) fn detail_heading(ui: &mut Ui, icon: &str, text: &str) {
-    let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(24.0);
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(RichText::new(icon).font(theme::icon_font(14.0)).color(p.text_muted));
-        ui.label(kit::section_title(text));
-    });
-    ui.add_space(4.0);
-}
-
-/// A label/value line inside a details card.
+/// A label/value line of a details card (min 28 high, label 120 wide).
 fn info_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     let p = theme::pal(ui);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(vec2(140.0, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.set_width(140.0);
-            ui.label(RichText::new(label).color(p.text_muted));
-        });
-        ui.allocate_ui_with_layout(
-            vec2(ui.available_width(), 22.0),
-            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-            add,
-        );
-    });
-}
-
-/// Waterfall of the response timing phases.
-fn timing_bars(ui: &mut Ui, ttfb: f64, total: f64) {
-    let p = theme::pal(ui);
-    let total = total.max(ttfb).max(0.001);
-    let phases = [
-        (
-            tr("Waiting (TTFB)"),
-            0.0,
-            ttfb,
-            p.info,
-            tr("From sending the request to the first response byte: connecting, TLS and the server's work."),
-        ),
-        (tr("Content download"), ttfb, (total - ttfb).max(0.0), p.ok, tr("Receiving the response body.")),
-    ];
-    let label_w = 150.0;
-    let value_w = 76.0;
-    for (label, start, dur, color, help) in phases {
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.allocate_ui_with_layout(vec2(label_w, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.set_width(label_w);
-                ui.label(RichText::new(label).color(p.text));
-            });
-            let bar_w = (ui.available_width() - value_w - 8.0).max(60.0);
-            let (rect, resp) = ui.allocate_exact_size(vec2(bar_w, 26.0), Sense::hover());
-            let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 8.0));
-            ui.painter().rect_filled(track, CornerRadius::same(4), p.subtle);
-            let x0 = track.left() + track.width() * (start / total) as f32;
-            let w = (track.width() * (dur / total) as f32).max(3.0).min(track.right() - x0);
-            ui.painter().rect_filled(
-                Rect::from_min_size(pos2(x0, track.top()), vec2(w, track.height())),
-                CornerRadius::same(4),
-                color,
-            );
-            resp.on_hover_text(help);
-            ui.allocate_ui_with_layout(vec2(value_w, 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(fmt_ms(dur)).font(theme::mono(mono_size(ui))).color(p.text));
-            });
-        });
-    }
-    form_divider(ui);
     ui.horizontal(|ui| {
-        ui.set_height(24.0);
-        ui.label(RichText::new(tr("Total")).font(theme::medium(13.5)));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(fmt_ms(total)).font(theme::semibold(14.0)));
+        ui.set_min_height(28.0);
+        ui.allocate_ui_with_layout(vec2(120.0, 28.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_width(120.0);
+            ui.label(RichText::new(label).size(13.0).color(p.text_muted));
         });
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 28.0), Layout::left_to_right(Align::Center), add);
     });
 }
 
-fn details_view(ui: &mut Ui, exec: &Execution) {
+/// A card with a title row (section title, then `right`) and content.
+fn titled_card(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui), add: impl FnOnce(&mut Ui)) {
+    kit::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        hrow(ui, 20.0, |ui| {
+            ui.label(kit::section_title(title));
+            ui.with_layout(Layout::right_to_left(Align::Center), right);
+        });
+        add(ui);
+    });
+}
+
+fn details_view(ui: &mut Ui, exec: &Execution, actions: &mut Actions) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
-    egui::ScrollArea::vertical().id_salt("details").auto_shrink([false; 2]).show(ui, |ui| {
-        let w = ui.available_width().min(920.0);
-        ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.set_width(w);
-            if !exec.unresolved.is_empty() {
-                banner(ui, icons::WARNING, p.warn, &trf("Undefined variables: {}", &[&exec.unresolved.join(", ")]));
-                ui.add_space(12.0);
-            }
-            if let Some(resp) = &exec.response {
-                detail_heading(ui, icons::TIMER, tr("Timing"));
-                kit::card(ui).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    timing_bars(ui, resp.timings.ttfb_ms, resp.timings.total_ms);
-                });
-                ui.add_space(16.0);
-                detail_heading(ui, icons::DOWNLOAD_SIMPLE, tr("Response"));
-                kit::card(ui).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 8.0;
+    kit::pane_body(ui, "details", |ui| {
+        ui.spacing_mut().item_spacing.y = 12.0;
+        ui.add_space(4.0);
+        if !exec.unresolved.is_empty() {
+            let names = exec.unresolved.iter().map(|n| format!("{{{{{n}}}}}")).collect::<Vec<_>>().join(", ");
+            let text = if exec.unresolved.len() == 1 {
+                trf("Undefined variable {} was sent as typed. Define it in Local or the collection.", &[&names])
+            } else {
+                trf("Undefined variables {} were sent as typed. Define them in Local or the collection.", &[&names])
+            };
+            kit::banner(ui, Tone::Warn, icons::WARNING, &text);
+        }
+        if let Some(resp) = &exec.response {
+            let total = resp.timings.total_ms.max(resp.timings.ttfb_ms);
+            titled_card(
+                ui,
+                tr("Timing"),
+                |ui| {
+                    ui.label(RichText::new(fmt_ms(total)).font(theme::semibold(12.5)).color(p.text));
+                },
+                |ui| {
+                    ui.add_space(12.0);
+                    waterfall(
+                        ui,
+                        resp.timings.ttfb_ms,
+                        resp.timings.total_ms,
+                        130.0,
+                        70.0,
+                        12.0,
+                        &[
+                            (
+                                tr("Waiting (TTFB)"),
+                                tr(
+                                    "From sending the request to the first response byte: connecting, TLS and the server's work.",
+                                ),
+                            ),
+                            (tr("Content download"), tr("Receiving the response body.")),
+                        ],
+                    );
+                },
+            );
+            titled_card(
+                ui,
+                tr("Response"),
+                |_| {},
+                |ui| {
+                    ui.add_space(8.0);
                     info_row(ui, tr("Status"), |ui| {
                         kit::status_pill(ui, resp.status, &resp.status_text);
                     });
                     info_row(ui, tr("HTTP version"), |ui| {
-                        ui.label(RichText::new(&resp.version).monospace());
+                        ui.label(RichText::new(&resp.version).size(13.0));
                     });
                     if let Some(addr) = &resp.remote_addr {
                         info_row(ui, tr("Remote address"), |ui| {
-                            ui.add(egui::Label::new(RichText::new(addr).monospace()).selectable(true));
+                            ui.add(egui::Label::new(RichText::new(addr).font(theme::mono(12.5))).selectable(true));
                         });
                     }
                     info_row(ui, tr("Security"), |ui| {
-                        if resp.url.starts_with("https://") {
-                            ui.label(
-                                RichText::new(format!("{} {}", icons::LOCK_SIMPLE, tr("Encrypted with TLS (HTTPS)")))
-                                    .color(p.ok),
-                            );
+                        let (icon, text, color) = if resp.url.starts_with("https://") {
+                            (icons::LOCK_SIMPLE, tr("Encrypted with TLS (HTTPS)"), p.ok)
                         } else {
-                            ui.label(
-                                RichText::new(format!("{} {}", icons::WARNING, tr("Not encrypted (plain HTTP)")))
-                                    .color(p.text_muted),
-                            );
-                        }
+                            (icons::LOCK_SIMPLE, tr("Not encrypted (plain HTTP)"), p.text_faint)
+                        };
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new(icon).font(theme::icon_font(13.0)).color(color));
+                        ui.label(RichText::new(text).size(13.0));
                     });
-                    info_row(ui, tr("Response size"), |ui| {
-                        ui.label(ternarywire_core::util::human_bytes(resp.total_size()));
-                        ui.label(widgets::muted(
-                            ui,
-                            trf(
-                                "headers {} · body {}",
-                                &[
-                                    &ternarywire_core::util::human_bytes(resp.header_size),
-                                    &ternarywire_core::util::human_bytes(resp.body.len()),
-                                ],
-                            ),
-                        ));
+                    info_row(ui, tr("Size"), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                ternarywire_core::util::human_bytes(resp.total_size()),
+                                trf(
+                                    "headers {} · body {}",
+                                    &[
+                                        &ternarywire_core::util::human_bytes(resp.header_size),
+                                        &ternarywire_core::util::human_bytes(resp.body.len()),
+                                    ],
+                                )
+                            ))
+                            .size(13.0),
+                        );
                     });
                     info_row(ui, tr("URL"), |ui| {
-                        ui.add(egui::Label::new(RichText::new(&resp.url).monospace()).selectable(true).wrap());
+                        ui.add(
+                            egui::Label::new(RichText::new(&resp.url).font(theme::mono(12.5)))
+                                .selectable(true)
+                                .truncate(),
+                        );
                     });
-                });
-                if !resp.redirects.is_empty() {
-                    ui.add_space(16.0);
-                    detail_heading(ui, icons::ARROW_BEND_UP_LEFT, tr("Redirects"));
-                    kit::card(ui).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                },
+            );
+            if !resp.redirects.is_empty() {
+                titled_card(
+                    ui,
+                    tr("Redirects"),
+                    |_| {},
+                    |ui| {
+                        ui.add_space(8.0);
                         for (i, r) in resp.redirects.iter().chain(std::iter::once(&resp.url)).enumerate() {
                             ui.horizontal(|ui| {
+                                ui.set_min_height(26.0);
                                 let last = i == resp.redirects.len();
                                 let n =
                                     RichText::new(format!("{}", i + 1)).font(theme::medium(11.5)).color(p.text_muted);
                                 ui.add_sized([18.0, 20.0], egui::Label::new(n));
-                                ui.add(egui::Label::new(RichText::new(r).monospace()).selectable(true).truncate());
+                                ui.add(
+                                    egui::Label::new(RichText::new(r).font(theme::mono(12.0)))
+                                        .selectable(true)
+                                        .truncate(),
+                                );
                                 if last {
                                     kit::status_pill(ui, resp.status, "");
                                 }
                             });
                         }
-                    });
-                }
+                    },
+                );
             }
-            if let Some(sent) = &exec.sent {
-                ui.add_space(16.0);
-                detail_heading(ui, icons::PAPER_PLANE_RIGHT, tr("Request sent"));
-                ui.horizontal(|ui| {
+        }
+        if let Some(sent) = &exec.sent {
+            kit::card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                hrow(ui, 24.0, |ui| {
                     ui.label(widgets::method_badge(&sent.method, dark));
-                    ui.add(egui::Label::new(RichText::new(&sent.url).monospace()).selectable(true).wrap());
+                    ui.label(kit::section_title(tr("Request sent")));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if exec.prepared.is_some()
+                            && kit::ghost(ui, Some(icons::TERMINAL), tr("Copy as cURL")).clicked()
+                        {
+                            actions.copy_curl = true;
+                        }
+                    });
                 });
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(RichText::new(&sent.url).font(theme::mono(12.0)).color(p.text_muted))
+                        .selectable(true)
+                        .wrap(),
+                );
                 if let Some(b) = sent.body_size {
+                    ui.add_space(2.0);
                     ui.label(kit::hint(ui, &trf("Body: {}", &[&ternarywire_core::util::human_bytes(b)])));
                 }
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 let rows: Vec<Vec<String>> = sent.headers.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect();
-                read_table(ui, "sent-headers", &[tr("Key"), tr("Value")], &[0.32, 0.68], &rows);
-            }
-            if !exec.auth_notes.is_empty() {
-                ui.add_space(16.0);
-                detail_heading(ui, icons::KEY, tr("Authorization"));
-                for n in &exec.auth_notes {
-                    banner(ui, icons::INFO, p.info, n);
-                    ui.add_space(4.0);
-                }
-            }
-            if !exec.console.is_empty() {
-                ui.add_space(16.0);
-                detail_heading(ui, icons::TERMINAL, tr("Console"));
-                egui::Frame::new()
-                    .fill(p.chrome)
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
+                read_table(ui, "sent-headers", &[tr("Header"), tr("Value")], &[0.38, 0.62], &rows);
+            });
+        }
+        if !exec.auth_notes.is_empty() {
+            titled_card(
+                ui,
+                tr("Authorization"),
+                |_| {},
+                |ui| {
+                    for n in &exec.auth_notes {
+                        ui.add_space(8.0);
+                        kit::banner(ui, Tone::Info, icons::INFO, n);
+                    }
+                },
+            );
+        }
+        if !exec.console.is_empty() {
+            titled_card(
+                ui,
+                tr("Console"),
+                |_| {},
+                |ui| {
+                    ui.add_space(8.0);
+                    kit::well(ui).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 3.0;
                         for l in &exec.console {
@@ -3412,18 +4379,18 @@ fn details_view(ui: &mut Ui, exec: &Execution) {
                                 _ => p.text,
                             };
                             ui.horizontal_top(|ui| {
-                                ui.label(RichText::new(&l.phase).monospace().size(11.0).color(p.text_faint));
+                                ui.label(RichText::new(&l.phase).font(theme::mono(11.0)).color(p.text_faint));
                                 ui.add(
-                                    egui::Label::new(RichText::new(&l.message).monospace().size(11.5).color(color))
+                                    egui::Label::new(RichText::new(&l.message).font(theme::mono(11.5)).color(color))
                                         .selectable(true)
                                         .wrap(),
                                 );
                             });
                         }
                     });
-            }
-            ui.add_space(8.0);
-        });
+                },
+            );
+        }
     });
 }
 
@@ -3438,6 +4405,126 @@ fn open_visualization(exec: &Execution) {
     }
 }
 
+/// The response pane of a running GraphQL subscription.
+fn subscription_panel(ui: &mut Ui, sub: &GqlSubscription, panel: &mut PanelMode, side: bool, actions: &mut Actions) {
+    let p = theme::pal(ui);
+    kit::bar_ex(ui, size::ACTION_ROW, 10.0, true, |ui| {
+        ui.add_space(4.0);
+        let tone = if sub.status.starts_with("Error") {
+            Tone::Err
+        } else if sub.done {
+            Tone::Neutral
+        } else {
+            Tone::Ok
+        };
+        kit::pill_ex(ui, &sub.status, tone, PillOpts { large: true, dot: true, live: !sub.done, ..Default::default() });
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            kit::metric(ui, icons::CHATS, &trf("{} events", &[&sub.messages.len()]));
+            kit::metric(
+                ui,
+                icons::TIMER,
+                &ternarywire_core::util::human_ms(sub.started.elapsed().as_secs_f64() * 1000.0),
+            );
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let icon = if side { icons::CARET_RIGHT } else { icons::CARET_DOWN };
+            if kit::icon_button_sm(ui, icon, tr("Minimize response")).clicked() {
+                *panel = PanelMode::Minimized;
+            }
+            let maximized = *panel == PanelMode::Maximized;
+            let (icon, tip) = if maximized {
+                (icons::ARROWS_IN, tr("Restore layout"))
+            } else {
+                (icons::ARROWS_OUT, tr("Maximize response"))
+            };
+            if kit::icon_button_ex(ui, icon, tip, maximized, 22.0).clicked() {
+                *panel = if maximized { PanelMode::Normal } else { PanelMode::Maximized };
+            }
+            ui.add_space(-4.0);
+            kit::vdivider(ui, 18.0);
+            ui.add_space(-4.0);
+            let (icon, label) = if sub.done { (icons::X, tr("Close")) } else { (icons::STOP, tr("Stop")) };
+            if kit::button(ui, Kind::Secondary, Size::Sm, label, ButtonOpts { icon: Some(icon), ..Default::default() })
+                .clicked()
+            {
+                actions.cancel = true;
+            }
+        });
+    });
+    kit::bar(ui, size::TABS, true, |ui| {
+        ui.label(kit::section_title(tr("Subscription")));
+    });
+    if sub.messages.is_empty() {
+        center_v(ui, ui.make_persistent_id("sub-empty"), |ui| {
+            empty_block(
+                ui,
+                icons::BROADCAST,
+                false,
+                tr("Waiting for events"),
+                tr("Events the server sends appear here."),
+                |_| {},
+            );
+        });
+        return;
+    }
+    egui::ScrollArea::vertical().id_salt("gql-sub").stick_to_bottom(true).auto_shrink([false; 2]).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 16 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 8.0;
+            for (at, text) in &sub.messages {
+                let t = chrono::DateTime::from_timestamp_millis(*at)
+                    .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
+                    .unwrap_or_default();
+                kit::card(ui).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(format!("{} {t}", icons::ARROW_DOWN)).size(11.5).color(p.text_muted));
+                    ui.add(egui::Label::new(RichText::new(text).font(theme::mono(12.0))).selectable(true));
+                });
+            }
+        });
+    });
+}
+
+/// The minimized response beside the request: a narrow rail with the
+/// buttons to bring it back and the outcome.
+fn minimized_rail(ui: &mut Ui, tab: &mut RequestTab) {
+    let p = theme::pal(ui);
+    let rect = ui.max_rect();
+    let bar = ui.interact(rect, ui.make_persistent_id("resp-min-rail"), Sense::click());
+    if bar.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let bar = bar.on_hover_text(tr("Show the response"));
+    widgets::a11y_button(&bar, tr("Show the response"));
+    let mut restore = bar.clicked();
+    let resp = tab.result.as_ref().and_then(|r| r.exec.response.as_ref());
+    let failed = tab.result.as_ref().is_some_and(|r| r.exec.error.is_some());
+    ui.vertical_centered(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.add_space(14.0);
+        if kit::icon_button_sm(ui, icons::CARET_LEFT, tr("Restore layout")).clicked() {
+            restore = true;
+        }
+        if kit::icon_button_sm(ui, icons::ARROWS_OUT, tr("Maximize response")).clicked() {
+            tab.panel = PanelMode::Maximized;
+        }
+        ui.add_space(4.0);
+        if tab.running.is_some() {
+            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+            spinning_icon(ui, r.center(), icons::CIRCLE_NOTCH, 14.0, p.info);
+        } else if let Some(resp) = resp {
+            let (fg, _) = p.tone(theme::status_tone(resp.status));
+            ui.label(RichText::new(resp.status.to_string()).font(theme::semibold(11.5)).color(fg))
+                .on_hover_text(format!("{} {}", resp.status, resp.status_text));
+        } else if failed {
+            ui.label(RichText::new(icons::WARNING_CIRCLE).font(theme::icon_font(15.0)).color(p.err));
+        }
+    });
+    if restore {
+        tab.panel = PanelMode::Normal;
+    }
+}
 /// Starts a GraphQL subscription over WebSocket (graphql-transport-ws; the
 /// legacy graphql-ws protocol is accepted too).
 fn start_subscription(
@@ -3591,16 +4678,22 @@ fn fetch_schema(
 // views (candidates for kit.rs).
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // Shared with the other views.
 pub(crate) fn body_size(ui: &Ui) -> f32 {
-    ui.style().text_styles.get(&egui::TextStyle::Body).map(|f| f.size).unwrap_or(13.5)
-}
-
-pub(crate) fn small_size(ui: &Ui) -> f32 {
-    ui.style().text_styles.get(&egui::TextStyle::Small).map(|f| f.size).unwrap_or(11.5)
+    ui.style().text_styles.get(&egui::TextStyle::Body).map(|f| f.size).unwrap_or(13.0)
 }
 
 pub(crate) fn mono_size(ui: &Ui) -> f32 {
     ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5)
+}
+
+/// A left-to-right row exactly `height` high with its content centered
+/// vertically (`ui.horizontal` rows are at least the interact height, 30).
+pub(crate) fn hrow<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), height), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_height(height);
+        add(ui)
+    })
 }
 
 /// One line of text cut with an ellipsis at `width`.
@@ -3611,183 +4704,32 @@ pub(crate) fn elide(
     color: Color32,
     width: f32,
 ) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat::simple(font, color));
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(10.0));
-    ui.painter().layout_job(job)
+    kit::elide(ui, text, font, color, width)
 }
 
 /// A collapsible section header (caret, title, optional count). Returns
 /// whether it is open.
 pub(crate) fn disclosure(ui: &mut Ui, id: egui::Id, title: &str, count: Option<usize>, default_open: bool) -> bool {
-    let p = theme::pal(ui);
-    let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(default_open));
-    let row = ui.horizontal(|ui| {
-        ui.set_height(26.0);
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
-        ui.add(
-            egui::Label::new(RichText::new(caret).font(theme::icon_font(12.0)).color(p.text_muted)).selectable(false),
-        );
-        ui.add(egui::Label::new(kit::section_title(title)).selectable(false));
-        if let Some(n) = count {
-            kit::pill(ui, &n.to_string(), p.text_muted);
-        }
-    });
-    let r = ui.interact(row.response.rect, id.with("toggle"), Sense::click());
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
-    r.ctx.accesskit_node_builder(r.id, |n| n.set_expanded(open));
-    if r.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if r.clicked() {
-        open = !open;
-        ui.data_mut(|d| d.insert_temp(id, open));
-    }
-    open
+    kit::disclosure(ui, id, title, count, default_open)
 }
 
-/// A message on a soft fill of `color` with an icon (info, warning, error).
-pub(crate) fn banner(ui: &mut Ui, icon: &str, color: Color32, text: &str) {
-    banner_with(ui, icon, color, text, |_| {});
-}
-
-/// [`banner`] with actions on the right.
-pub(crate) fn banner_with(ui: &mut Ui, icon: &str, color: Color32, text: &str, actions: impl FnOnce(&mut Ui)) {
-    let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    // The actions' width is measured on the previous frame so the text can
-    // wrap in the space left of them.
-    let width_id = ui.scope_id().with(("banner-actions", text));
-    let actions_w: f32 = ui.data(|d| d.get_temp(width_id).unwrap_or(0.0));
-    egui::Frame::new()
-        .fill(theme::soft(color, if dark { 0.12 } else { 0.07 }))
-        .stroke(Stroke::new(1.0, theme::soft(color, if dark { 0.30 } else { 0.24 })))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 9))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(color));
-                // The actions' row always takes one item spacing, even when empty.
-                let text_w = (ui.available_width() - actions_w - 8.0).max(80.0);
-                ui.allocate_ui_with_layout(vec2(text_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_width(text_w);
-                    ui.add_space(1.0);
-                    ui.label(RichText::new(text).color(p.text));
-                });
-                let r = ui.horizontal(actions);
-                let w = r.response.rect.width();
-                if (w - actions_w).abs() > 0.5 {
-                    ui.data_mut(|d| d.insert_temp(width_id, w));
-                    ui.ctx().request_repaint();
-                }
-            });
-        });
-}
-
-/// An icon on a soft rounded square (view headers, list items).
-pub(crate) fn icon_tile(ui: &mut Ui, icon: &str, color: Color32, side: f32) -> egui::Response {
-    let dark = ui.visuals().dark_mode;
-    let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same((side / 4.0) as u8),
-        theme::soft(color, if dark { 0.16 } else { 0.10 }),
-    );
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font((side * 0.55).round()), color);
-    resp
-}
-
-/// Title row of a view: icon tile, title and subtitle, actions on the right
-/// (added right to left).
-pub(crate) fn view_header(
-    ui: &mut Ui,
-    icon: &str,
-    color: Color32,
-    title: &str,
-    subtitle: &str,
-    actions: impl FnOnce(&mut Ui),
-) {
-    let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(40.0);
-        ui.spacing_mut().item_spacing.x = 10.0;
-        icon_tile(ui, icon, color, 36.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(16.0)).color(p.text)).truncate());
-            if !subtitle.is_empty() {
-                ui.add(egui::Label::new(RichText::new(subtitle).small().color(p.text_muted)).truncate());
-            }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            actions(ui);
-        });
-    });
-}
-
-/// A row in a settings form: label (and help under it) in a column on the
-/// left, the control on the right. Stacks when the space is narrow.
-pub(crate) fn form_row<R>(ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let p = theme::pal(ui);
-    let width = ui.available_width();
-    let label_ui = |ui: &mut Ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(RichText::new(label).font(theme::medium(13.0)).color(p.text));
-        if !help.is_empty() {
-            ui.label(RichText::new(help).small().color(p.text_muted));
-        }
-    };
-    if width < 480.0 {
-        return ui
-            .vertical(|ui| {
-                label_ui(ui);
-                ui.add_space(4.0);
-                add(ui)
-            })
-            .inner;
-    }
-    let label_w = (width * 0.36).clamp(160.0, 260.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(vec2(label_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.set_width(label_w);
-            ui.add_space(4.0);
-            label_ui(ui);
-        });
-        ui.add_space(12.0);
-        ui.vertical(|ui| add(ui)).inner
-    })
-    .inner
-}
-
-/// A hairline between form rows inside a card.
+/// A hairline between form rows inside a [`settings_group`] (11 px around
+/// it, like `.frow`).
+#[allow(dead_code)] // Shared with the other views.
 pub(crate) fn form_divider(ui: &mut Ui) {
     let p = theme::pal(ui);
-    ui.add_space(6.0);
+    ui.add_space(11.0);
     let y = ui.cursor().top();
     let r = ui.max_rect();
     ui.painter().hline(r.left()..=r.right(), y, Stroke::new(1.0, p.border));
-    ui.add_space(7.0);
+    ui.add_space(11.0);
 }
 
-/// A titled card of form rows.
-pub(crate) fn settings_group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.set_height(22.0);
-        ui.label(kit::section_title(title));
-    });
-    ui.add_space(4.0);
-    kit::card(ui).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        add(ui);
-    });
-}
-
-/// A read-only table in the style of `widgets::kv_table`: header row,
-/// hairlines, wrapped cells, hover highlight, a copy button on the hovered
-/// row and a context menu. `widths` are column fractions.
+/// A read-only table (`.tbl` in a `.tbl-wrap`): a 30 px header on `well`,
+/// 34 px rows with hairlines, one-line cells (whole on hover), hover fill,
+/// a copy button on the hovered row and a context menu. `widths` are column
+/// fractions. With two columns the first (names) is muted; with more, the
+/// last (notes) is muted proportional text.
 pub(crate) fn read_table(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -3797,137 +4739,114 @@ pub(crate) fn read_table(
 ) {
     let p = theme::pal(ui);
     let id = ui.make_persistent_id(id);
-    const HEAD: f32 = 28.0;
+    const HEAD: f32 = 30.0;
     const COPY: f32 = 34.0;
+    const PAD: f32 = 12.0;
     let width = ui.available_width().max(220.0);
     let left = ui.cursor().left();
     let top = ui.cursor().top();
-    let inner = width - COPY;
     let mut xs = vec![left];
     for w in widths {
         let last = *xs.last().unwrap_or(&left);
-        xs.push(last + inner * w);
+        xs.push(last + width * w);
     }
-    let mono = theme::mono(mono_size(ui));
+    let bg = ui.painter().add(egui::Shape::Noop);
     let head = Rect::from_min_size(pos2(left, top), vec2(width, HEAD));
-    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.chrome);
+    ui.painter().rect_filled(head, CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 }, p.well);
     for (c, label) in columns.iter().enumerate() {
         ui.painter().text(
-            pos2(xs[c] + 10.0, head.center().y),
+            pos2(xs[c] + PAD, head.center().y),
             Align2::LEFT_CENTER,
             *label,
             theme::medium(11.5),
             p.text_muted,
         );
     }
+    ui.painter().hline(left..=left + width, head.bottom() - 0.5, Stroke::new(1.0, p.border));
     let mut y = head.bottom();
+    let n_cols = columns.len();
     for (i, row) in rows.iter().enumerate() {
+        // One line per cell (cut with an ellipsis; the hover shows it whole).
         let galleys: Vec<_> = row
             .iter()
             .enumerate()
-            .take(columns.len())
+            .take(n_cols)
             .map(|(c, text)| {
-                let w = (xs[c + 1] - xs[c] - 20.0).max(20.0);
-                let color = if c == 0 {
-                    p.text
-                } else if c + 1 == columns.len() && columns.len() > 2 {
-                    p.text_muted
+                let w = (xs[c + 1].min(left + width) - xs[c] - 2.0 * PAD).max(20.0);
+                let (font, color) = if n_cols == 2 && c == 0 {
+                    (theme::mono(12.5), p.text_muted)
+                } else if n_cols > 2 && c + 1 == n_cols {
+                    (egui::FontId::proportional(12.5), p.text_muted)
                 } else {
-                    p.text
+                    (theme::mono(12.5), p.text)
                 };
-                (ui.painter().layout(text.clone(), mono.clone(), color, w), color)
+                let line = text.replace(['\n', '\r'], " ");
+                (elide(ui, &line, font, color, w), color)
             })
             .collect();
-        let h = (galleys.iter().map(|(g, _)| g.size().y).fold(0.0, f32::max) + 14.0).max(30.0);
+        let h = 34.0;
         let row_rect = Rect::from_min_size(pos2(left, y), vec2(width, h));
-        ui.painter().hline(left..=left + width, y, Stroke::new(1.0, p.border));
-        let resp = ui.interact(row_rect, id.with(i), Sense::click());
+        if i > 0 {
+            ui.painter().hline(left..=left + width, y, Stroke::new(1.0, p.border));
+        }
+        let elided = galleys.iter().any(|(g, _)| g.elided);
+        let mut resp = ui.interact(row_rect, id.with(i), Sense::click());
+        if elided {
+            resp = resp.on_hover_ui(|ui| {
+                ui.set_max_width(480.0);
+                for (c, text) in row.iter().enumerate().take(n_cols) {
+                    ui.label(RichText::new(text).font(if c + 1 == n_cols && n_cols > 2 {
+                        egui::FontId::proportional(12.0)
+                    } else {
+                        theme::mono(12.0)
+                    }));
+                }
+            });
+        }
         let hovered = ui.rect_contains_pointer(row_rect);
         if hovered {
-            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.5)), 0.0, p.faint_row());
+            let last = i + 1 == rows.len();
+            let r = row_rect
+                .shrink2(vec2(1.0, 0.0))
+                .with_min_y(y + 0.5)
+                .with_max_y(row_rect.bottom() - if last { 1.0 } else { 0.0 });
+            let radius = if last { CornerRadius { nw: 0, ne: 0, sw: 8, se: 8 } } else { CornerRadius::ZERO };
+            ui.painter().rect_filled(r, radius, p.well);
         }
         for (c, (g, color)) in galleys.into_iter().enumerate() {
-            ui.painter().galley(pos2(xs[c] + 10.0, y + 7.0), g, color);
+            ui.painter().galley(pos2(xs[c] + PAD, row_rect.center().y - g.size().y / 2.0), g, color);
         }
         let row_text = if row.len() == 2 { format!("{}: {}", row[0], row[1]) } else { row.join("\t") };
         if hovered {
-            let d = Rect::from_center_size(pos2(left + width - COPY / 2.0, y + 15.0), vec2(24.0, 24.0));
+            // The copy button covers the end of the row.
+            let cover =
+                Rect::from_min_max(pos2(left + width - COPY - 8.0, y + 1.0), pos2(left + width - 1.0, y + h - 1.0));
+            ui.painter().rect_filled(cover, 0.0, p.well);
+            let d = Rect::from_center_size(pos2(left + width - COPY / 2.0, y + h / 2.0), vec2(22.0, 22.0));
             let r = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(d), |ui| {
-                    kit::icon_button_ex(ui, icons::COPY, tr("Copy"), false, 24.0)
-                })
-                .inner;
+                .new_child(egui::UiBuilder::new().max_rect(d))
+                .add(|ui: &mut Ui| kit::icon_button_sm(ui, icons::COPY, tr("Copy")));
             if r.clicked() {
                 ui.ctx().copy_text(row_text.clone());
             }
         }
         resp.context_menu(|ui| {
-            if row.len() > 1 && ui.button(kit::with_icon(icons::COPY, tr("Copy value"))).clicked() {
+            if row.len() > 1 && kit::menu_item(ui, Some(icons::COPY), tr("Copy value"), None).clicked() {
                 ui.ctx().copy_text(row[1].clone());
-                ui.close();
             }
-            if ui.button(kit::with_icon(icons::COPY, tr("Copy name"))).clicked() {
+            if kit::menu_item(ui, Some(icons::COPY), tr("Copy name"), None).clicked() {
                 ui.ctx().copy_text(row[0].clone());
-                ui.close();
             }
-            if ui.button(kit::with_icon(icons::CLIPBOARD_TEXT, tr("Copy row"))).clicked() {
+            if kit::menu_item(ui, Some(icons::CLIPBOARD_TEXT), tr("Copy row"), None).clicked() {
                 ui.ctx().copy_text(row_text.clone());
-                ui.close();
             }
         });
         y += h;
     }
     let table = Rect::from_min_max(pos2(left, top), pos2(left + width, y));
-    for x in &xs[1..columns.len()] {
-        ui.painter().vline(*x, table.y_range(), Stroke::new(1.0, p.border));
-    }
-    ui.painter().rect_stroke(table, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.painter().set(bg, egui::Shape::rect_filled(table, CornerRadius::same(9), p.surface));
+    ui.painter().rect_stroke(table, CornerRadius::same(9), Stroke::new(1.0, p.border), StrokeKind::Inside);
     ui.advance_cursor_after_rect(table);
-}
-
-/// Number cards laid out in rows of equal width (at least `min` wide).
-pub(crate) fn stat_cards(ui: &mut Ui, min: f32, cards: &[(&str, String, Option<Color32>, String)]) {
-    if cards.is_empty() {
-        return;
-    }
-    let gap = 10.0;
-    let avail = ui.available_width();
-    let per_row = (((avail + gap) / (min + gap)).floor() as usize).clamp(1, cards.len());
-    let rows = cards.len().div_ceil(per_row);
-    // Spread the cards evenly over the rows.
-    let per_row = cards.len().div_ceil(rows);
-    let w = ((avail - gap * (per_row as f32 - 1.0)) / per_row as f32).floor();
-    for (r, chunk) in cards.chunks(per_row).enumerate() {
-        if r > 0 {
-            ui.add_space(gap);
-        }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for (label, value, color, hint) in chunk {
-                stat_card(ui, w, label, value, *color, hint);
-            }
-        });
-    }
-}
-
-/// A number card: label, big value (colored when given) and a hint line.
-pub(crate) fn stat_card(ui: &mut Ui, width: f32, label: &str, value: &str, color: Option<Color32>, hint: &str) {
-    let p = theme::pal(ui);
-    kit::card(ui).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-        // Inner margins and the 1 px stroke on both sides.
-        ui.set_width(width - 30.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(egui::Label::new(RichText::new(label).small().color(p.text_muted)).truncate());
-            ui.add(
-                egui::Label::new(RichText::new(value).font(theme::semibold(20.0)).color(color.unwrap_or(p.text)))
-                    .truncate(),
-            );
-            if !hint.is_empty() {
-                ui.add(egui::Label::new(RichText::new(hint).small().color(p.text_faint)).truncate());
-            }
-        });
-    });
 }
 
 #[cfg(test)]

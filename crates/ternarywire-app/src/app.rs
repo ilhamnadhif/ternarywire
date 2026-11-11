@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use egui::{Key, KeyboardShortcut, Modifiers, RichText};
+use egui::{Key, KeyboardShortcut, Modifiers};
 
 use ternarywire_core::environment::Environment;
 use ternarywire_core::history::HistoryEntry;
@@ -274,6 +274,8 @@ pub enum SidebarTab {
     History,
     Apis,
     Flows,
+    /// Mock servers, webhook listeners and capture proxies (the open tool tabs).
+    Servers,
 }
 
 pub struct TernaryWireApp {
@@ -365,6 +367,8 @@ pub fn protocol_icon(name: &str) -> &'static str {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewItem {
     Request,
+    /// A request with a GraphQL body.
+    GraphQl,
     WebSocket,
     /// The n-th entry of [`protocol_templates`].
     Protocol(usize),
@@ -373,6 +377,8 @@ pub enum NewItem {
     Flow,
     Collection,
     Environment,
+    /// An OpenAPI spec in `specs/`.
+    Spec,
 }
 
 impl NewItem {
@@ -381,6 +387,7 @@ impl NewItem {
         use crate::icons;
         let mut items = vec![
             (NewItem::Request, icons::GLOBE, "New Request"),
+            (NewItem::GraphQl, icons::GRAPH, "New GraphQL request"),
             (NewItem::WebSocket, icons::PLUGS_CONNECTED, "New WebSocket"),
         ];
         for (i, (label, name, _)) in protocol_templates().into_iter().enumerate() {
@@ -392,6 +399,7 @@ impl NewItem {
             (NewItem::Flow, icons::FLOW_ARROW, "New flow"),
             (NewItem::Collection, icons::STACK, "New Collection"),
             (NewItem::Environment, icons::GLOBE_SIMPLE, "New Environment"),
+            (NewItem::Spec, icons::FILE_CODE, "New API spec"),
         ]);
         items
     }
@@ -648,6 +656,12 @@ impl TernaryWireApp {
     /// script that crashes, hangs in native code or uses too much memory
     /// cannot take the app down.
     fn script_engine(settings: &AppSettings) -> Arc<dyn ScriptEngine> {
+        // The test binary can't serve as a script worker (libtest rejects the
+        // worker flag): tests, including the off-screen screenshots, run
+        // scripts in process.
+        if cfg!(test) {
+            return Arc::new(ternarywire_script::BoaEngine::new());
+        }
         let config = ternarywire_script::IsolationConfig {
             memory_limit_bytes: settings.script_memory_mb.saturating_mul(1024 * 1024),
             ..Default::default()
@@ -878,6 +892,7 @@ impl TernaryWireApp {
     pub fn create_new(&mut self, what: NewItem) {
         match what {
             NewItem::Request => self.new_request_tab(),
+            NewItem::GraphQl => self.new_graphql_tab(),
             NewItem::WebSocket => self.new_ws_tab(),
             NewItem::Protocol(i) => {
                 if let Some((_, name, kind)) = protocol_templates().into_iter().nth(i) {
@@ -897,6 +912,7 @@ impl TernaryWireApp {
             }
             NewItem::Collection => self.dialog = Some(Dialog::prompt_new_collection()),
             NewItem::Environment => self.dialog = Some(Dialog::prompt_new_environment()),
+            NewItem::Spec => crate::spec_tab::new_spec(self, false),
         }
     }
 
@@ -1635,173 +1651,309 @@ impl TernaryWireApp {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        use crate::{icons, kit};
-        let p = crate::theme::pal(ui);
+        use crate::{icons, kit, theme};
+        let p = theme::pal(ui);
+        let window_w = ui.ctx().content_rect().width();
+        // The bar's empty space moves the window; a double-click zooms it (macOS
+        // draws no title bar of its own over it).
+        #[cfg(target_os = "macos")]
+        {
+            let bar = ui.max_rect().expand2(egui::vec2(14.0, 0.0));
+            let r = ui.interact(bar, ui.scope_id().with("titlebar-drag"), egui::Sense::click_and_drag());
+            if r.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if r.double_clicked() {
+                let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+            }
+        }
         ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add(
-                egui::Image::new(egui::include_image!("../assets/icon-256.png"))
-                    .fit_to_exact_size(egui::vec2(22.0, 22.0))
-                    .corner_radius(5),
-            );
-            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // macOS draws the traffic lights over the left end of the bar.
+            #[cfg(target_os = "macos")]
+            ui.add_space(70.0);
+            // Workspace switcher: app icon, workspace name, chevron.
             let name = self.ws.data.name.clone();
-            let ws = kit::button_ex(ui, kit::Kind::Ghost, None, &format!("{name}  {}", icons::CARET_DOWN), false)
-                .on_hover_text(self.ws.root().display().to_string());
+            let name_g = ui.painter().layout_no_wrap(name.clone(), theme::semibold(13.0), p.text);
+            let (rect, ws) = ui.allocate_exact_size(
+                egui::vec2(6.0 + 20.0 + 8.0 + name_g.size().x + 8.0 + 12.0 + 8.0, 30.0),
+                egui::Sense::click(),
+            );
+            if ws.hovered() {
+                ui.painter().rect_filled(rect, egui::CornerRadius::same(7), p.hover);
+            }
+            egui::Image::new(egui::include_image!("../assets/icon-256.png")).corner_radius(5).paint_at(
+                ui,
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + 6.0, rect.center().y - 10.0),
+                    egui::vec2(20.0, 20.0),
+                ),
+            );
+            ui.painter().galley(
+                egui::pos2(rect.left() + 34.0, rect.center().y - name_g.size().y / 2.0),
+                name_g,
+                p.text,
+            );
+            ui.painter().text(
+                egui::pos2(rect.right() - 14.0, rect.center().y),
+                egui::Align2::CENTER_CENTER,
+                icons::CARET_DOWN,
+                theme::icon_font(12.0),
+                p.text_faint,
+            );
+            let root = self.ws.root().to_path_buf();
+            let ws = ws.on_hover_text(root.display().to_string());
             crate::widgets::a11y_name(&ws, &format!("{} {name}", tr("Workspace")));
             egui::Popup::menu(&ws).show(|ui| {
-                if ui.button(kit::with_icon(icons::FOLDER_OPEN, tr("Open workspace…"))).clicked() {
-                    ui.close();
+                ui.set_min_width(300.0);
+                kit::menu_header(ui, tr("Workspace"));
+                let here = tilde_path(&root);
+                kit::menu_item_ex(
+                    ui,
+                    kit::MenuItem { checked: Some(true), label: &name, detail: Some(&here), ..Default::default() },
+                );
+                let recents: Vec<PathBuf> =
+                    self.settings.recent_workspaces.iter().filter(|p| p.as_path() != root).cloned().collect();
+                for path in recents {
+                    let label = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let detail = tilde_path(&path);
+                    let item = kit::MenuItem {
+                        icon: Some(icons::FOLDER_SIMPLE),
+                        label: &label,
+                        detail: Some(&detail),
+                        ..Default::default()
+                    };
+                    if kit::menu_item_ex(ui, item).on_hover_text(path.display().to_string()).clicked() {
+                        self.open_workspace(path, None);
+                    }
+                }
+                kit::menu_sep(ui);
+                if kit::menu_item(ui, Some(icons::FOLDER_OPEN), tr("Open workspace…"), None).clicked() {
                     self.pick_workspace();
                 }
-                if ui.button(kit::with_icon(icons::FOLDER_PLUS, tr("New workspace…"))).clicked() {
-                    ui.close();
+                if kit::menu_item(ui, Some(icons::FOLDER_PLUS), tr("New workspace…"), None).clicked() {
                     self.dialog = Some(Dialog::new_workspace());
+                }
+                let reveal =
+                    if cfg!(target_os = "macos") { tr("Reveal in Finder") } else { tr("Reveal in file manager") };
+                if kit::menu_item(ui, Some(icons::ARROW_SQUARE_OUT), reveal, None).clicked() {
+                    let _ = open::that(self.ws.root());
                 }
                 // macOS has it in the app menu of the menu bar.
                 #[cfg(not(target_os = "macos"))]
-                if ui.button(kit::with_icon(icons::ARROWS_CLOCKWISE, tr("Check for updates…"))).clicked() {
-                    ui.close();
+                if kit::menu_item(ui, Some(icons::ARROWS_CLOCKWISE), tr("Check for updates…"), None).clicked() {
                     crate::update::check(self, true);
-                }
-                if ui.button(kit::with_icon(icons::ARROW_SQUARE_OUT, tr("Reveal in file manager"))).clicked() {
-                    ui.close();
-                    let _ = open::that(self.ws.root());
-                }
-                let recents: Vec<PathBuf> =
-                    self.settings.recent_workspaces.iter().filter(|p| p.as_path() != self.ws.root()).cloned().collect();
-                if !recents.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new(tr("Recent workspaces")).small().weak());
-                    for p in recents {
-                        let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        if ui
-                            .button(kit::with_icon(icons::FOLDER_SIMPLE, &label))
-                            .on_hover_text(p.display().to_string())
-                            .clicked()
-                        {
-                            ui.close();
-                            self.open_workspace(p, None);
-                        }
-                    }
                 }
             });
             kit::vdivider(ui, 18.0);
-            let new = kit::button_ex(ui, kit::Kind::Ghost, Some(icons::PLUS), tr("New"), false);
-            egui::Popup::menu(&new).show(|ui| {
-                ui.set_min_width(220.0);
-                for (i, (what, icon, label)) in NewItem::all().into_iter().enumerate() {
-                    // Separators before the local tools and before collections.
-                    if i > 0 && matches!(what, NewItem::Webhook | NewItem::Collection) {
-                        ui.separator();
-                    }
-                    if ui.button(kit::with_icon(icon, tr(label))).clicked() {
-                        ui.close();
-                        self.create_new(what);
-                    }
-                }
-            });
-            if kit::button_ex(ui, kit::Kind::Ghost, Some(icons::DOWNLOAD_SIMPLE), tr("Import"), false).clicked() {
+            let new = kit::button(
+                ui,
+                kit::Kind::Ghost,
+                kit::Size::Sm,
+                tr("New"),
+                kit::ButtonOpts { icon: Some(icons::PLUS), caret: true, ..Default::default() },
+            );
+            egui::Popup::menu(&new).show(|ui| self.new_menu(ui));
+            if window_w > 1000.0
+                && kit::button_ex(ui, kit::Kind::Ghost, Some(icons::DOWNLOAD_SIMPLE), tr("Import"), true).clicked()
+            {
                 self.dialog = Some(Dialog::import());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = 2.0;
                 if kit::icon_button(ui, icons::LOCK_KEY, tr("Vault")).clicked() {
                     self.dialog = Some(Dialog::vault());
                 }
                 if kit::icon_button(ui, icons::COOKIE, tr("Cookies")).clicked() {
                     self.dialog = Some(Dialog::cookies());
                 }
+                ui.add_space(2.0);
+                kit::vdivider(ui, 18.0);
+                ui.add_space(2.0);
                 crate::env_tab::environment_selector(self, ui);
                 // Search, centered in the space that is left.
                 let free = ui.available_width();
-                let w = free.clamp(0.0, 420.0);
-                if w > 160.0 {
-                    ui.add_space(((free - w) / 2.0).max(0.0));
+                let w = (free - 16.0).min(460.0);
+                if w >= 150.0 {
+                    ui.add_space(((free - w) / 2.0).max(8.0));
                     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 30.0), egui::Sense::click());
-                    let r = r.on_hover_text(format!("{} (⌘K)", tr("Search requests")));
+                    let r =
+                        r.on_hover_text(format!("{} (⌘K) · {} (⇧⌘P)", tr("Search requests"), tr("Command palette")));
                     crate::widgets::a11y_button(&r, tr("Search requests"));
                     let painter = ui.painter();
-                    let fill = if r.hovered() { p.surface } else { p.hover };
-                    painter.rect(
-                        rect,
-                        egui::CornerRadius::same(8),
-                        fill,
-                        egui::Stroke::new(1.0, p.border),
-                        egui::StrokeKind::Inside,
-                    );
+                    let radius = egui::CornerRadius::same(8);
+                    if !ui.visuals().dark_mode {
+                        let shadow = egui::Shadow {
+                            offset: [0, 1],
+                            blur: 2,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(10),
+                        };
+                        painter.add(shadow.as_shape(rect, radius));
+                    }
+                    let stroke = if r.hovered() { p.border_strong } else { p.border };
+                    painter.rect(rect, radius, p.surface, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
                     painter.text(
-                        egui::pos2(rect.left() + 14.0, rect.center().y),
+                        egui::pos2(rect.left() + 17.0, rect.center().y),
                         egui::Align2::CENTER_CENTER,
                         icons::MAGNIFYING_GLASS,
-                        crate::theme::icon_font(14.0),
+                        theme::icon_font(14.0),
                         p.text_faint,
                     );
-                    painter.text(
-                        egui::pos2(rect.left() + 28.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        tr("Search requests"),
+                    let hint = kit::elide(
+                        ui,
+                        tr("Search requests, run a command…"),
                         egui::FontId::proportional(13.0),
                         p.text_faint,
+                        w - 30.0 - 44.0,
                     );
-                    painter.text(
-                        egui::pos2(rect.right() - 12.0, rect.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        "⌘K",
-                        egui::FontId::proportional(12.0),
+                    ui.painter().galley(
+                        egui::pos2(rect.left() + 30.0, rect.center().y - hint.size().y / 2.0),
+                        hint,
                         p.text_faint,
                     );
+                    let k = egui::Rect::from_min_size(
+                        egui::pos2(rect.right() - 6.0 - 32.0, rect.center().y - 9.0),
+                        egui::vec2(32.0, 18.0),
+                    );
+                    kit::paint_kbd(ui, k, "⌘K");
                     if r.clicked() {
-                        self.dialog = Some(Dialog::palette(true));
+                        self.dialog = Some(Dialog::palette(false));
                     }
                 }
             });
         });
     }
 
-    /// The icon rail at the far left: sidebar sections and settings.
-    fn rail(&mut self, ui: &mut egui::Ui) {
+    /// The New menu of the title bar and the tab strip's +: requests, local
+    /// servers and things to organize them with.
+    pub fn new_menu(&mut self, ui: &mut egui::Ui) {
         use crate::{icons, kit};
-        ui.vertical_centered(|ui| {
-            ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.y = 4.0;
-            for (tab, icon, label) in [
-                (SidebarTab::Collections, icons::STACK, tr("Collections")),
-                (SidebarTab::Environments, icons::GLOBE, tr("Environments")),
-                (SidebarTab::History, icons::CLOCK_COUNTER_CLOCKWISE, tr("History")),
-                (SidebarTab::Apis, icons::BRACKETS_CURLY, tr("APIs")),
-                (SidebarTab::Flows, icons::FLOW_ARROW, tr("Flows")),
-            ] {
-                let on = self.settings.ui.sidebar_visible && self.sidebar_tab == tab;
-                let r = kit::icon_button_ex(ui, icon, label, on, 36.0);
-                crate::widgets::a11y_tab(&r, label, self.sidebar_tab == tab);
-                if r.clicked() {
-                    if on {
-                        self.settings.ui.sidebar_visible = false;
-                    } else {
-                        self.sidebar_tab = tab;
-                        self.settings.ui.sidebar_visible = true;
-                    }
+        ui.set_min_width(240.0);
+        kit::menu_header(ui, tr("Requests"));
+        if kit::menu_item(ui, Some(icons::GLOBE), tr("HTTP request"), Some("⌘N")).clicked() {
+            self.new_request_tab();
+        }
+        if kit::menu_item(ui, Some(icons::GRAPH), tr("GraphQL request"), None).clicked() {
+            self.create_new(NewItem::GraphQl);
+        }
+        if kit::menu_item(ui, Some(icons::PLUGS_CONNECTED), tr("WebSocket"), None).clicked() {
+            self.new_ws_tab();
+        }
+        let templates = protocol_templates();
+        for name in ["Socket.IO", "MQTT", "gRPC", "MCP", "AI request"] {
+            if let Some((_, n, kind)) = templates.iter().find(|(_, n, _)| *n == name)
+                && kit::menu_item(ui, Some(protocol_icon(n)), tr(n), None).clicked()
+            {
+                self.new_proto_tab(n, kind.clone());
+            }
+        }
+        kit::menu_sep(ui);
+        kit::menu_header(ui, tr("Local servers"));
+        let mock = kit::menu_item_ex(
+            ui,
+            kit::MenuItem { icon: Some(icons::CUBE), label: tr("Mock server…"), submenu: true, ..Default::default() },
+        );
+        let collections: Vec<(Id, String)> =
+            self.ws.data.collections.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
+        egui::Popup::menu(&mock).open_memory(None).show(|ui| {
+            ui.set_min_width(200.0);
+            if collections.is_empty() {
+                ui.label(kit::hint(ui, tr("No collections yet")));
+            }
+            for (id, name) in &collections {
+                if kit::menu_item(ui, Some(icons::STACK), name, None).clicked() {
+                    self.open_mock(id.clone());
                 }
             }
+        });
+        if kit::menu_item(ui, Some(icons::WEBHOOKS_LOGO), tr("Webhook listener"), None).clicked() {
+            self.create_new(NewItem::Webhook);
+        }
+        if kit::menu_item(ui, Some(icons::BROADCAST), tr("Capture traffic (proxy)"), None).clicked() {
+            self.create_new(NewItem::Capture);
+        }
+        kit::menu_sep(ui);
+        kit::menu_header(ui, tr("Organize"));
+        if kit::menu_item(ui, Some(icons::STACK), tr("Collection"), None).clicked() {
+            self.create_new(NewItem::Collection);
+        }
+        if kit::menu_item(ui, Some(icons::GLOBE_SIMPLE), tr("Environment"), None).clicked() {
+            self.create_new(NewItem::Environment);
+        }
+        if kit::menu_item(ui, Some(icons::FLOW_ARROW), tr("Flow"), None).clicked() {
+            self.create_new(NewItem::Flow);
+        }
+        if kit::menu_item(ui, Some(icons::FILE_CODE), tr("API spec"), None).clicked() {
+            self.create_new(NewItem::Spec);
+        }
+    }
+
+    /// A new unsaved request with a GraphQL body.
+    pub fn new_graphql_tab(&mut self) {
+        let mut req = HttpRequest { method: "POST".into(), ..Default::default() };
+        req.body.mode = ternarywire_core::model::BodyMode::GraphQl;
+        let item = RequestItem::new(tr("Untitled Request"), req);
+        let mut tab = RequestTab::scratch(item);
+        tab.focus_url = true;
+        self.add_tab(TabKind::Request(Box::new(tab)));
+    }
+
+    /// The icon rail at the far left: sidebar sections, local servers, console and settings.
+    fn rail(&mut self, ui: &mut egui::Ui) {
+        use crate::{icons, theme};
+        let p = theme::pal(ui);
+        let running = self.tabs.iter().any(|t| match &t.kind {
+            TabKind::Mock(m) => m.server.is_some(),
+            TabKind::Webhook(w) => w.is_running(),
+            TabKind::Capture(c) => c.is_running(),
+            _ => false,
+        });
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add_space(4.0);
+            let section = |ui: &mut egui::Ui,
+                           app: &mut Self,
+                           tab: SidebarTab,
+                           icon: &str,
+                           label: &str,
+                           dot: Option<egui::Color32>| {
+                let on = app.settings.ui.sidebar_visible && app.sidebar_tab == tab;
+                let r = rail_button(ui, icon, label, on, dot);
+                crate::widgets::a11y_tab(&r, label, app.sidebar_tab == tab);
+                if r.clicked() {
+                    if on {
+                        app.settings.ui.sidebar_visible = false;
+                    } else {
+                        app.sidebar_tab = tab;
+                        app.settings.ui.sidebar_visible = true;
+                    }
+                }
+            };
+            section(ui, self, SidebarTab::Collections, icons::STACK, tr("Collections"), None);
+            section(ui, self, SidebarTab::Environments, icons::GLOBE, tr("Environments"), None);
+            section(ui, self, SidebarTab::History, icons::CLOCK_COUNTER_CLOCKWISE, tr("History"), None);
+            section(ui, self, SidebarTab::Apis, icons::BRACKETS_CURLY, tr("APIs"), None);
+            section(ui, self, SidebarTab::Flows, icons::FLOW_ARROW, tr("Flows"), None);
+            ui.add_space(4.0);
+            let (sep, _) = ui.allocate_exact_size(egui::vec2(22.0, 1.0), egui::Sense::hover());
+            ui.painter().rect_filled(sep, 0.0, p.border);
+            ui.add_space(4.0);
+            section(ui, self, SidebarTab::Servers, icons::BROADCAST, tr("Local servers"), running.then_some(p.ok));
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                if kit::icon_button_ex(ui, icons::GEAR_SIX, &format!("{} (⌘,)", tr("Settings")), false, 36.0).clicked()
-                {
+                ui.add_space(10.0);
+                if rail_button(ui, icons::GEAR_SIX, &format!("{} (⌘,)", tr("Settings")), false, None).clicked() {
                     self.dialog = Some(Dialog::settings(&self.settings));
                 }
                 let errors = self.console.iter().filter(|l| l.kind == ternarywire_runner::ConsoleKind::Error).count();
-                let r = kit::icon_button_ex(
+                let r = rail_button(
                     ui,
                     icons::TERMINAL_WINDOW,
                     &format!("{} (⌥⌘C)", tr("Console")),
                     self.console_open,
-                    36.0,
+                    (errors > 0).then_some(p.err),
                 );
-                if errors > 0 {
-                    let c = r.rect.right_top() + egui::vec2(-8.0, 8.0);
-                    ui.painter().circle_filled(c, 4.0, crate::theme::pal(ui).err);
-                }
                 if r.clicked() {
                     self.console_open = !self.console_open;
                 }
@@ -1816,154 +1968,221 @@ impl TernaryWireApp {
         let mut close = None;
         let mut activate: Option<TabBarAct> = None;
         let mut reorder: Option<(usize, usize)> = None;
-        const H: f32 = 38.0;
-        let bar = ui.available_rect_before_wrap().with_max_y(ui.cursor().top() + H);
+        let h = theme::size::TAB_STRIP;
+        const TAB_H: f32 = 32.0;
+        let bar = ui.available_rect_before_wrap().with_max_y(ui.cursor().top() + h);
         // Scroll the active tab into view when it changes or the window is resized.
         let in_view = self.tabs.get(self.active).map(|t| (t.id, bar.width() as u32));
         let scroll_to = in_view.filter(|v| self.tab_in_view != Some(*v)).map(|v| v.0);
         self.tab_in_view = in_view;
-        ui.painter().rect_filled(bar, 0.0, p.chrome);
+        let top_r = egui::CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 };
+        ui.painter().rect_filled(bar, top_r, p.well);
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, egui::Stroke::new(1.0, p.border));
-        // The tabs scroll; the new-tab button follows them and stays in view
-        // when they overflow.
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            egui::ScrollArea::horizontal()
-                .id_salt("tabs")
-                .max_height(H)
-                .max_width((bar.width() - 36.0).max(0.0))
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.add_space(4.0);
+        let strip = egui::Rect::from_min_max(bar.min + egui::vec2(6.0, 0.0), bar.max - egui::vec2(6.0, 0.0));
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(strip).layout(egui::Layout::left_to_right(egui::Align::Min)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                // The tabs scroll; the new-tab button follows them and stays in view
+                // when they overflow; "All open tabs" sits at the right end.
+                let tabs_w = (strip.width() - 30.0 - 2.0 - 28.0).max(0.0);
+                egui::ScrollArea::horizontal()
+                    .id_salt("tabs")
+                    .max_height(h)
+                    .max_width(tabs_w)
+                    .auto_shrink([true, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        // Exactly the strip's height, from its top: the 32 px tabs sit on its bottom edge.
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(0.0, h),
+                            egui::Layout::left_to_right(egui::Align::Min),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                for (i, tab) in self.tabs.iter().enumerate() {
+                                    let (title, badge, dirty) = crate::dialogs::tab_title(tab, &self.ws);
+                                    let selected = i == self.active;
+                                    let lead = match &badge {
+                                        Some(b) => (
+                                            crate::widgets::method_short(b).to_string(),
+                                            theme::semibold(10.0),
+                                            theme::method_color(b, dark),
+                                        ),
+                                        None => (
+                                            crate::dialogs::tab_icon(tab).to_string(),
+                                            theme::icon_font(14.0),
+                                            p.text_faint,
+                                        ),
+                                    };
+                                    let lead_g = ui.painter().layout_no_wrap(lead.0, lead.1, lead.2);
+                                    let font =
+                                        if selected { theme::medium(12.5) } else { egui::FontId::proportional(12.5) };
+                                    let full_w = 11.0
+                                        + lead_g.size().x
+                                        + 7.0
+                                        + ui.painter()
+                                            .layout_no_wrap(title.clone(), font.clone(), egui::Color32::PLACEHOLDER)
+                                            .size()
+                                            .x
+                                        + 7.0
+                                        + 18.0
+                                        + 8.0;
+                                    let w = full_w.clamp(110.0, 220.0);
+                                    let title_w = w - 11.0 - lead_g.size().x - 7.0 - 7.0 - 18.0 - 8.0;
+                                    let title_g = kit::elide(ui, &title, font, egui::Color32::PLACEHOLDER, title_w);
+                                    let (slot, r) =
+                                        ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
+                                    let rect = egui::Rect::from_min_max(
+                                        egui::pos2(slot.left(), slot.bottom() - TAB_H),
+                                        slot.max,
+                                    );
+                                    if selected && scroll_to == Some(tab.id) {
+                                        r.scroll_to_me(None);
+                                    }
+                                    let hovered = ui.rect_contains_pointer(rect);
+                                    let painter = ui.painter();
+                                    let radius = egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 };
+                                    if selected {
+                                        let body = rect.with_max_y(rect.bottom() + 1.0);
+                                        painter.rect_filled(body, radius, p.canvas);
+                                        painter.rect_stroke(
+                                            body,
+                                            radius,
+                                            egui::Stroke::new(1.0, p.border),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                        // Hide the strip's bottom line under the selected tab.
+                                        painter.hline(
+                                            rect.x_range().shrink(1.0),
+                                            rect.bottom() - 0.5,
+                                            egui::Stroke::new(1.5, p.canvas),
+                                        );
+                                        painter.rect_filled(
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(rect.left() + 10.0, rect.top() - 1.0),
+                                                egui::pos2(rect.right() - 10.0, rect.top() + 1.0),
+                                            ),
+                                            egui::CornerRadius::same(1),
+                                            p.accent,
+                                        );
+                                    } else if hovered {
+                                        painter.rect_filled(rect, radius, p.hover);
+                                    }
+                                    let mut x = rect.left() + 11.0;
+                                    painter.galley(
+                                        egui::pos2(x, rect.center().y - lead_g.size().y / 2.0),
+                                        lead_g.clone(),
+                                        lead.2,
+                                    );
+                                    x += lead_g.size().x + 7.0;
+                                    let text_color = if selected || hovered { p.text } else { p.text_muted };
+                                    painter.galley(
+                                        egui::pos2(x, rect.center().y - title_g.size().y / 2.0),
+                                        title_g,
+                                        text_color,
+                                    );
+                                    // Close button (or the unsaved dot until hovered).
+                                    let x_rect = egui::Rect::from_center_size(
+                                        egui::pos2(rect.right() - 8.0 - 9.0, rect.center().y),
+                                        egui::vec2(18.0, 18.0),
+                                    );
+                                    let x_resp = ui.interact(
+                                        x_rect,
+                                        ui.scope_id().with(("tab-close", tab.id)),
+                                        egui::Sense::click(),
+                                    );
+                                    crate::widgets::a11y_name(&x_resp, &format!("{} {title}", tr("Close")));
+                                    if dirty && !hovered {
+                                        ui.painter().circle_filled(x_rect.center(), 3.5, p.accent);
+                                    } else if hovered || selected {
+                                        if x_resp.hovered() {
+                                            ui.painter().rect_filled(x_rect, egui::CornerRadius::same(4), p.subtle);
+                                        }
+                                        ui.painter().text(
+                                            x_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            icons::X,
+                                            theme::icon_font(11.0),
+                                            if x_resp.hovered() { p.text } else { p.text_faint },
+                                        );
+                                    }
+                                    if x_resp.clicked() {
+                                        close = Some(i);
+                                    }
+                                    let name =
+                                        if dirty { format!("{title} ({})", tr("unsaved")) } else { title.clone() };
+                                    crate::widgets::a11y_tab(&r, &name, selected);
+                                    let r = r.on_hover_text(&title);
+                                    if r.clicked() && !x_resp.hovered() {
+                                        activate = Some(TabBarAct::Activate(i));
+                                    }
+                                    if r.middle_clicked() {
+                                        close = Some(i);
+                                    }
+                                    if r.dragged()
+                                        && let Some(pos) = ui.ctx().pointer_interact_pos()
+                                    {
+                                        if pos.x > r.rect.right() + 4.0 && i + 1 < self.tabs.len() {
+                                            reorder = Some((i, i + 1));
+                                        } else if pos.x < r.rect.left() - 4.0 && i > 0 {
+                                            reorder = Some((i, i - 1));
+                                        }
+                                    }
+                                    r.context_menu(|ui| {
+                                        if kit::menu_item(ui, Some(icons::X), tr("Close"), Some("⌘W")).clicked() {
+                                            close = Some(i);
+                                        }
+                                        if kit::menu_item(ui, Some(icons::X_CIRCLE), tr("Close other tabs"), None)
+                                            .clicked()
+                                        {
+                                            activate = Some(TabBarAct::CloseOthers(i));
+                                        }
+                                    });
+                                }
+                            },
+                        );
+                    });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(30.0, h),
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        if kit::icon_button_ex(ui, icons::PLUS, &format!("{} (⌘T)", tr("New Request")), false, 30.0)
+                            .clicked()
+                        {
+                            activate = Some(TabBarAct::New);
+                        }
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let r = kit::icon_button_sm(ui, icons::CARET_DOWN, tr("All open tabs"));
+                    egui::Popup::menu(&r).show(|ui| {
+                        ui.set_min_width(240.0);
+                        kit::menu_header(ui, tr("Open tabs"));
                         for (i, tab) in self.tabs.iter().enumerate() {
-                            let (title, badge, dirty) = crate::dialogs::tab_title(tab, &self.ws);
-                            let selected = i == self.active;
-                            let title_short = crate::dialogs::ellipsize(&title, 26);
-                            let lead = match &badge {
-                                Some(b) => (b.clone(), theme::semibold(10.5), theme::method_color(b, dark)),
-                                None => {
-                                    (crate::dialogs::tab_icon(tab).to_string(), theme::icon_font(14.0), p.text_muted)
-                                }
+                            let (title, badge, _) = crate::dialogs::tab_title(tab, &self.ws);
+                            let icon = crate::dialogs::tab_icon(tab);
+                            let item = kit::MenuItem {
+                                method: badge.as_deref(),
+                                icon: if badge.is_none() { Some(icon) } else { None },
+                                label: &title,
+                                selected: i == self.active,
+                                ..Default::default()
                             };
-                            let lead_g = ui.painter().layout_no_wrap(lead.0, lead.1, lead.2);
-                            let font = if selected { theme::medium(13.0) } else { egui::FontId::proportional(13.0) };
-                            let title_g = ui.painter().layout_no_wrap(title_short, font, egui::Color32::PLACEHOLDER);
-                            let w = 12.0 + lead_g.size().x + 6.0 + title_g.size().x + 8.0 + 18.0 + 8.0;
-                            let (rect, r) =
-                                ui.allocate_exact_size(egui::vec2(w.max(96.0), H), egui::Sense::click_and_drag());
-                            if selected && scroll_to == Some(tab.id) {
-                                r.scroll_to_me(None);
-                            }
-                            let hovered = ui.rect_contains_pointer(rect);
-                            let painter = ui.painter();
-                            if selected {
-                                let body = rect.shrink2(egui::vec2(0.0, 0.0)).with_max_y(rect.bottom() + 1.0);
-                                painter.rect_filled(body, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.canvas);
-                                painter.rect_stroke(
-                                    body,
-                                    egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 },
-                                    egui::Stroke::new(1.0, p.border),
-                                    egui::StrokeKind::Inside,
-                                );
-                                // Hide the bar's bottom line under the selected tab.
-                                painter.hline(
-                                    rect.x_range().shrink(1.0),
-                                    rect.bottom() - 0.5,
-                                    egui::Stroke::new(1.5, p.canvas),
-                                );
-                                painter.hline(
-                                    rect.x_range().shrink(8.0),
-                                    rect.top() + 1.0,
-                                    egui::Stroke::new(2.0, p.accent),
-                                );
-                            } else if hovered {
-                                painter.rect_filled(
-                                    rect.shrink2(egui::vec2(2.0, 5.0)),
-                                    egui::CornerRadius::same(6),
-                                    p.hover,
-                                );
-                            }
-                            let mut x = rect.left() + 12.0;
-                            painter.galley(
-                                egui::pos2(x, rect.center().y - lead_g.size().y / 2.0),
-                                lead_g.clone(),
-                                p.text_muted,
-                            );
-                            x += lead_g.size().x + 6.0;
-                            let text_color = if selected || hovered { p.text } else { p.text_muted };
-                            painter.galley(
-                                egui::pos2(x, rect.center().y - title_g.size().y / 2.0),
-                                title_g,
-                                text_color,
-                            );
-                            // Close button (or the unsaved dot until hovered).
-                            let x_rect = egui::Rect::from_center_size(
-                                egui::pos2(rect.right() - 16.0, rect.center().y),
-                                egui::vec2(18.0, 18.0),
-                            );
-                            let x_resp =
-                                ui.interact(x_rect, ui.scope_id().with(("tab-close", tab.id)), egui::Sense::click());
-                            crate::widgets::a11y_name(&x_resp, &format!("{} {title}", tr("Close")));
-                            if dirty && !hovered {
-                                ui.painter().circle_filled(x_rect.center(), 3.5, p.accent);
-                            } else if hovered || selected {
-                                if x_resp.hovered() {
-                                    ui.painter().rect_filled(x_rect, egui::CornerRadius::same(4), p.subtle);
-                                }
-                                ui.painter().text(
-                                    x_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    icons::X,
-                                    theme::icon_font(12.0),
-                                    if x_resp.hovered() { p.text } else { p.text_muted },
-                                );
-                            }
-                            if x_resp.clicked() {
-                                close = Some(i);
-                            }
-                            let name = if dirty { format!("{title} ({})", tr("unsaved")) } else { title.clone() };
-                            crate::widgets::a11y_tab(&r, &name, selected);
-                            if r.clicked() && !x_resp.hovered() {
+                            if kit::menu_item_ex(ui, item).clicked() {
                                 activate = Some(TabBarAct::Activate(i));
                             }
-                            if r.middle_clicked() {
-                                close = Some(i);
+                        }
+                        if !self.tabs.is_empty() {
+                            kit::menu_sep(ui);
+                            if kit::menu_item(ui, Some(icons::X_CIRCLE), tr("Close other tabs"), None).clicked() {
+                                activate = Some(TabBarAct::CloseOthers(self.active));
                             }
-                            if r.dragged()
-                                && let Some(pos) = ui.ctx().pointer_interact_pos()
-                            {
-                                if pos.x > r.rect.right() + 4.0 && i + 1 < self.tabs.len() {
-                                    reorder = Some((i, i + 1));
-                                } else if pos.x < r.rect.left() - 4.0 && i > 0 {
-                                    reorder = Some((i, i - 1));
-                                }
-                            }
-                            r.context_menu(|ui| {
-                                if ui.button(kit::with_icon(icons::X, tr("Close"))).clicked() {
-                                    close = Some(i);
-                                    ui.close();
-                                }
-                                if ui.button(kit::with_icon(icons::X_CIRCLE, tr("Close other tabs"))).clicked() {
-                                    activate = Some(TabBarAct::CloseOthers(i));
-                                    ui.close();
-                                }
-                            });
                         }
                     });
                 });
-            ui.add_space(4.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(32.0, H),
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                |ui| {
-                    if kit::icon_button(ui, icons::PLUS, &format!("{} (⌘T)", tr("New Request"))).clicked() {
-                        activate = Some(TabBarAct::New);
-                    }
-                },
-            );
-        });
+            },
+        );
+        ui.advance_cursor_after_rect(bar);
         self.apply_tab_bar(reorder, activate, close);
     }
 
@@ -2008,73 +2227,71 @@ impl TernaryWireApp {
         use crate::{icons, kit, theme};
         let p = theme::pal(ui);
         ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let r = kit::icon_button_ex(
-                ui,
-                icons::SIDEBAR_SIMPLE,
-                tr("Toggle sidebar (⌘B)"),
-                self.settings.ui.sidebar_visible,
-                22.0,
-            );
-            if r.clicked() {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if status_button(ui, Some(icons::SIDEBAR_SIMPLE), "", None, tr("Toggle sidebar (⌘B)")).clicked() {
                 self.settings.ui.sidebar_visible = !self.settings.ui.sidebar_visible;
             }
             let errors = self.console.iter().filter(|l| l.kind == ternarywire_runner::ConsoleKind::Error).count();
-            let label = if errors > 0 {
-                format!("{}  {}  ·  {errors} {}", icons::TERMINAL_WINDOW, tr("Console"), icons::WARNING_CIRCLE)
-            } else {
-                format!("{}  {}", icons::TERMINAL_WINDOW, tr("Console"))
-            };
-            let color = if errors > 0 {
-                p.err
-            } else if self.console_open {
-                p.text
-            } else {
-                p.text_muted
-            };
-            let r =
-                ui.add(egui::Button::new(RichText::new(label).small().color(color)).frame(false)).on_hover_text("⌥⌘C");
+            let r = status_button(ui, Some(icons::TERMINAL_WINDOW), tr("Console"), None, "⌥⌘C");
+            if errors > 0 {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(r.rect.right() - 4.0, r.rect.center().y - 8.0),
+                    egui::vec2(0.0, 16.0),
+                );
+                let g = ui.painter().layout_no_wrap(errors.to_string(), theme::medium(10.5), p.err);
+                let pill = egui::Rect::from_min_size(rect.min, egui::vec2(g.size().x + 10.0, 16.0));
+                ui.allocate_exact_size(egui::vec2(pill.width() - 4.0, 16.0), egui::Sense::hover());
+                ui.painter().rect_filled(pill, egui::CornerRadius::same(8), p.err_soft);
+                ui.painter().galley(pill.center() - g.size() / 2.0, g, p.err);
+            }
             if r.clicked() {
                 self.console_open = !self.console_open;
             }
             if let Some(e) = &self.ws.last_error {
-                ui.label(RichText::new(trf("Save failed: {}", &[&e])).small().color(p.err));
+                let text = trf("Save failed: {}", &[&e]);
+                status_button(ui, Some(icons::WARNING_CIRCLE), &text, Some(p.err), "");
+            } else if self.ws.has_pending() {
+                status_button(ui, Some(icons::CIRCLE_NOTCH), tr("Saving…"), None, "");
+            } else {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(0.0, 22.0), egui::Sense::hover());
+                let _ = rect;
+                status_label(ui, icons::CHECK, p.ok, tr("All changes saved"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if status_button(ui, Some(icons::COMMAND), "", None, &format!("{} (⇧⌘P)", tr("Command palette")))
+                    .clicked()
+                {
+                    self.dialog = Some(Dialog::palette(false));
+                }
                 let side = self.settings.ui.layout == ternarywire_core::settings::ResponseLayout::Side;
-                let r = kit::icon_button_ex(
-                    ui,
-                    if side { icons::SPLIT_HORIZONTAL } else { icons::SPLIT_VERTICAL },
-                    tr("Toggle response position"),
-                    false,
-                    22.0,
-                );
-                if r.clicked() {
+                let (icon, label) =
+                    if side { (icons::COLUMNS, tr("Side by side")) } else { (icons::ROWS, tr("Stacked")) };
+                if status_button(ui, Some(icon), label, None, tr("Toggle response position")).clicked() {
                     self.settings.ui.layout = if side {
                         ternarywire_core::settings::ResponseLayout::Below
                     } else {
                         ternarywire_core::settings::ResponseLayout::Side
                     };
                 }
-                let name = format!("{} (⇧⌘P)", tr("Command palette"));
-                if kit::icon_button_ex(ui, icons::COMMAND, &name, false, 22.0).clicked() {
-                    self.dialog = Some(Dialog::palette(false));
-                }
-                crate::update::status_pill(self, ui);
-                ui.add_space(6.0);
-                let (icon, status) = if self.ws.has_pending() {
-                    (icons::CIRCLE_NOTCH, tr("Saving…"))
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 14.0), egui::Sense::hover());
+                ui.painter().vline(rect.center().x, rect.y_range(), egui::Stroke::new(1.0, p.border));
+                let root = self.ws.root().to_path_buf();
+                let path = tilde_path(&root);
+                // At most a third of the bar, cut from the left so the folder name stays.
+                let max_chars = ((ui.available_width() / 3.0) / 6.5) as usize;
+                let shown = if path.chars().count() > max_chars.max(12) {
+                    let tail: String =
+                        path.chars().rev().take(max_chars.max(12) - 1).collect::<Vec<_>>().into_iter().rev().collect();
+                    format!("…{tail}")
                 } else {
-                    (icons::CHECK, tr("Saved"))
+                    path
                 };
-                ui.label(RichText::new(format!("{icon} {status}")).small().color(p.text_faint));
-                ui.add_space(6.0);
-                let ws = self.ws.data.name.clone();
-                ui.label(RichText::new(format!("{}  {ws}", icons::FOLDER_SIMPLE)).small().color(p.text_muted))
-                    .on_hover_text(self.ws.root().display().to_string());
+                status_button(ui, Some(icons::FOLDER_SIMPLE), &shown, None, &root.display().to_string());
+                crate::update::status_pill(self, ui);
             });
         });
+        let _ = kit::size::STATUS_BAR;
     }
 
     fn toasts_ui(&mut self, ctx: &egui::Context) {
@@ -2085,197 +2302,229 @@ impl TernaryWireApp {
         }
         let p = theme::palette(ctx.global_style().visuals.dark_mode);
         egui::Area::new(egui::Id::unique("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -42.0))
             .order(egui::Order::Tooltip)
             .show(ctx, |ui| {
                 for t in &self.toasts {
                     let (icon, color) =
                         if t.error { (icons::WARNING_CIRCLE, p.err) } else { (icons::CHECK_CIRCLE, p.ok) };
-                    egui::Frame::popup(ui.style())
+                    egui::Frame::new()
                         .fill(p.surface)
-                        .corner_radius(egui::CornerRadius::same(10))
+                        .stroke(egui::Stroke::new(1.0, p.border))
+                        .shadow(ui.visuals().popup_shadow)
+                        .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
-                            ui.set_max_width(400.0);
+                            ui.set_max_width(380.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(icon).font(theme::icon_font(18.0)).color(color));
-                                ui.add(egui::Label::new(RichText::new(&t.text).color(p.text)).wrap());
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                ui.label(egui::RichText::new(icon).font(theme::icon_font(16.0)).color(color));
+                                ui.add(egui::Label::new(egui::RichText::new(&t.text).size(13.0).color(p.text)).wrap());
                             });
                         });
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                 }
             });
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
-    /// The start page when no tab is open: quick actions, shortcuts and
-    /// recently sent requests.
+    /// The start page when no tab is open: quick starts, other protocols,
+    /// shortcuts and recently sent requests (the prototype's `home`).
     fn home(&mut self, ui: &mut egui::Ui) {
         use crate::{icons, kit, theme};
         let p = theme::pal(ui);
+        let dark = ui.visuals().dark_mode;
+        let tall = ui.ctx().content_rect().height() >= 760.0;
+        enum Go {
+            Http,
+            Import,
+            Collection,
+            Flow,
+            Ws,
+            Proto(&'static str),
+            Settings,
+            History,
+            Open(String),
+        }
+        let mut go = None;
         egui::ScrollArea::vertical().id_salt("home").auto_shrink([false; 2]).show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space((ui.available_height() * 0.08).clamp(16.0, 72.0));
-                ui.add(
-                    egui::Image::new(egui::include_image!("../assets/icon-256.png"))
-                        .fit_to_exact_size(egui::vec2(56.0, 56.0))
-                        .corner_radius(12),
-                );
-                ui.add_space(10.0);
-                ui.label(RichText::new("TernaryWire").font(theme::semibold(24.0)).color(p.text));
-                ui.label(
-                    RichText::new(tr("A fast, local-first API client. Start with one of these:")).color(p.text_muted),
-                );
-                ui.add_space(18.0);
-            });
-            let width = ui.available_width().min(760.0);
-            let left = ((ui.available_width() - width) / 2.0).max(0.0);
-            ui.horizontal(|ui| {
-                ui.add_space(left);
-                ui.vertical(|ui| {
-                    ui.set_width(width);
-                    let mut actions: Vec<(&str, String, &str, u8)> = vec![
-                        (icons::GLOBE, tr("HTTP request").to_string(), tr("REST, GraphQL, SOAP"), 0),
-                        (icons::PLUGS_CONNECTED, tr("WebSocket").to_string(), tr("Messages both ways"), 1),
+            let avail = ui.available_width();
+            let w = (avail - 48.0).min(732.0);
+            let side = ((avail - w) / 2.0).max(24.0);
+            egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: side as i8,
+                    right: side as i8,
+                    top: if tall { 54 } else { 28 },
+                    bottom: 40,
+                })
+                .show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+                    ui.vertical_centered(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
+                        let glow =
+                            egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: theme::soft(p.accent, 0.25) };
+                        ui.painter().add(glow.as_shape(rect, egui::CornerRadius::same(13)));
+                        egui::Image::new(egui::include_image!("../assets/icon-256.png"))
+                            .corner_radius(13)
+                            .paint_at(ui, rect);
+                        // CSS line boxes: 24 px text in 35 px, 13 px in 19 px.
+                        ui.add_space(14.0);
+                        ui.label(egui::RichText::new("TernaryWire").font(theme::semibold(24.0)).color(p.text));
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(tr("A fast, local-first API client. Start with one of these:"))
+                                .size(13.0)
+                                .color(p.text_muted),
+                        );
+                    });
+                    ui.add_space(28.0);
+                    // Four quick starts.
+                    let big = [
+                        (icons::GLOBE, tr("HTTP request"), tr("REST, GraphQL, SOAP"), Some("⌘N"), 0u8),
+                        (icons::DOWNLOAD_SIMPLE, tr("Import"), tr("Postman, OpenAPI, cURL, …"), None, 1),
+                        (icons::STACK, tr("New Collection"), tr("Organize requests"), None, 2),
+                        (icons::FLOW_ARROW, tr("New flow"), tr("Chain requests visually"), None, 3),
                     ];
-                    for (label, name, _) in crate::app::protocol_templates() {
-                        let _ = label;
-                        actions.push((protocol_icon(name), name.to_string(), "", 2));
-                    }
-                    actions.push((
-                        icons::DOWNLOAD_SIMPLE,
-                        tr("Import").to_string(),
-                        tr("Postman, OpenAPI, cURL, …"),
-                        3,
-                    ));
-                    actions.push((icons::STACK, tr("New Collection").to_string(), tr("Organize requests"), 4));
-                    actions.push((icons::FLOW_ARROW, tr("New flow").to_string(), tr("Chain requests visually"), 5));
-                    let cols = if width > 600.0 { 3 } else { 2 };
-                    let cell = (width - (cols as f32 - 1.0) * 10.0) / cols as f32;
-                    let templates = crate::app::protocol_templates();
-                    for chunk in actions.chunks(cols) {
+                    let cols = if w > 560.0 { 4 } else { 2 };
+                    let cw = (w - 10.0 * (cols as f32 - 1.0)) / cols as f32;
+                    for chunk in big.chunks(cols) {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 10.0;
-                            for (icon, title, sub, kind) in chunk {
-                                let (rect, r) = ui.allocate_exact_size(egui::vec2(cell, 64.0), egui::Sense::click());
-                                crate::widgets::a11y_button(&r, title);
-                                let hovered = r.hovered();
-                                let painter = ui.painter();
-                                painter.rect(
-                                    rect,
-                                    egui::CornerRadius::same(10),
-                                    if hovered { p.hover } else { p.surface },
-                                    egui::Stroke::new(1.0, if hovered { p.border_strong } else { p.border }),
-                                    egui::StrokeKind::Inside,
-                                );
-                                let icon_rect = egui::Rect::from_center_size(
-                                    egui::pos2(rect.left() + 30.0, rect.center().y),
-                                    egui::vec2(34.0, 34.0),
-                                );
-                                painter.rect_filled(icon_rect, egui::CornerRadius::same(8), p.accent_soft);
-                                painter.text(
-                                    icon_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    *icon,
-                                    theme::icon_font(18.0),
-                                    p.accent_text,
-                                );
-                                let tx = rect.left() + 58.0;
-                                let sub = if sub.is_empty() { tr("Connect and test") } else { sub };
-                                painter.text(
-                                    egui::pos2(tx, rect.center().y - 9.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    title,
-                                    theme::medium(13.5),
-                                    p.text,
-                                );
-                                painter.text(
-                                    egui::pos2(tx, rect.center().y + 10.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    sub,
-                                    egui::FontId::proportional(12.0),
-                                    p.text_muted,
-                                );
-                                if r.clicked() {
-                                    match kind {
-                                        0 => self.new_request_tab(),
-                                        1 => self.new_ws_tab(),
-                                        2 => {
-                                            if let Some((_, name, k)) = templates.iter().find(|(_, n, _)| n == title) {
-                                                self.new_proto_tab(name, k.clone());
-                                            }
-                                        }
-                                        3 => self.dialog = Some(Dialog::import()),
-                                        4 => self.dialog = Some(Dialog::prompt_new_collection()),
-                                        _ => {
-                                            let n = self.sidebar.flows.as_ref().map(|f| f.len()).unwrap_or(0) + 1;
-                                            self.add_tab(TabKind::Flow(Box::new(crate::flow_tab::FlowTab::blank(
-                                                &format!("{} {n}", tr("Flow")),
-                                            ))));
-                                        }
-                                    }
+                            for (icon, title, sub, keys, k) in chunk {
+                                if home_card(ui, cw, icon, title, sub, *keys).clicked() {
+                                    go = Some(match k {
+                                        0 => Go::Http,
+                                        1 => Go::Import,
+                                        2 => Go::Collection,
+                                        _ => Go::Flow,
+                                    });
                                 }
                             }
                         });
                         ui.add_space(10.0);
                     }
-                    ui.add_space(14.0);
-                    ui.columns(2, |cols| {
-                        cols[0].label(kit::section_title(tr("Keyboard shortcuts")));
-                        cols[0].add_space(4.0);
-                        for (keys, what) in [
-                            ("⌘N", tr("New request")),
-                            ("⌘↩", tr("Send request")),
-                            ("⌘K", tr("Search requests")),
-                            ("⌘E", tr("Switch environment")),
-                            ("⇧⌘P", tr("Command palette")),
-                            ("⌘B", tr("Toggle sidebar")),
-                        ] {
-                            cols[0].horizontal(|ui| {
-                                ui.set_width(220.0);
-                                ui.label(RichText::new(what).color(p.text_muted));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    kit::kbd(ui, keys)
-                                });
-                            });
-                        }
-                        cols[1].label(kit::section_title(tr("Recent requests")));
-                        cols[1].add_space(4.0);
-                        let recent: Vec<(String, String, String)> = self
-                            .ws
-                            .history
-                            .iter()
-                            .take(6)
-                            .map(|h| (h.id.clone(), h.request.method.clone(), h.request.url.clone()))
-                            .collect();
-                        if recent.is_empty() {
-                            cols[1].label(RichText::new(tr("Requests you send appear here.")).color(p.text_muted));
-                        }
-                        let dark = cols[1].visuals().dark_mode;
-                        for (id, method, url) in recent {
-                            let r = cols[1]
-                                .horizontal(|ui| {
-                                    ui.add_sized(
-                                        [46.0, 18.0],
-                                        egui::Label::new(crate::widgets::method_badge(&method, dark)),
-                                    );
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(crate::dialogs::ellipsize(&url, 48)).color(p.text),
-                                        )
-                                        .truncate()
-                                        .sense(egui::Sense::click()),
-                                    )
-                                })
-                                .inner;
-                            if r.clicked() {
-                                self.open_history(&id);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(kit::eyebrow(ui, tr("Connect with another protocol")));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(kit::hint(ui, tr("Every request type has its own tab, message log and scripts")));
+                        });
+                    });
+                    ui.add_space(10.0);
+                    let protos: [(&str, &str, &str, Option<&'static str>); 6] = [
+                        ("WS", tr("WebSocket"), tr("Messages both ways"), None),
+                        ("SIO", "Socket.IO", tr("Emit and listen to events"), Some("Socket.IO")),
+                        ("MQTT", "MQTT", tr("Publish and subscribe"), Some("MQTT")),
+                        ("gRPC", "gRPC", tr("Unary and streaming calls"), Some("gRPC")),
+                        ("MCP", "MCP", tr("Call a server's tools"), Some("MCP")),
+                        ("AI", tr("AI request"), tr("Chat with a model"), Some("AI request")),
+                    ];
+                    let pcols = if w > 560.0 { 3 } else { 2 };
+                    let pw = (w - 10.0 * (pcols as f32 - 1.0)) / pcols as f32;
+                    for chunk in protos.chunks(pcols) {
+                        ui.horizontal(|ui| {
+                            for (badge, title, sub, proto) in chunk {
+                                if protocol_card(ui, pw, badge, title, sub, dark).clicked() {
+                                    go = Some(match proto {
+                                        None => Go::Ws,
+                                        Some(n) => Go::Proto(n),
+                                    });
+                                }
                             }
-                        }
+                        });
+                        ui.add_space(10.0);
+                    }
+                    ui.add_space(16.0);
+                    // Shortcuts and recent requests.
+                    let half = (w - 28.0) / 2.0;
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 28.0;
+                        ui.vertical(|ui| {
+                            ui.set_width(half);
+                            if home_heading(ui, tr("Keyboard shortcuts"), tr("All shortcuts")) {
+                                go = Some(Go::Settings);
+                            }
+                            for (keys, what) in [
+                                ("⌘N", tr("New request")),
+                                ("⌘↩", tr("Send request")),
+                                ("⌘K", tr("Search requests")),
+                                ("⌘E", tr("Switch environment")),
+                                ("⇧⌘P", tr("Command palette")),
+                                ("⌘B", tr("Toggle sidebar")),
+                            ] {
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.set_height(30.0);
+                                    ui.label(egui::RichText::new(what).size(13.0).color(p.text_muted));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                        for c in keys.chars().rev() {
+                                            kit::kbd(ui, &c.to_string());
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                        ui.vertical(|ui| {
+                            ui.set_width(half);
+                            if home_heading(ui, tr("Recent requests"), tr("History")) {
+                                go = Some(Go::History);
+                            }
+                            let recent: Vec<_> = self.ws.history.iter().take(6).collect();
+                            if recent.is_empty() {
+                                ui.add_space(6.0);
+                                ui.label(kit::hint(ui, tr("Requests you send appear here.")));
+                            }
+                            for h in recent {
+                                ui.add_space(4.0);
+                                if recent_row(ui, h, dark).clicked() {
+                                    go = Some(Go::Open(h.id.clone()));
+                                }
+                            }
+                        });
+                    });
+                    ui.add_space(26.0);
+                    ui.horizontal(|ui| {
+                        let n = self.ws.data.collections.len();
+                        let text = format!(
+                            "{}  {} · {} · {} · {}",
+                            tr("Workspace"),
+                            self.ws.data.name,
+                            tilde_path(self.ws.root()),
+                            trf("{} collections", &[&n]),
+                            tr("plain JSON files you can commit")
+                        );
+                        let g =
+                            ui.painter().layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), p.text_muted);
+                        ui.add_space(((w - g.size().x - 20.0) / 2.0).max(0.0));
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(
+                            egui::RichText::new(icons::FOLDER_SIMPLE).font(theme::icon_font(13.0)).color(p.text_muted),
+                        );
+                        ui.label(egui::RichText::new(text).size(12.0).color(p.text_muted));
                     });
                 });
-            });
         });
+        match go {
+            Some(Go::Http) => self.new_request_tab(),
+            Some(Go::Import) => self.dialog = Some(Dialog::import()),
+            Some(Go::Collection) => self.dialog = Some(Dialog::prompt_new_collection()),
+            Some(Go::Flow) => self.create_new(NewItem::Flow),
+            Some(Go::Ws) => self.new_ws_tab(),
+            Some(Go::Proto(name)) => {
+                if let Some((_, n, k)) = protocol_templates().into_iter().find(|(_, n, _)| *n == name) {
+                    self.new_proto_tab(n, k);
+                }
+            }
+            Some(Go::Settings) => self.dialog = Some(Dialog::settings(&self.settings)),
+            Some(Go::History) => {
+                self.sidebar_tab = SidebarTab::History;
+                self.settings.ui.sidebar_visible = true;
+            }
+            Some(Go::Open(id)) => self.open_history(&id),
+            None => {}
+        }
     }
 
     /// Opens a history entry in a new unsaved tab.
@@ -2283,7 +2532,72 @@ impl TernaryWireApp {
         let Some(h) = self.ws.history.iter().find(|h| h.id == id).cloned() else { return };
         let name = h.name.clone().unwrap_or_else(|| h.request.url.clone());
         let item = RequestItem::new(name, h.request.clone());
-        self.add_tab(TabKind::Request(Box::new(RequestTab::scratch(item))));
+        let mut tab = RequestTab::scratch(item);
+        // Shows "Opened from History · <time> · Save to keep it" with the last status.
+        tab.from_history = Some((h.timestamp, h.status));
+        let tab = self.add_tab(TabKind::Request(Box::new(tab)));
+        self.sidebar.history_tabs.insert(tab, h.id.clone());
+    }
+
+    /// The workbench card: the tab strip, the active view and the console
+    /// drawer on one rounded card above the chrome. Views get the area under
+    /// the tab strip with no margin and draw their own rows (`kit::bar`).
+    fn bench(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::{RADIUS_LG, size};
+        let p = crate::theme::pal(ui);
+        let card = ui.available_rect_before_wrap();
+        let radius = egui::CornerRadius::same(RADIUS_LG);
+        if !ui.visuals().dark_mode {
+            let shadow = egui::Shadow {
+                offset: [0, 1],
+                blur: 2,
+                spread: 0,
+                color: egui::Color32::from_rgba_unmultiplied(20, 20, 30, 10),
+            };
+            ui.painter().add(shadow.as_shape(card, radius));
+        }
+        ui.painter().rect_filled(card, radius, p.canvas);
+        let inner = card.shrink(1.0);
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.set_clip_rect(inner);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.tab_bar(ui);
+                let rest = ui.available_rect_before_wrap();
+                const CONSOLE_H: f32 = 210.0;
+                let console_h =
+                    if self.console_open { (CONSOLE_H + size::GUTTER).min(rest.height() * 0.6) } else { 0.0 };
+                let view = egui::Rect::from_min_max(rest.min, egui::pos2(rest.right(), rest.bottom() - console_h));
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(view).layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        ui.set_clip_rect(view.intersect(inner));
+                        ui.set_min_size(view.size());
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        self.central(ui);
+                    },
+                );
+                if self.console_open {
+                    let drawer = egui::Rect::from_min_max(egui::pos2(rest.left(), view.bottom()), rest.max);
+                    ui.painter().hline(
+                        drawer.x_range(),
+                        drawer.top() + size::GUTTER / 2.0,
+                        egui::Stroke::new(1.0, p.border),
+                    );
+                    let body =
+                        egui::Rect::from_min_max(egui::pos2(drawer.left(), drawer.top() + size::GUTTER), drawer.max);
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)),
+                        |ui| {
+                            ui.set_clip_rect(body.intersect(inner));
+                            crate::dialogs::console_ui(self, ui);
+                        },
+                    );
+                }
+            },
+        );
+        ui.painter().rect_stroke(card, radius, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
@@ -2346,50 +2660,50 @@ impl eframe::App for TernaryWireApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "macos")]
+        crate::macos_titlebar::center_traffic_lights(_frame, crate::theme::size::TITLE_BAR as f64);
         self.handle_msgs();
         self.shortcuts(&ctx);
         crate::automation::tick(self, &ctx);
 
         let p = crate::theme::pal(ui);
         let chrome = |m: egui::Margin| egui::Frame::new().fill(p.chrome).inner_margin(m);
-        egui::Panel::top("top").exact_size(46.0).frame(chrome(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
-            self.top_bar(ui);
-        });
+        use crate::theme::size;
+        egui::Panel::top("top")
+            .exact_size(size::TITLE_BAR)
+            .frame(chrome(egui::Margin { left: 14, right: 10, top: 0, bottom: 0 }))
+            .show(ui, |ui| {
+                self.top_bar(ui);
+            });
         egui::Panel::bottom("status")
-            .exact_size(26.0)
-            .frame(chrome(egui::Margin::symmetric(8, 0)))
+            .exact_size(size::STATUS_BAR)
+            .frame(chrome(egui::Margin { left: 8, right: 10, top: 0, bottom: 0 }))
             .show(ui, |ui| self.status_bar(ui));
-        if self.console_open {
-            egui::Panel::bottom("console")
-                .resizable(true)
-                .default_size(220.0)
-                .min_size(80.0)
-                .frame(egui::Frame::new().fill(p.canvas).inner_margin(egui::Margin::symmetric(12, 8)))
-                .show(ui, |ui| {
-                    crate::dialogs::console_ui(self, ui);
-                });
-        }
         egui::Panel::left("rail")
-            .exact_size(52.0)
+            .exact_size(size::RAIL)
             .resizable(false)
             .frame(chrome(egui::Margin::ZERO))
             .show(ui, |ui| self.rail(ui));
         let mut sidebar_visible = self.settings.ui.sidebar_visible;
-        // At most a little over a quarter of the window, so small windows keep room for the editor.
-        let sidebar_max = (ui.available_width() * 0.28).clamp(220.0, 520.0);
+        // About a fifth of the window, so small windows keep room for the editor.
+        let width = ui.available_width() + size::RAIL;
+        let sidebar_default = (width * 0.21).clamp(224.0, 276.0);
+        let sidebar_max = (width * 0.28).clamp(240.0, 520.0);
         egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(280.0_f32.min(sidebar_max))
+            .default_size(sidebar_default)
             .size_range(200.0..=sidebar_max)
-            .frame(chrome(egui::Margin { left: 10, right: 10, top: 10, bottom: 6 }))
+            .frame(chrome(egui::Margin { left: 2, right: 8, top: 2, bottom: 8 }))
             .show_collapsible(ui, &mut sidebar_visible, |ui| crate::sidebar::show(self, ui));
         self.settings.ui.sidebar_visible = sidebar_visible;
-        egui::CentralPanel::no_frame().frame(egui::Frame::new().fill(p.canvas)).show(ui, |ui| {
-            self.tab_bar(ui);
-            egui::Frame::new()
-                .inner_margin(egui::Margin { left: 18, right: 18, top: 12, bottom: 8 })
-                .show(ui, |ui| self.central(ui));
-        });
+        egui::CentralPanel::no_frame()
+            .frame(egui::Frame::new().fill(p.chrome).inner_margin(egui::Margin {
+                left: 0,
+                right: 8,
+                top: 0,
+                bottom: 0,
+            }))
+            .show(ui, |ui| self.bench(ui));
         for action in std::mem::take(&mut self.deferred) {
             match action {
                 Deferred::Send(id) => self.send(id),
@@ -2554,6 +2868,235 @@ impl TernaryWireApp {
             }
         }
     }
+}
+
+/// `~/…` for paths in the home folder (the title bar, status bar and start page).
+pub fn tilde_path(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_ref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// A 38 px rail button: on = raised surface with an accent icon; `dot` marks
+/// state (a running server, console errors).
+fn rail_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool, dot: Option<egui::Color32>) -> egui::Response {
+    let p = crate::theme::pal(ui);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(38.0, 38.0), egui::Sense::click());
+    let r = r.on_hover_text(label);
+    crate::widgets::a11y_button(&r, label);
+    let radius = egui::CornerRadius::same(9);
+    let painter = ui.painter();
+    if on {
+        if !ui.visuals().dark_mode {
+            let shadow =
+                egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: egui::Color32::from_black_alpha(10) };
+            painter.add(shadow.as_shape(rect, radius));
+        }
+        painter.rect(rect, radius, p.surface, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    } else if r.hovered() {
+        painter.rect_filled(rect, radius, p.hover);
+    }
+    let color = if on {
+        p.accent_text
+    } else if r.hovered() {
+        p.text
+    } else {
+        p.text_muted
+    };
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, icon, crate::theme::icon_font(19.0), color);
+    if let Some(c) = dot {
+        let at = egui::pos2(rect.right() - 10.5, rect.top() + 10.5);
+        painter.circle_filled(at, 5.5, p.chrome);
+        painter.circle_filled(at, 3.5, c);
+    }
+    r
+}
+
+/// A status bar item: 22 high, 7 px padding, icon 13, text 11.5, muted;
+/// `tip` is the tooltip (and the name when there is no text).
+fn status_button(
+    ui: &mut egui::Ui,
+    icon: Option<&str>,
+    text: &str,
+    color: Option<egui::Color32>,
+    tip: &str,
+) -> egui::Response {
+    let p = crate::theme::pal(ui);
+    let ig = icon
+        .map(|i| ui.painter().layout_no_wrap(i.to_string(), crate::theme::icon_font(13.0), egui::Color32::PLACEHOLDER));
+    let tg = (!text.is_empty()).then(|| {
+        ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(11.5), egui::Color32::PLACEHOLDER)
+    });
+    let w = 14.0
+        + ig.as_ref().map_or(0.0, |g| g.size().x)
+        + tg.as_ref().map_or(0.0, |g| g.size().x)
+        + if ig.is_some() && tg.is_some() { 6.0 } else { 0.0 };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::click());
+    let r = if tip.is_empty() { r } else { r.on_hover_text(tip) };
+    crate::widgets::a11y_button(&r, if text.is_empty() { tip } else { text });
+    if r.hovered() {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(5), p.hover);
+    }
+    let c = color.unwrap_or(if r.hovered() { p.text } else { p.text_muted });
+    let mut x = rect.left() + 7.0;
+    if let Some(g) = ig {
+        ui.painter().galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g.clone(), c);
+        x += g.size().x + 6.0;
+    }
+    if let Some(g) = tg {
+        ui.painter().galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, c);
+    }
+    r
+}
+
+/// A status bar label (not clickable) with a colored icon.
+fn status_label(ui: &mut egui::Ui, icon: &str, icon_color: egui::Color32, text: &str) {
+    let p = crate::theme::pal(ui);
+    let ig = ui.painter().layout_no_wrap(icon.to_string(), crate::theme::icon_font(13.0), icon_color);
+    let tg = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(11.5), p.text_muted);
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(14.0 + ig.size().x + 6.0 + tg.size().x, 22.0), egui::Sense::hover());
+    ui.painter().galley(egui::pos2(rect.left() + 7.0, rect.center().y - ig.size().y / 2.0), ig.clone(), icon_color);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 13.0 + ig.size().x, rect.center().y - tg.size().y / 2.0),
+        tg,
+        p.text_muted,
+    );
+}
+
+/// A quick-start card of the start page (the prototype's `.qc.big`).
+fn home_card(ui: &mut egui::Ui, w: f32, icon: &str, title: &str, sub: &str, keys: Option<&str>) -> egui::Response {
+    use crate::{kit, theme};
+    let p = theme::pal(ui);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 110.0), egui::Sense::click());
+    crate::widgets::a11y_button(&r, title);
+    let hovered = r.hovered();
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(11),
+        if hovered { p.hover } else { p.surface },
+        egui::Stroke::new(1.0, if hovered { p.border_strong } else { p.border }),
+        egui::StrokeKind::Inside,
+    );
+    let tile = egui::Rect::from_min_size(rect.min + egui::vec2(14.0, 14.0), egui::vec2(36.0, 36.0));
+    ui.painter().rect_filled(tile, egui::CornerRadius::same(9), p.accent_soft);
+    ui.painter().text(tile.center(), egui::Align2::CENTER_CENTER, icon, theme::icon_font(18.0), p.accent_text);
+    if let Some(keys) = keys {
+        let mut x = rect.right() - 14.0;
+        for c in keys.chars().rev() {
+            let k = c.to_string();
+            let g = ui.painter().layout_no_wrap(k.clone(), egui::FontId::proportional(10.5), p.text_muted);
+            let kw = g.size().x + 10.0;
+            let kr = egui::Rect::from_min_size(egui::pos2(x - kw, tile.center().y - 9.0), egui::vec2(kw, 18.0));
+            kit::paint_kbd(ui, kr, &k);
+            x -= kw + 2.0;
+        }
+    }
+    let t = kit::elide(ui, title, theme::medium(13.0), p.text, w - 28.0);
+    ui.painter().galley(egui::pos2(rect.left() + 14.0, tile.bottom() + 11.0), t, p.text);
+    let s = kit::elide(ui, sub, egui::FontId::proportional(12.0), p.text_muted, w - 28.0);
+    ui.painter().galley(egui::pos2(rect.left() + 14.0, tile.bottom() + 30.0), s, p.text_muted);
+    r
+}
+
+/// A protocol card of the start page (the prototype's `.pc`).
+fn protocol_card(ui: &mut egui::Ui, w: f32, badge: &str, title: &str, sub: &str, dark: bool) -> egui::Response {
+    use crate::{kit, theme};
+    let p = theme::pal(ui);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 46.0), egui::Sense::click());
+    crate::widgets::a11y_button(&r, title);
+    let hovered = r.hovered();
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(10),
+        if hovered { p.hover } else { p.surface },
+        egui::Stroke::new(1.0, if hovered { p.border_strong } else { p.border }),
+        egui::StrokeKind::Inside,
+    );
+    let c = theme::method_color(badge, dark);
+    let g = ui.painter().layout_no_wrap(badge.to_string(), theme::semibold(10.5), c);
+    let b = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 12.0, rect.center().y - 11.0),
+        egui::vec2((g.size().x + 12.0).max(40.0), 22.0),
+    );
+    ui.painter().rect_filled(b, egui::CornerRadius::same(6), theme::soft(c, 0.13));
+    ui.painter().galley(b.center() - g.size() / 2.0, g, c);
+    let x = b.right() + 10.0;
+    let t = kit::elide(ui, title, theme::medium(12.5), p.text, rect.right() - x - 12.0);
+    ui.painter().galley(egui::pos2(x, rect.center().y - 15.0), t, p.text);
+    let s = kit::elide(ui, sub, egui::FontId::proportional(11.5), p.text_muted, rect.right() - x - 12.0);
+    ui.painter().galley(egui::pos2(x, rect.center().y + 1.0), s, p.text_muted);
+    r
+}
+
+/// A 28 px section heading with an accent link on the right; true when the link is clicked.
+fn home_heading(ui: &mut egui::Ui, title: &str, link: &str) -> bool {
+    let p = crate::theme::pal(ui);
+    ui.horizontal(|ui| {
+        ui.set_height(28.0);
+        ui.label(crate::kit::section_title(title).color(p.text));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let r = ui.add(
+                egui::Label::new(egui::RichText::new(link).size(12.0).color(p.text_muted)).sense(egui::Sense::click()),
+            );
+            if r.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            r.clicked()
+        })
+        .inner
+    })
+    .inner
+}
+
+/// A recent request on the start page: method, path, status, time.
+fn recent_row(ui: &mut egui::Ui, h: &ternarywire_core::history::HistoryEntry, dark: bool) -> egui::Response {
+    use crate::{kit, theme};
+    let p = theme::pal(ui);
+    let full = ui.available_width();
+    // The hover fill reaches 6 px past the column on each side (allocating
+    // that would widen the column row after row).
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(full, 30.0), egui::Sense::click());
+    let rect = rect.expand2(egui::vec2(6.0, 0.0));
+    let url = if h.resolved_url.is_empty() { h.request.url.clone() } else { h.resolved_url.clone() };
+    let r = r.on_hover_text(&url);
+    crate::widgets::a11y_button(&r, &url);
+    if r.hovered() {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), p.hover);
+    }
+    let cy = rect.center().y;
+    let m = h.request.method.as_str();
+    let mg = ui.painter().layout_no_wrap(
+        crate::widgets::method_short(m).to_string(),
+        theme::semibold(10.0),
+        theme::method_color(m, dark),
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + 6.0 + 40.0 - mg.size().x, cy - mg.size().y / 2.0),
+        mg,
+        egui::Color32::PLACEHOLDER,
+    );
+    let path = url.split_once("://").map(|(_, r)| r).unwrap_or(&url);
+    let path = path.find('/').map(|i| &path[i..]).unwrap_or(path);
+    let (status, sc) = match (h.status, &h.error) {
+        (Some(s), _) => (s.to_string(), p.tone(theme::status_tone(s)).0),
+        (None, _) => (tr("Error").to_string(), p.err),
+    };
+    let time = chrono::DateTime::from_timestamp_millis(h.timestamp)
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default();
+    let tg = ui.painter().layout_no_wrap(time, egui::FontId::proportional(11.0), p.text_faint);
+    let tx = rect.right() - 6.0 - tg.size().x;
+    ui.painter().galley(egui::pos2(tx, cy - tg.size().y / 2.0), tg, p.text_faint);
+    let sg = ui.painter().layout_no_wrap(status, theme::mono(11.0), sc);
+    let sx = rect.right() - 6.0 - 36.0 - 8.0 - sg.size().x;
+    ui.painter().galley(egui::pos2(sx, cy - sg.size().y / 2.0), sg, sc);
+    let x = rect.left() + 6.0 + 40.0 + 8.0;
+    let ug = kit::elide(ui, path, theme::mono(11.5), p.text, sx - 8.0 - x);
+    ui.painter().galley(egui::pos2(x, cy - ug.size().y / 2.0), ug, p.text);
+    r
 }
 
 #[cfg(test)]
@@ -2809,14 +3352,14 @@ mod tests {
         scratch_tab(&mut app, "a");
         scratch_tab(&mut app, "b");
         app.active = 0;
-        click(&mut app, tr("Bulk Edit"));
+        click(&mut app, tr("Bulk edit"));
         let labels: Vec<String> = frame(&mut app, Vec::new()).into_iter().map(|(l, _)| l).collect();
-        assert!(labels.iter().any(|l| l == tr("Key-Value Edit")), "{labels:?}");
+        assert!(labels.iter().any(|l| l == tr("Key-value edit")), "{labels:?}");
         app.active = 1;
         frame(&mut app, Vec::new());
         let labels: Vec<String> = frame(&mut app, Vec::new()).into_iter().map(|(l, _)| l).collect();
-        assert!(labels.iter().any(|l| l == tr("Bulk Edit")), "{labels:?}");
-        assert!(!labels.iter().any(|l| l == tr("Key-Value Edit")), "{labels:?}");
+        assert!(labels.iter().any(|l| l == tr("Bulk edit")), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == tr("Key-value edit")), "{labels:?}");
     }
 
     /// A listener that cannot start (port in use) says so; the error used to

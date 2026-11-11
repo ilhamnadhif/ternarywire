@@ -46,8 +46,8 @@ Tree	Pohon
 Key	Kunci
 Value	Nilai
 Description	Deskripsi
-Bulk Edit	Edit Massal
-Key-Value Edit	Edit Kunci-Nilai
+Bulk edit	Edit massal
+Key-value edit	Edit kunci-nilai
 Pre-request	Pra-request
 Post-response	Pasca-respons
 Snippets	Cuplikan
@@ -1846,3 +1846,263 @@ headers {} · body {}	header {} · body {}
 Could not read the response body	Body respons tidak bisa dibaca
 Searching…	Mencari…
 The load test could not run: {}	Uji beban tidak bisa dijalankan: {}
+All open tabs	Semua tab terbuka
+Open tabs	Tab terbuka
+AI request	Request AI
+API spec	Spesifikasi API
+All changes saved	Semua perubahan tersimpan
+All shortcuts	Semua pintasan
+Call a server's tools	Panggil tool sebuah server
+Chat with a model	Mengobrol dengan model
+Connect with another protocol	Hubungkan dengan protokol lain
+Emit and listen to events	Kirim dan dengarkan event
+Every request type has its own tab, message log and scripts	Setiap jenis request punya tab, log pesan, dan skripnya sendiri
+GraphQL request	Request GraphQL
+Local servers	Server lokal
+Mock server…	Mock server…
+Organize	Atur
+Publish and subscribe	Publish dan subscribe
+Reveal in Finder	Tampilkan di Finder
+Search requests, run a command…	Cari request, jalankan perintah…
+Stacked	Bertumpuk
+Unary and streaming calls	Panggilan unary dan streaming
+plain JSON files you can commit	file JSON biasa yang bisa di-commit
+Capture proxy	Proxy capture
+Clear history	Hapus riwayat
+Mock servers	Mock server
+New server	Server baru
+No history yet	Belum ada riwayat
+No local servers	Belum ada server lokal
+Open in a new tab	Buka di tab baru
+Search history	Cari riwayat
+Servers run on this machine only. Stopped servers keep their settings.	Server hanya berjalan di komputer ini. Server yang berhenti tetap menyimpan pengaturannya.
+Start a mock server, a webhook listener or a capture proxy; they show here while their tab is open.	Jalankan mock server, webhook listener, atau proxy capture; semuanya tampil di sini selama tabnya terbuka.
+Webhook listeners	Webhook listener
+stopped	berhenti
+New GraphQL request	Request GraphQL baru
+New API spec	Spesifikasi API baru
+Right-click to fold to a level	Klik kanan untuk melipat sampai level tertentu
+JSON has no visual preview. Tree shows it as an outline; Visualize renders a pm.visualizer template.	JSON tidak punya pratinjau visual. Pohon menampilkannya sebagai kerangka; Visualisasi merender template pm.visualizer.
+This body has no visual preview; Pretty shows it formatted.	Body ini tidak punya pratinjau visual; Rapi menampilkannya terformat.
+root	root
+1 secret	1 rahasia
+Add other request	Tambah request lain
+Documentation	Dokumentasi
+Hover a {} anywhere to see its value and the scope it comes from.	Arahkan kursor ke {} di mana saja untuk melihat nilainya dan scope asalnya.
+Markdown. Shown in the generated collection documentation.	Markdown. Ditampilkan di dokumentasi koleksi yang dibuat.
+No description yet.	Belum ada deskripsi.
+Write	Tulis
+in {} folders	dalam {} folder
+inherited by {} requests	diwarisi oleh {} request
+one file per request	satu berkas per request
+{} of {} requests inherit it.	{} dari {} request mewarisinya.
+{} secrets	{} rahasia
+Copy {}	Salin {}
+Differs from the initial value	Berbeda dari nilai awal
+Double-click an environment to make it active. Initial values are committed; current values stay on this machine.	Klik dua kali sebuah environment untuk mengaktifkannya. Nilai awal di-commit; nilai saat ini tetap di mesin ini.
+Filter environments	Saring environment
+LOCAL	LOKAL
+No environments match “{}”	Tidak ada environment yang cocok dengan “{}”
+One entry per line as key:value. Prefix with // to disable. Secrets are kept and not shown here.	Satu entri per baris sebagai kunci:nilai. Awali dengan // untuk menonaktifkan. Rahasia tetap disimpan dan tidak ditampilkan di sini.
+Open vault	Buka vault
+Persist all current values as initial	Simpan semua nilai saat ini sebagai nilai awal
+Reset all current values	Atur ulang semua nilai saat ini
+SHARED	BERSAMA
+Secrets live in the Keychain	Rahasia disimpan di Keychain
+Switch quickly	Ganti dengan cepat
+Table options	Opsi tabel
+Use {} for values shared across environments.	Gunakan {} untuk nilai yang dipakai bersama antar-environment.
+anywhere, or double-click an environment in the sidebar.	di mana saja, atau klik dua kali environment di sidebar.
+back to {}	kembali ke {}
+Open collection	Buka koleksi
+Operations match by method and path. Your scripts, auth and examples are kept.	Operasi dicocokkan berdasarkan method dan path. Skrip, auth, dan contoh Anda tetap dipertahankan.
+Replace this spec with one generated from the collection (not saved until you press Save)	Ganti spesifikasi ini dengan yang dibuat dari koleksi (belum disimpan sampai Anda menekan Simpan)
+Synced with {}: {}	Disinkronkan dengan {}: {}
+No failures	Tanpa kegagalan
+Starts on {}	Mulai di {}
+Hide settings	Sembunyikan pengaturan
+Show settings	Tampilkan pengaturan
+Its matched route, headers and body appear here.	Route yang cocok, header, dan body-nya muncul di sini.
+Preset	Preset
+Filter paths	Saring path
+Requests with saved examples, matched by method and path	Request dengan contoh tersimpan, dicocokkan menurut method dan path
+1 example	1 contoh
+Connection dropped	Koneksi diputus
+Open request	Buka request
+Served example “{}”	Menyajikan contoh “{}”
+Dropped by failure simulation (Failures › Drop connection) before the example was sent.	Diputus oleh simulasi kegagalan (Kegagalan › Putuskan koneksi) sebelum contoh dikirim.
+No match. No request in “{}” has a saved example for {}, so the server answered 404.	Tidak cocok. Tidak ada request di “{}” yang punya contoh tersimpan untuk {}, jadi server menjawab 404.
+Answered by failure simulation (Failures › Error status).	Dijawab oleh simulasi kegagalan (Kegagalan › Status galat).
+Copy body	Salin body
+Served when method and path match. Path variables like :id match any value.	Disajikan bila method dan path cocok. Variabel path seperti :id cocok dengan nilai apa pun.
+Edit in the request’s Docs tab	Ubah di tab Dokumentasi pada request
+Add examples with “Save as example” on a response; they are stored with the request and committed with the collection.	Tambahkan contoh lewat “Simpan sebagai contoh” pada response; contoh disimpan bersama request dan di-commit bersama collection.
+Starts on a free port	Mulai di port yang bebas
+responds	menjawab
+Locked while listening	Terkunci selama mendengarkan
+Listener	Listener
+For Stripe, GitHub or Slack, start a tunnel ({}) and paste its URL in the provider.	Untuk Stripe, GitHub, atau Slack, jalankan tunnel ({}) lalu tempel URL-nya di penyedia.
+Newest first	Terbaru dulu
+Body size	Ukuran body
+Starts on port {}	Mulai di port {}
+Show the HTTPS certificate	Tampilkan sertifikat HTTPS
+Hide options	Sembunyikan opsi
+Show options	Tampilkan opsi
+Copy fingerprint	Salin fingerprint
+Saving also copies the steps to trust it to the clipboard.	Menyimpan juga menyalin langkah untuk memercayainya ke clipboard.
+Traffic	Lalu lintas
+Save the ticked requests	Simpan request yang dicentang
+{} msgs	{} pesan
+Waiting…	Menunggu…
+passed through	diteruskan
+Sent by the server	Dikirim oleh server
+Sent by the client	Dikirim oleh klien
+Time to first byte	Waktu hingga byte pertama
+The server is still sending the response. It appears here when it is complete.	Server masih mengirim response. Response muncul di sini setelah selesai.
+Could not reach {}.	Tidak bisa menjangkau {}.
+Client	Klien
+Opened	Dibuka
+Closed	Ditutup
+Filter languages	Saring bahasa
+No languages match the filter.	Tidak ada bahasa yang cocok dengan saringan.
+Paste a Set-Cookie value. Hover a row to see its Set-Cookie text.	Tempel nilai Set-Cookie. Arahkan kursor ke baris untuk melihat teks Set-Cookie-nya.
+Settings are per user and apply to every workspace.	Pengaturan berlaku per pengguna dan untuk setiap workspace.
+Shell	Shell
+The format is detected as you paste. A file dropped anywhere on the window is imported too.	Formatnya dikenali saat Anda menempel. File yang dijatuhkan di mana saja pada jendela juga diimpor.
+Your own modules in packages/, shared by every script in the workspace.	Modul Anda sendiri di packages/, dipakai bersama oleh setiap skrip di workspace.
+Changes	Perubahan
+{} from “{}” to “{}”, 1 conflict: choose a side to include it	{} dari “{}” ke “{}”, 1 konflik: pilih satu sisi untuk menyertakannya
+{} from “{}” to “{}”, {} conflicts: choose a side to include them	{} dari “{}” ke “{}”, {} konflik: pilih satu sisi untuk menyertakannya
+Editing	Penyuntingan
+New request (tab)	Request baru (tab)
+Send request · run or stop a flow	Kirim request · jalankan atau hentikan flow
+Send a message (WebSocket, gRPC, AI…)	Kirim pesan (WebSocket, gRPC, AI…)
+Close tab	Tutup tab
+Previous / next tab	Tab sebelumnya / berikutnya
+Accept a variable suggestion	Terima saran variabel
+Close a dialog or filter	Tutup dialog atau saringan
+Save as…	Simpan sebagai…
+Opened from History	Dibuka dari Riwayat
+last answer	jawaban terakhir
+Save to keep it	Simpan agar tidak hilang
+Save to collection…	Simpan ke collection…
+Auth	Auth
+Enter a URL or paste a cURL command	Masukkan URL atau tempel perintah cURL
+Custom…	Kustom…
+Custom method	Method kustom
+Write :name in the URL path to add one; its value is filled in here.	Tulis :nama di path URL untuk menambahkannya; nilainya diisi di sini.
+From Settings › Requests	Dari Pengaturan › Request
+calculated	dihitung
+calculated when sent	dihitung saat dikirim
+Set by TernaryWire when the request is sent	Diatur TernaryWire saat request dikirim
+Headers you set above override these. Cookies from the jar are added automatically.	Header yang Anda atur di atas menimpa ini. Cookie dari jar ditambahkan otomatis.
+Form	Form
+URL-encoded	URL-encoded
+the file's bytes are sent as the request body	isi berkas dikirim sebagai body request
+File path	Path berkas
+Completions from the schema	Saran dari skema
+Close schema	Tutup skema
+Load the schema for completions and to insert operations.	Muat skema untuk saran dan untuk menyisipkan operasi.
+type pm. for completions	ketik pm. untuk saran
+pm API reference	Referensi API pm
+These apply to this request only and override the app settings.	Ini hanya berlaku untuk request ini dan menimpa pengaturan aplikasi.
+Describe what the request does…	Jelaskan apa yang dilakukan request ini…
+Also served by the mock server	Juga dilayani oleh server mock
+Sending…	Mengirim…
+Not sent yet	Belum dikirim
+TTFB	TTFB
+Waiting for the first byte from {}	Menunggu byte pertama dari {}
+Last sent from History	Terakhir dikirim dari Riwayat
+Using a proxy? Check Settings › Proxy.	Memakai proxy? Periksa Pengaturan › Proxy.
+Switch environment with ⌘E if this should go to another server.	Ganti environment dengan ⌘E bila ini seharusnya ke server lain.
+Undefined variables are sent as typed; Details lists them.	Variabel yang belum didefinisikan dikirim apa adanya; Detail mendaftarnya.
+Open console	Buka konsol
+Open cookie jar	Buka cookie jar
+1 cookie set by this response	1 cookie diatur oleh respons ini
+{} cookies set by this response	{} cookie diatur oleh respons ini
+Add tests in Scripts › Post-response, or right-click a value in the body.	Tambahkan tes di Skrip › Post-response, atau klik kanan sebuah nilai di body.
+Undefined variable {} was sent as typed. Define it in Local or the collection.	Variabel {} belum didefinisikan dan dikirim apa adanya. Definisikan di Local atau di collection.
+Undefined variables {} were sent as typed. Define them in Local or the collection.	Variabel {} belum didefinisikan dan dikirim apa adanya. Definisikan di Local atau di collection.
+Header	Header
+Getting a token…	Mengambil token…
+Token expired	Token kedaluwarsa
+Token active · {}	Token aktif · {}
+Token active	Token aktif
+Most servers work with the defaults	Sebagian besar server berjalan dengan nilai bawaan
+Open collection auth	Buka auth collection
+Get new access token	Ambil access token baru
+Kept in the Keychain	Disimpan di Keychain
+Schema loaded	Skema dimuat
+Save (⌘S)	Simpan (⌘S)
+Restore	Pulihkan
+Maximize	Maksimalkan
+(empty)	(kosong)
+Silence after the last message	Hening setelah pesan terakhir
+ms, 0 = off	ms, 0 = mati
+Session timeout	Batas waktu sesi
+ms, 0 = none	ms, 0 = tanpa batas
+Press ↩ to connect	Tekan ↩ untuk menghubungkan
+Kept in sync with the URL.	Selalu selaras dengan URL.
+Stored with the request	Disimpan bersama request
+{} sent	{} terkirim
+{} received	{} diterima
+Events	Event
+Session id	ID sesi
+session present	sesi tersedia
+Subscribed	Berlangganan
+from server reflection	dari server reflection
+from .proto files	dari file .proto
+Deadline	Tenggat
+Status message: {}	Pesan status: {}
+Trailers	Trailer
+1 message	1 pesan
+{} messages	{} pesan
+Tools	Tool
+Resources	Resource
+Prompts	Prompt
+No result yet	Belum ada hasil
+{} properties	{} properti
+Instructions: “{}”	Instruksi: “{}”
+Pick a tool, resource or prompt and call it.	Pilih tool, resource, atau prompt lalu panggil.
+error	galat
+1 more request waiting	1 permintaan lagi menunggu
+Conversation	Percakapan
+Time to first token	Waktu hingga token pertama
+Answer	Jawaban
+Model settings	Pengaturan model
+No answer yet	Belum ada jawaban
+Duplicate (⌘D)	Duplikat (⌘D)
+Fit — show all blocks	Pas — tampilkan semua blok
+Flows are saved in flows/ and also run with ternarywire flow run.	Flow disimpan di flows/ dan juga bisa dijalankan dengan ternarywire flow run.
+No run yet	Belum ada run
+Run the flow (⌘↩)	Jalankan flow (⌘↩)
+Runs the saved request with its auth, scripts and tests.	Menjalankan request tersimpan dengan auth, skrip, dan tesnya.
+Statuses that leave through **success**; any other status leaves through **failure**.	Status yang keluar lewat **success**; status lain keluar lewat **failure**.
+next run only	hanya run berikutnya
+runs the flow	menjalankan flow
+1 failure in {} requests.	1 kegagalan dalam {} permintaan.
+1 iteration	1 iterasi
+CSV per second	CSV per detik
+Click a row for details	Klik baris untuk detail
+Export every result	Ekspor semua hasil
+Export load test	Ekspor uji beban
+Finished	Selesai
+JSON samples	Sampel JSON
+Keep what scripts set, after the run.	Simpan nilai yang diatur skrip setelah run.
+Off runs against a copy of the cookie jar.	Jika mati, run memakai salinan cookie jar.
+Per second	Per detik
+Requests that fail on purpose.	Permintaan yang sengaja dibuat gagal.
+Right-click: Move up · Move down · Run only this	Klik kanan: Naikkan · Turunkan · Jalankan ini saja
+Show the first 10 rows	Tampilkan 10 baris pertama
+Time to reach all users.	Waktu untuk mencapai semua pengguna.
+Times to run the requests.	Berapa kali permintaan dijalankan.
+Users running at the same time (1–1000).	Pengguna yang berjalan bersamaan (1–1000).
+chart + tables	grafik + tabel
+iteration {}	iterasi {}
+started {}	dimulai {}
+{} (iteration {}) answered {}.	{} (iterasi {}) menjawab {}.
+{} (iteration {}) failed.	{} (iterasi {}) gagal.
+{} (iteration {}) failed: {}	{} (iterasi {}) gagal: {}
+{} iterations	{} iterasi
+{} s ramp-up	ramp-up {} dtk
+↑↓ move · Esc closes	↑↓ pindah · Esc menutup

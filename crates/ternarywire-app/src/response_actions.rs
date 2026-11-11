@@ -11,7 +11,7 @@ use ternarywire_core::model::RequestItem;
 use ternarywire_core::variables::{VarType, Variable};
 
 use crate::app::TernaryWireApp;
-use crate::dialogs::{Modal, Outcome, body, field_label, footer, trailing};
+use crate::dialogs::{Modal, Outcome, body, footer, trailing};
 use crate::i18n::{tr, trf};
 use crate::test_gen::{self, Seg, VarScope};
 use crate::{icons, kit, theme, widgets};
@@ -34,12 +34,16 @@ impl From<crate::body_view::BodyAction> for ValueAction {
 
 pub struct SetVarDialog {
     path: Vec<Seg>,
+    /// The JSONPath as given (`$.data[0].title`), the dialog's subtitle.
+    json_path: String,
     value: Value,
     name: String,
     /// Index into the scopes offered (see [`scopes`]).
     scope: usize,
     secret: bool,
     also_script: bool,
+    /// The name field takes the focus when the dialog opens.
+    focus_name: bool,
 }
 
 pub struct GenDialog {
@@ -172,11 +176,20 @@ pub fn set_variable(app: &mut TernaryWireApp, scope: &VarScope, name: &str, valu
 /// through its dialog.
 pub fn start(tools: &mut Tools, action: ValueAction, item: &mut RequestItem) -> bool {
     match action {
-        ValueAction::SetVariable { path, value } => {
-            let path = test_gen::parse_path(&path);
+        ValueAction::SetVariable { path: json_path, value } => {
+            let path = test_gen::parse_path(&json_path);
             let name = test_gen::suggested_name(&path);
             let secret = looks_secret(&name);
-            tools.set_var = Some(SetVarDialog { path, value, name, scope: 0, secret, also_script: false });
+            tools.set_var = Some(SetVarDialog {
+                path,
+                json_path,
+                value,
+                name,
+                scope: 0,
+                secret,
+                also_script: false,
+                focus_name: true,
+            });
             false
         }
         ValueAction::AddTest { path, value } => {
@@ -229,24 +242,26 @@ pub fn dialogs(
             .sticky()
             .show(ctx, |ui| {
                 body(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
                     ui.label(kit::hint(ui, tr("Review or edit the tests, then add them to the Post-response script.")));
-                    ui.add_space(8.0);
-                    let rows = ((crate::dialogs::fit_height(ctx, 300.0, 460.0)) / 18.0) as usize;
-                    egui::ScrollArea::vertical().id_salt("gen-tests-code").max_height(rows as f32 * 18.0 + 16.0).show(
-                        ui,
-                        |ui| {
-                            widgets::code_editor_with(
+                    // The code in a well: line numbers, 20 px lines, at most 380 high.
+                    let max_h = crate::dialogs::fit_height(ctx, 300.0, 380.0);
+                    let rows = ((max_h - 16.0) / 20.0) as usize;
+                    kit::well(ui).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::ScrollArea::vertical().id_salt("gen-tests-code").max_height(max_h).show(ui, |ui| {
+                            widgets::code_editor_gutter(
                                 ui,
                                 "gen-tests",
                                 &mut d.code,
                                 crate::highlight::Lang::JavaScript,
                                 None,
-                                rows.max(8),
+                                rows.clamp(6, 16),
                                 false,
                                 Some(&widgets::pm_completions),
                             );
-                        },
-                    );
+                        });
+                    });
                 });
                 footer(ui, |ui| {
                     ui.label(kit::hint(ui, tr("The tests run on this response right after they are added.")));
@@ -296,95 +311,68 @@ fn set_var_dialog(
     let mut apply = false;
     let out = Modal::new("set-variable", 540.0)
         .title(tr("Set as variable"))
-        .subtitle(test_gen::display_path(&d.path))
+        .subtitle(d.json_path.clone())
         .icon(icons::BRACKETS_CURLY)
         .show(ctx, |ui| {
-            let p = theme::pal(ui);
             body(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                field_label(ui, tr("Name"));
-                let r = ui.add(crate::dialogs::input(&mut d.name).desired_width(ui.available_width()));
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
-                    apply = true;
-                }
-                if let Some(v) = &existing {
-                    let text = if v.is_secret() {
-                        tr("A secret variable with this name exists; its value is replaced and stays in the secret store.")
-                    } else {
-                        tr("A variable with this name exists; its current value is replaced.")
-                    };
-                    ui.label(kit::hint(ui, text));
-                }
-                ui.add_space(6.0);
-                field_label(ui, tr("Scope"));
-                let labels: Vec<String> = options
-                    .iter()
-                    .map(|(s, label)| match s {
-                        VarScope::Environment(_) => format!("{}  {label}", icons::GLOBE),
-                        VarScope::Collection(_) => format!("{}  {label}", icons::STACK),
-                        VarScope::Globals => format!("{}  {label}", icons::GLOBE_SIMPLE),
-                    })
-                    .collect();
-                let items: Vec<(usize, &str)> = labels.iter().enumerate().map(|(i, l)| (i, l.as_str())).collect();
-                kit::segmented(ui, &mut d.scope, &items);
-                ui.add_space(6.0);
-                field_label(ui, tr("Value"));
-                let (kind, text) = match &d.value {
-                    Value::String(s) => ("string", s.clone()),
-                    Value::Number(_) => ("number", d.value.to_string()),
-                    Value::Bool(_) => ("boolean", d.value.to_string()),
-                    Value::Null => ("null", "null".to_string()),
-                    Value::Array(_) => ("array", serde_json::to_string(&d.value).unwrap_or_default()),
-                    Value::Object(_) => ("object", serde_json::to_string(&d.value).unwrap_or_default()),
+                ui.spacing_mut().item_spacing.y = 14.0;
+                let help = match &existing {
+                    Some(v) if v.is_secret() => tr(
+                        "A secret variable with this name exists; its value is replaced and stays in the secret store.",
+                    ),
+                    Some(_) => tr("A variable with this name exists; its current value is replaced."),
+                    None => "",
                 };
-                let masked = d.secret || existing.as_ref().is_some_and(|v| v.is_secret());
-                let shown = if masked {
-                    "•".repeat(text.chars().count().clamp(6, 24))
-                } else {
-                    crate::dialogs::ellipsize(&text, 400)
-                };
-                egui::Frame::new()
-                    .fill(p.chrome)
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(egui::Margin::symmetric(10, 7))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal_top(|ui| {
-                            let w = ui.available_width() - 70.0;
-                            ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                                ui.set_width(w);
-                                ui.add(egui::Label::new(RichText::new(shown).monospace().color(p.text)).wrap());
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                kit::pill(ui, kind, p.text_muted);
-                            });
-                        });
-                    });
-                if existing.is_none() {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        crate::dialogs::toggle(ui, &mut d.secret, tr("Secret"));
-                        ui.label(RichText::new(tr("Secret")).color(p.text));
-                        ui.label(kit::hint(ui, tr("Masked in the app, kept in the secret store")));
-                    });
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    crate::dialogs::toggle(ui, &mut d.also_script, tr("Also set it on every run"));
-                    ui.label(RichText::new(tr("Also set it on every run")).color(p.text));
+                kit::field(ui, tr("Name"), help, |ui| {
+                    let r = ui.add(
+                        crate::dialogs::input(&mut d.name)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(ui.available_width()),
+                    );
+                    widgets::a11y_name(&r, tr("Name"));
+                    if std::mem::take(&mut d.focus_name) {
+                        r.request_focus();
+                    }
+                    if r.has_focus() {
+                        kit::focus_ring(ui, r.rect, theme::RADIUS);
+                    }
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+                        apply = true;
+                    }
                 });
-                ui.label(kit::hint(ui, tr("Adds this line to the Post-response script:")));
-                egui::Frame::new()
-                    .fill(if d.also_script { theme::soft(p.ok, 0.08) } else { p.chrome })
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(egui::Margin::symmetric(10, 7))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let color = if d.also_script { p.text } else { p.text_muted };
-                        ui.add(egui::Label::new(RichText::new(&line).monospace().size(11.5).color(color)).wrap());
-                    });
+                kit::field(ui, tr("Scope"), "", |ui| {
+                    let items: Vec<(usize, Option<&str>, &str)> = options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (s, label))| {
+                            let icon = match s {
+                                VarScope::Environment(_) => icons::GLOBE,
+                                VarScope::Collection(_) => icons::STACK,
+                                VarScope::Globals => icons::GLOBE_SIMPLE,
+                            };
+                            (i, Some(icon), label.as_str())
+                        })
+                        .collect();
+                    kit::segmented_ex(ui, &mut d.scope, &items, true);
+                });
+                let masked = d.secret || existing.as_ref().is_some_and(|v| v.is_secret());
+                kit::field(ui, tr("Value"), "", |ui| value_box(ui, &d.value, masked));
+                kit::group(ui, "", "", |ui, rows| {
+                    if existing.is_none() {
+                        rows.row(ui, tr("Secret"), tr("Masked in the app, kept in the secret store"), |ui| {
+                            kit::switch(ui, &mut d.secret, tr("Secret"));
+                        });
+                    }
+                    rows.row(
+                        ui,
+                        tr("Also set it on every run"),
+                        tr("Adds this line to the Post-response script:"),
+                        |ui| {
+                            kit::switch(ui, &mut d.also_script, tr("Also set it on every run"));
+                        },
+                    );
+                });
+                script_line(ui, &line, d.also_script);
             });
             footer(ui, |ui| {
                 ui.label(kit::hint(ui, tr("Saved as the current value, which stays on this computer.")));
@@ -417,6 +405,93 @@ fn set_var_dialog(
     }
 }
 
+/// The value to set, one line in a well: colored by its JSON type, with a
+/// pill naming the type.
+fn value_box(ui: &mut Ui, value: &Value, masked: bool) {
+    let p = theme::pal(ui);
+    let colors = crate::highlight::json_colors(ui.visuals().dark_mode);
+    let (kind, color) = match value {
+        Value::String(_) => ("string", colors.string),
+        Value::Number(_) => ("number", colors.number),
+        Value::Bool(_) => ("boolean", colors.keyword),
+        Value::Null => ("null", colors.keyword),
+        Value::Array(_) => ("array", p.text),
+        Value::Object(_) => ("object", p.text),
+    };
+    let text = serde_json::to_string(value).unwrap_or_default();
+    let shown =
+        if masked { "•".repeat(text.chars().count().clamp(6, 24)) } else { crate::dialogs::ellipsize(&text, 400) };
+    egui::Frame::new()
+        .fill(p.well)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().interact_size.y = 20.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let kind_w = ui.painter().layout_no_wrap(kind.into(), theme::medium(11.5), p.text).size().x + 14.0;
+                let w = (ui.available_width() - kind_w - 8.0).max(40.0);
+                let color = if masked { p.text } else { color };
+                ui.allocate_ui_with_layout(vec2(w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_width(w);
+                    let r =
+                        ui.add(egui::Label::new(RichText::new(&shown).font(theme::mono(12.5)).color(color)).truncate());
+                    if !masked && shown.chars().count() > 40 {
+                        r.on_hover_text(RichText::new(&shown).monospace());
+                    }
+                });
+                kit::tone_pill(ui, kind, kit::Tone::Neutral);
+            });
+        });
+}
+
+/// The line "Also set it on every run" adds, highlighted in a green box
+/// when it will be added.
+fn script_line(ui: &mut Ui, line: &str, on: bool) {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    let (fill, border) = if on { (p.ok_soft, mix(p.border, p.ok, 0.3)) } else { (p.well, p.border) };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, border))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(14, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let font_size = 12.5;
+            let mut job = if on {
+                crate::highlight::highlight(crate::highlight::HlKey {
+                    text: line,
+                    lang: crate::highlight::Lang::JavaScript,
+                    dark,
+                    search: "",
+                    vars: None,
+                    font_size,
+                    wrap: true,
+                })
+            } else {
+                egui::text::LayoutJob::single_section(
+                    line.to_string(),
+                    egui::TextFormat::simple(theme::mono(font_size), p.text_muted),
+                )
+            };
+            for section in &mut job.sections {
+                section.format.line_height = Some(20.0);
+            }
+            job.wrap.max_width = ui.available_width();
+            job.wrap.break_anywhere = true;
+            ui.add(egui::Label::new(job).wrap());
+        });
+}
+
+/// `a` with `t` of `b` mixed in (CSS `color-mix`).
+fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
 /// How long a notice stays (unless hovered).
 const NOTICE_TIME: Duration = Duration::from_secs(8);
 
@@ -440,18 +515,20 @@ pub fn notice(ui: &mut Ui, tools: &mut Tools, rect: egui::Rect, scripts_shown: b
         .pivot(Align2::CENTER_BOTTOM)
         .fixed_pos(egui::pos2(rect.center().x, rect.bottom() - 12.0))
         .show(ui.ctx(), |ui| {
+            // A toast: surface, hairline border, radius 10, popup shadow.
             egui::Frame::new()
                 .fill(p.surface)
-                .stroke(Stroke::new(1.0, p.border_strong))
+                .stroke(Stroke::new(1.0, p.border))
                 .corner_radius(CornerRadius::same(10))
                 .shadow(ui.visuals().popup_shadow)
-                .inner_margin(egui::Margin { left: 12, right: 6, top: 6, bottom: 6 })
+                .inner_margin(egui::Margin { left: 14, right: 8, top: 7, bottom: 7 })
                 .show(ui, |ui| {
                     ui.set_max_width((rect.width() - 40.0).max(240.0));
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = 10.0;
                         ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(16.0)).color(p.ok));
-                        ui.add(egui::Label::new(RichText::new(&n.text).color(p.text)).truncate());
+                        ui.add(egui::Label::new(RichText::new(&n.text).size(12.5).color(p.text)).truncate());
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         if n.run_tests
                             && ui
                                 .add_enabled_ui(!busy, |ui| kit::ghost(ui, Some(icons::PLAY), tr("Run tests")))
@@ -468,7 +545,7 @@ pub fn notice(ui: &mut Ui, tools: &mut Tools, rect: egui::Rect, scripts_shown: b
                             after.open_scripts = true;
                             close = true;
                         }
-                        if kit::icon_button_ex(ui, icons::X, tr("Close"), false, 24.0).clicked() {
+                        if kit::icon_button_ex(ui, icons::X, tr("Close"), false, 22.0).clicked() {
                             close = true;
                         }
                     });

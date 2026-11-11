@@ -112,12 +112,18 @@ pub fn tab_icon(tab: &Tab) -> &'static str {
 
 // ---------------------------------------------------------------------------
 // Dialog chrome: frame, header, body, footer and the small parts dialogs share
+// (`.modal`, `.mh`, `.mb`, `.mf` in design/redesign/styles.css)
 // ---------------------------------------------------------------------------
 
-/// Corner radius of dialogs.
-const RADIUS_DIALOG: u8 = 12;
-/// Horizontal padding of dialog content.
-const PAD: i8 = 20;
+/// Side padding of a dialog's header, body and footer.
+const PAD: f32 = 18.0;
+/// Top of a dialog that is not centered (the scrim's top padding).
+const TOP: f32 = 70.0;
+/// Height of the window a dialog leaves free, in total.
+const SPARE_H: f32 = 100.0;
+/// A footer with buttons: 12 + 30 + 12 under its 1 px hairline (one with
+/// only text is as tall as its content).
+const FOOTER_H: f32 = 55.0;
 
 /// What a dialog wants after a frame.
 pub enum Outcome {
@@ -134,12 +140,23 @@ pub struct Modal {
     subtitle: Option<String>,
     icon: Option<&'static str>,
     sticky: bool,
-    top: bool,
+    center: bool,
+}
+
+/// Where the open dialog's content may go: its top and the lowest point
+/// before the window cuts it off. Kept while its content is drawn.
+#[derive(Clone, Copy)]
+struct Geometry {
+    bottom: f32,
+}
+
+fn geometry_id() -> egui::Id {
+    egui::Id::unique("ternarywire-dialog-geometry")
 }
 
 impl Modal {
     pub fn new(id: &'static str, width: f32) -> Modal {
-        Modal { id, width, title: None, subtitle: None, icon: None, sticky: false, top: false }
+        Modal { id, width, title: None, subtitle: None, icon: None, sticky: false, center: false }
     }
 
     /// Title row with a close button. Dialogs without one draw their own top.
@@ -166,10 +183,16 @@ impl Modal {
         self
     }
 
-    /// Pinned near the top instead of centered, so a search field stays put
-    /// while the list under it grows and shrinks.
+    /// Pinned 70 px from the top of the window (the default), so a search
+    /// field stays put while the list under it grows and shrinks.
     pub fn top(mut self) -> Modal {
-        self.top = true;
+        self.center = false;
+        self
+    }
+
+    /// Centered in the window: alerts and dialogs of a fixed size.
+    pub fn center(mut self) -> Modal {
+        self.center = true;
         self
     }
 
@@ -178,25 +201,30 @@ impl Modal {
         let dark = style.visuals.dark_mode;
         let p = theme::palette(dark);
         let screen = ctx.content_rect();
-        let width = self.width.min(screen.width() - 32.0).max(260.0);
+        let width = self.width.min(screen.width() - 40.0).max(260.0);
+        // `max-height: calc(100% - 100px)` of the scrim, whose content box
+        // starts under its 70 px top padding when the dialog is not centered.
+        let max_h = (screen.height() - SPARE_H - if self.center { 0.0 } else { TOP }).max(200.0);
         let id = egui::Id::unique(("ternarywire-dialog", self.id));
         let mut area = egui::Modal::default_area(id);
-        if self.top {
-            area = area.anchor(Align2::CENTER_TOP, vec2(0.0, (screen.height() * 0.12).clamp(20.0, 120.0)));
+        if !self.center {
+            area = area.anchor(Align2::CENTER_TOP, vec2(0.0, TOP));
         }
         let frame = egui::Frame::new()
             .fill(p.surface)
-            .stroke(Stroke::new(1.0, if dark { p.border_strong } else { p.border }))
-            .corner_radius(CornerRadius::same(RADIUS_DIALOG))
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius::same(theme::RADIUS_DIALOG))
             .shadow(style.visuals.window_shadow);
         let mut close = false;
         let resp = egui::Modal::new(id)
             .area(area)
             .frame(frame)
-            .backdrop_color(Color32::from_black_alpha(if dark { 150 } else { 72 }))
+            .backdrop_color(Color32::from_black_alpha(if dark { 128 } else { 82 }))
             .show(ctx, |ui| {
-                ui.set_width(width);
-                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.set_width(width - 2.0);
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let top = ui.cursor().top();
+                ui.data_mut(|d| d.insert_temp(geometry_id(), Geometry { bottom: top + max_h - 2.0 }));
                 if let Some(title) = &self.title {
                     close = header(ui, title, self.subtitle.as_deref(), self.icon);
                 }
@@ -211,72 +239,107 @@ impl Modal {
     }
 }
 
-/// Title row: icon tile, title and subtitle, close button. Returns true when
-/// the close button was pressed.
+/// Height left for the content of the open dialog above its footer, before
+/// the dialog would be taller than the window allows.
+pub(crate) fn room(ui: &Ui) -> f32 {
+    let bottom = ui.data(|d| d.get_temp::<Geometry>(geometry_id())).map(|g| g.bottom).unwrap_or(f32::INFINITY);
+    (bottom - ui.cursor().top() - FOOTER_H).max(80.0)
+}
+
+/// CSS line boxes (line-height 1.45): text laid out like the prototype's,
+/// one row (`…` when cut) or wrapped at `max_w`.
+pub(crate) fn text_box(ui: &Ui, text: &str, font: FontId, color: Color32, max_w: f32, wrap: bool) -> Arc<Galley> {
+    let line = (font.size * 1.45).round();
+    let format = TextFormat { font_id: font, color, line_height: Some(line), ..Default::default() };
+    let mut job = LayoutJob::single_section(text.to_string(), format);
+    job.wrap = if wrap {
+        TextWrapping::wrap_at_width(max_w.max(1.0))
+    } else {
+        TextWrapping { max_width: max_w.max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') }
+    };
+    ui.painter().layout_job(job)
+}
+
+/// Title row: a 30 px icon tile, the title (15 semibold) with its muted
+/// subtitle, and the close button. Returns true when it was pressed.
 fn header(ui: &mut Ui, title: &str, subtitle: Option<&str>, icon: Option<&str>) -> bool {
     let p = theme::pal(ui);
-    let mut close = false;
-    egui::Frame::new().inner_margin(Margin { left: PAD, right: 14, top: 14, bottom: 13 }).show(ui, |ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
-        let cy = rect.center().y;
-        let mut x = rect.left();
-        if let Some(icon) = icon {
-            let tile = Rect::from_min_size(pos2(x, cy - 16.0), Vec2::splat(32.0));
-            ui.painter().rect_filled(tile, CornerRadius::same(8), p.accent_soft);
-            ui.painter().text(tile.center(), Align2::CENTER_CENTER, icon, theme::icon_font(17.0), p.accent_text);
-            x += 44.0;
-        }
-        let close_rect = Rect::from_center_size(pos2(rect.right() - 14.0, cy), Vec2::splat(28.0));
-        let text_w = (close_rect.left() - 12.0 - x).max(40.0);
-        let tg = line_galley(ui, title, theme::semibold(16.5), text_w);
-        match subtitle {
-            None => {
-                ui.painter().galley(pos2(x, cy - tg.size().y / 2.0), tg, p.text);
-            }
-            Some(s) => {
-                let sg = line_galley(ui, s, FontId::proportional(12.5), text_w);
-                let top = cy - (tg.size().y + 1.0 + sg.size().y) / 2.0;
-                let sub_y = top + tg.size().y + 1.0;
-                ui.painter().galley(pos2(x, top), tg, p.text);
-                ui.painter().galley(pos2(x, sub_y), sg, p.text_muted);
-            }
-        }
-        let name = format!("{} (Esc)", tr("Close"));
-        if ui.put(close_rect, |ui: &mut Ui| kit::icon_button(ui, icons::X, &name)).clicked() {
-            close = true;
-        }
-    });
-    hairline(ui);
-    close
+    let w = ui.available_width();
+    let (title_h, sub_h) = ((15.0f32 * 1.45).round(), (12.0f32 * 1.45).round());
+    let text_h = title_h + subtitle.map_or(0.0, |_| 2.0 + sub_h);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 16.0 + text_h.max(30.0) + 12.0), Sense::hover());
+    let inner = Rect::from_min_max(rect.min + vec2(PAD, 16.0), rect.max - vec2(PAD, 12.0));
+    let cy = inner.center().y;
+    let mut x = inner.left();
+    if let Some(icon) = icon {
+        let tile = Rect::from_min_size(pos2(x, cy - 15.0), Vec2::splat(30.0));
+        ui.painter().rect_filled(tile, CornerRadius::same(8), p.accent_soft);
+        ui.painter().text(tile.center(), Align2::CENTER_CENTER, icon, theme::icon_font(16.0), p.accent_text);
+        x += 40.0;
+    }
+    let close_rect = Rect::from_center_size(pos2(inner.right() - 14.0, cy), Vec2::splat(28.0));
+    let text_w = (close_rect.left() - 10.0 - x).max(40.0);
+    let top = cy - text_h / 2.0;
+    let tg = text_box(ui, title, theme::semibold(15.0), p.text, text_w, false);
+    ui.painter().galley(pos2(x, top), tg, p.text);
+    if let Some(s) = subtitle {
+        let sg = text_box(ui, s, FontId::proportional(12.0), p.text_muted, text_w, false);
+        ui.painter().galley(pos2(x, top + title_h + 2.0), sg, p.text_muted);
+    }
+    let name = format!("{} (Esc)", tr("Close"));
+    place(ui, close_rect, |ui: &mut Ui| kit::icon_button(ui, icons::X, &name)).clicked()
 }
 
-/// The padded content of a dialog.
+/// The padded content of a dialog (4 18 16); it scrolls when the window is
+/// too short for it.
 pub fn body<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    egui::Frame::new()
-        .inner_margin(Margin { left: PAD, right: PAD, top: 16, bottom: 18 })
+    body_with(ui, 4.0, add)
+}
+
+/// [`body`] with another top padding (dialogs without a header).
+pub(crate) fn body_with<R>(ui: &mut Ui, top: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let max = room(ui);
+    egui::ScrollArea::vertical()
+        .id_salt("dialog-body")
+        .max_height(max)
+        .auto_shrink([false, true])
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
-            ui.set_width(ui.available_width());
-            add(ui)
+            egui::Frame::new()
+                .inner_margin(Margin { left: PAD as i8, right: PAD as i8, top: top as i8, bottom: 16 })
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+                    ui.set_width(ui.available_width());
+                    add(ui)
+                })
+                .inner
         })
         .inner
 }
 
-/// The button bar of a dialog. Hints go first (left); the buttons go in
-/// [`trailing`], main action first so that it ends up rightmost.
+/// The button bar of a dialog: a hairline, then a `well` strip (12 18).
+/// Hints go first (left); the buttons go in [`trailing`], main action first
+/// so that it ends up rightmost.
 pub fn footer<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    hairline(ui);
-    let r = RADIUS_DIALOG - 1;
-    egui::Frame::new()
-        .fill(side_fill(ui))
-        .corner_radius(CornerRadius { nw: 0, ne: 0, sw: r, se: r })
-        .inner_margin(Margin::symmetric(PAD, 12))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
-            let w = ui.available_width();
-            ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::left_to_right(Align::Center), add).inner
-        })
-        .inner
+    let p = theme::pal(ui);
+    // As tall as its tallest item (measured on the previous pass): 30 with
+    // buttons, 18 with key hints only.
+    let id = ui.scope_id().with("dialog-footer-h");
+    let content_h: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(30.0);
+    let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), content_h + 25.0));
+    let r = theme::RADIUS_DIALOG - 1;
+    ui.painter().rect_filled(rect, CornerRadius { nw: 0, ne: 0, sw: r, se: r }, p.well);
+    ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
+    let inner = Rect::from_min_max(rect.min + vec2(PAD, 13.0), rect.max - vec2(PAD, 12.0));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+    child.spacing_mut().item_spacing = vec2(8.0, 6.0);
+    let out = add(&mut child);
+    let used = child.min_rect().height().round().max(16.0);
+    if (used - content_h).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, used));
+        ui.ctx().request_discard("dialog footer height");
+    }
+    ui.advance_cursor_after_rect(rect);
+    out
 }
 
 /// The right-aligned end of a row; widgets added first end up rightmost.
@@ -284,37 +347,68 @@ pub fn trailing<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.with_layout(Layout::right_to_left(Align::Center), add).inner
 }
 
-/// Two panes of `height`: a navigation list on a tinted background (`left`,
-/// `left_w` wide) and the content (`right`), each in its own child ui.
+/// Adds a widget filling `rect` (centered in it) without moving `ui`'s
+/// cursor, unlike `Ui::put`: for widgets inside space already allocated.
+pub(crate) fn place(ui: &mut Ui, rect: Rect, widget: impl egui::Widget) -> Response {
+    let layout = Layout::centered_and_justified(egui::Direction::LeftToRight);
+    ui.new_child(UiBuilder::new().max_rect(rect).layout(layout)).add(widget)
+}
+
+/// Runs `add` in a child ui over `rect` without moving `ui`'s cursor: for
+/// drawing in space allocated (or about to be allocated) as a whole.
+pub(crate) fn in_rect<R>(ui: &mut Ui, rect: Rect, layout: Layout, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(layout));
+    add(&mut child)
+}
+
+/// Two panes of `height` with nothing around them (`.mb.dl-flush`): a list
+/// on the `well` fill (`left`, `left_w` wide, then a hairline) and the
+/// content (`right`), each in its own clipped child ui.
 pub fn split(ui: &mut Ui, height: f32, left_w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
     let p = theme::pal(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     let left_rect = Rect::from_min_size(rect.min, vec2(left_w, height));
     let right_rect = Rect::from_min_max(pos2(left_rect.right() + 1.0, rect.top()), rect.max);
-    ui.painter().rect_filled(left_rect, 0.0, side_fill(ui));
+    ui.painter().rect_filled(left_rect, 0.0, p.well);
     ui.painter().vline(left_rect.right() + 0.5, rect.y_range(), Stroke::new(1.0, p.border));
     let spacing = ui.ctx().global_style().spacing.item_spacing;
     let mut l = ui.new_child(UiBuilder::new().max_rect(left_rect).layout(Layout::top_down(Align::Min)));
-    l.set_clip_rect(left_rect);
-    l.spacing_mut().item_spacing = spacing;
+    l.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+    l.spacing_mut().item_spacing = vec2(spacing.x, 0.0);
     left(&mut l);
     let mut r = ui.new_child(UiBuilder::new().max_rect(right_rect).layout(Layout::top_down(Align::Min)));
-    r.set_clip_rect(right_rect);
-    r.spacing_mut().item_spacing = spacing;
+    r.set_clip_rect(right_rect.intersect(ui.clip_rect()));
+    r.spacing_mut().item_spacing = vec2(spacing.x, 0.0);
     right(&mut r);
 }
 
-/// A 1 px line across the dialog.
-pub(crate) fn hairline(ui: &mut Ui) {
+/// The header of a pane in a two-pane dialog (`.lh`): 38 high, a section
+/// title and a faint count on the right, a hairline under it.
+pub(crate) fn pane_head(ui: &mut Ui, title: &str, count: &str) {
     let p = theme::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, p.border);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
+    let cy = rect.center().y;
+    let cg = ui.painter().layout_no_wrap(count.to_string(), FontId::proportional(11.0), p.text_faint);
+    let cx = rect.right() - 12.0 - cg.size().x;
+    ui.painter().galley(pos2(cx, cy - cg.size().y / 2.0), cg, p.text_faint);
+    let tg = line_galley(ui, title, theme::semibold(12.5), cx - rect.left() - 20.0);
+    ui.painter().galley(pos2(rect.left() + 12.0, cy - tg.size().y / 2.0), tg, p.text);
 }
 
-/// Background of footers and navigation panes: a step away from the dialog
-/// surface in both themes.
-pub(crate) fn side_fill(ui: &Ui) -> Color32 {
-    if ui.visuals().dark_mode { ui.visuals().faint_bg_color } else { theme::pal(ui).chrome }
+/// The header row of a dialog's content pane (`height` 48 or 42): drawn by
+/// `add` from 16 px in, with a hairline under it.
+pub(crate) fn pane_bar<R>(ui: &mut Ui, height: f32, right_pad: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let p = theme::pal(ui);
+    let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
+    ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
+    let inner = Rect::from_min_max(rect.min + vec2(16.0, 0.0), rect.max - vec2(right_pad, 1.0));
+    let out = in_rect(ui, inner, Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        add(ui)
+    });
+    ui.advance_cursor_after_rect(rect);
+    out
 }
 
 /// Space a dialog body may use before the window cuts it off.
@@ -331,77 +425,129 @@ pub(crate) fn line_galley(ui: &Ui, text: &str, font: FontId, max_w: f32) -> Arc<
     ui.painter().layout_job(job)
 }
 
-/// `↑↓ Navigate  ↩ Open  esc Close` style hints.
-fn key_hints(ui: &mut Ui, hints: &[(&str, &str)]) {
+/// `↑ ↓ Navigate   ↩ Open   esc Close` key hints of a footer.
+fn key_hints(ui: &mut Ui, hints: &[(&[&str], &str)]) {
     let p = theme::pal(ui);
     ui.spacing_mut().item_spacing.x = 5.0;
     for (i, (keys, what)) in hints.iter().enumerate() {
         if i > 0 {
             ui.add_space(8.0);
         }
-        kit::kbd(ui, keys);
+        for k in *keys {
+            kit::kbd(ui, k);
+        }
         ui.label(RichText::new(*what).size(12.0).color(p.text_muted));
     }
 }
 
-/// A label above a form field.
-pub(crate) fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).font(theme::medium(12.5)).color(theme::pal(ui).text));
+/// Muted 12 px text with an icon before it (`.row.hint` of footers).
+fn icon_hint(ui: &mut Ui, icon: &str, text: &str) {
+    let p = theme::pal(ui);
+    ui.spacing_mut().item_spacing.x = 8.0;
+    ui.label(RichText::new(icon).font(theme::icon_font(12.0)).color(p.text_muted));
+    ui.add(egui::Label::new(RichText::new(text).size(12.0).color(p.text_muted)).truncate());
 }
 
-/// A single-line text input as tall as a button.
+/// A single-line text input as tall as a button (30, 10 px padding).
 pub(crate) fn input(text: &mut String) -> egui::TextEdit<'_> {
-    egui::TextEdit::singleline(text).margin(Margin::symmetric(8, 6))
+    egui::TextEdit::singleline(text)
+        .margin(Margin::symmetric(10, 0))
+        .min_size(vec2(0.0, 30.0))
+        .align(Align2::LEFT_CENTER)
 }
 
-/// A masked input with a show/hide button (the passphrase of a certificate,
-/// a proxy password).
+/// A one-line input as in the prototype (`.input`): 30 high (13 px text) or
+/// `small` (26 high, 12 px); `mono` for names, URLs and paths. Add it with
+/// [`add_input`].
+pub(crate) fn line_edit<'t>(ui: &Ui, text: &'t mut String, hint: &str, small: bool, mono: bool) -> egui::TextEdit<'t> {
+    let p = theme::pal(ui);
+    let font = match (small, mono) {
+        (true, true) => theme::mono(12.0),
+        (true, false) => FontId::proportional(12.0),
+        (false, true) => theme::mono(12.5),
+        (false, false) => FontId::proportional(13.0),
+    };
+    let (h, pad) = if small { (26.0, 8) } else { (30.0, 10) };
+    egui::TextEdit::singleline(text)
+        .font(font.clone())
+        .hint_text(RichText::new(hint).font(font).color(p.text_faint))
+        .margin(Margin::symmetric(pad, 0))
+        .min_size(vec2(0.0, h))
+        .align(Align2::LEFT_CENTER)
+}
+
+/// Adds an input made with [`line_edit`]: rounded to its size, with the
+/// accent focus ring.
+pub(crate) fn add_input(ui: &mut Ui, edit: egui::TextEdit<'_>, small: bool) -> Response {
+    let radius = if small { theme::RADIUS_SM } else { theme::RADIUS };
+    let r = ui
+        .scope(|ui| {
+            let cr = CornerRadius::same(radius);
+            let w = &mut ui.visuals_mut().widgets;
+            w.inactive.corner_radius = cr;
+            w.hovered.corner_radius = cr;
+            w.active.corner_radius = cr;
+            ui.spacing_mut().interact_size.y = if small { 26.0 } else { 30.0 };
+            ui.add(edit)
+        })
+        .inner;
+    if r.has_focus() {
+        kit::focus_ring(ui, r.rect, radius);
+    }
+    r
+}
+
+/// A small input named `name` for screen readers.
+pub(crate) fn small_input(ui: &mut Ui, text: &mut String, hint: &str, name: &str, width: f32, mono: bool) -> Response {
+    let edit = line_edit(ui, text, hint, true, mono).desired_width(width);
+    let r = add_input(ui, edit, true);
+    widgets::a11y_name(&r, name);
+    r
+}
+
+/// A masked small input with a show/hide button inside it (a proxy
+/// password, the passphrase of a certificate, a secret's value).
 pub(crate) fn secret_input(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     text: &mut String,
+    hint: &str,
     width: f32,
 ) -> Response {
     let id = ui.make_persistent_id(id);
     let mut reveal: bool = ui.data(|d| d.get_temp(id).unwrap_or(false));
-    let r = ui.add(input(text).password(!reveal).desired_width(width - 36.0).font(egui::TextStyle::Monospace));
+    let edit = line_edit(ui, text, hint, true, false)
+        .password(!reveal)
+        .margin(Margin { left: 8, right: 30, top: 0, bottom: 0 })
+        .desired_width(width);
+    let r = add_input(ui, edit, true);
     let (icon, name) = if reveal { (icons::EYE_SLASH, tr("Hide")) } else { (icons::EYE, tr("Show")) };
-    if kit::icon_button(ui, icon, name).clicked() {
+    let eye = Rect::from_center_size(pos2(r.rect.right() - 15.0, r.rect.center().y), Vec2::splat(22.0));
+    if place(ui, eye, |ui: &mut Ui| kit::icon_button_sm(ui, icon, name)).clicked() {
         reveal = !reveal;
         ui.data_mut(|d| d.insert_temp(id, reveal));
     }
     r
 }
 
+/// A path shown in a recessed box (`.dl-pathbox`): 30 high, mono 12.
+fn path_box(ui: &mut Ui, path: Option<&str>, empty: &str, width: f32) -> Response {
+    let p = theme::pal(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(theme::RADIUS), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    let (text, font, color) = match path {
+        Some(t) => (t, theme::mono(12.0), p.text),
+        None => (empty, FontId::proportional(12.0), p.text_faint),
+    };
+    let g = line_galley(ui, text, font, rect.width() - 20.0);
+    let elided = g.elided;
+    ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, color);
+    if elided { resp.on_hover_text(text) } else { resp }
+}
+
 /// An on/off switch, named `name` for screen readers.
 pub(crate) fn toggle(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
-    let p = theme::pal(ui);
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(36.0, 20.0), Sense::click());
-    if resp.clicked() {
-        *on = !*on;
-        resp.mark_changed();
-    }
-    let enabled = ui.is_enabled();
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, *on, name));
-    if ui.is_rect_visible(rect) {
-        let t = ui.ctx().animate_bool_responsive(resp.id, *on);
-        let off = if ui.visuals().dark_mode { p.border_strong } else { Color32::from_rgb(214, 214, 221) };
-        let track = off.lerp_to_gamma(p.accent, t);
-        let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(10), track);
-        let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
-        painter.circle_filled(pos2(x, rect.center().y + 0.5), 8.0, Color32::from_black_alpha(36));
-        painter.circle_filled(pos2(x, rect.center().y), 8.0, Color32::WHITE);
-        if resp.has_focus() {
-            painter.rect_stroke(
-                rect.expand(2.0),
-                CornerRadius::same(12),
-                Stroke::new(1.5, p.accent),
-                StrokeKind::Outside,
-            );
-        }
-    }
-    resp
+    kit::switch(ui, on, name)
 }
 
 /// The tone of a [`banner`].
@@ -416,64 +562,227 @@ pub(crate) enum Tone {
 
 /// A message with an icon on a soft fill (errors, notes, results).
 pub(crate) fn banner(ui: &mut Ui, tone: Tone, text: &str) {
-    let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    let (icon, color) = match tone {
-        Tone::Info => (icons::INFO, p.info),
-        Tone::Ok => (icons::CHECK_CIRCLE, p.ok),
-        Tone::Warn => (icons::WARNING, p.warn),
-        Tone::Err => (icons::WARNING_CIRCLE, p.err),
+    let (tone, icon) = match tone {
+        Tone::Info => (kit::Tone::Info, icons::INFO),
+        Tone::Ok => (kit::Tone::Ok, icons::CHECK_CIRCLE),
+        Tone::Warn => (kit::Tone::Warn, icons::WARNING),
+        Tone::Err => (kit::Tone::Err, icons::WARNING_CIRCLE),
     };
-    egui::Frame::new()
-        .fill(theme::soft(color, if dark { 0.13 } else { 0.07 }))
-        .stroke(Stroke::new(1.0, theme::soft(color, if dark { 0.32 } else { 0.24 })))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(10, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(RichText::new(icon).font(theme::icon_font(15.0)).color(color));
-                ui.add(egui::Label::new(RichText::new(text).color(p.text)).wrap());
-            });
-        });
+    kit::banner(ui, tone, icon, text);
 }
 
-/// A row of a navigation or picker list: optional icon, label, optional
-/// muted text on the right. Selected rows get the accent tint.
-pub(crate) fn nav_item(ui: &mut Ui, icon: Option<&str>, label: &str, trail: Option<&str>, selected: bool) -> Response {
+/// A colored result next to the button that produced it (`Resolved (24
+/// characters)`, `Connected · KV v2`): an icon and 12 px text.
+pub(crate) fn inline_result(ui: &mut Ui, ok: bool, text: &str) {
+    let p = theme::pal(ui);
+    let color = if ok { p.ok } else { p.err };
+    let icon = if ok { icons::CHECK_CIRCLE } else { icons::WARNING_CIRCLE };
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new(icon).font(theme::icon_font(12.0)).color(color));
+        ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).truncate());
+    });
+}
+
+/// A row of a settings navigation (`.dl-set-nav .ni`) or of a list pane
+/// (`.dl-lrow`): 32 high, radius 7. The selected row is a raised white
+/// card. `nav` rows have medium muted labels with the icon in the accent
+/// when selected; list rows have plain labels and a faint text on the right.
+fn pane_row(ui: &mut Ui, icon: Option<&str>, label: &str, trail: Option<&str>, selected: bool, nav: bool) -> Response {
     let p = theme::pal(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     widgets::a11y_tab(&resp, label, selected);
     if ui.is_rect_visible(rect) {
         let radius = CornerRadius::same(theme::RADIUS);
+        let hovered = resp.hovered();
         if selected {
-            ui.painter().rect_filled(rect, radius, p.accent_soft);
-        } else if resp.hovered() {
+            raised(ui, rect, radius);
+        } else if hovered {
             ui.painter().rect_filled(rect, radius, p.hover);
         }
         let cy = rect.center().y;
         let mut x = rect.left() + 10.0;
+        let text_c = if nav && !selected && !hovered { p.text_muted } else { p.text };
         if let Some(icon) = icon {
-            let color = if selected { p.accent_text } else { p.text_muted };
-            ui.painter().text(pos2(x + 8.0, cy), Align2::CENTER_CENTER, icon, theme::icon_font(16.0), color);
-            x += 28.0;
+            let (size, color) =
+                if nav { (15.0, if selected { p.accent_text } else { text_c }) } else { (13.0, p.text_muted) };
+            let g = ui.painter().layout_no_wrap(icon.to_string(), theme::icon_font(size), color);
+            let w = g.size().x;
+            ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, color);
+            x += w + if nav { 9.0 } else { 8.0 };
         }
         let mut right = rect.right() - 10.0;
         if let Some(t) = trail {
-            let g = line_galley(ui, t, FontId::proportional(11.5), 110.0);
+            let g = line_galley(ui, t, FontId::proportional(11.5), 120.0);
             let w = g.size().x;
-            ui.painter().galley(pos2(right - w, cy - g.size().y / 2.0), g, p.text_muted);
+            ui.painter().galley(pos2(right - w, cy - g.size().y / 2.0), g, p.text_faint);
             right -= w + 8.0;
         }
-        let font = if selected { theme::medium(13.0) } else { FontId::proportional(13.0) };
+        let font = if nav { theme::medium(12.5) } else { FontId::proportional(12.5) };
         let g = line_galley(ui, label, font, right - x);
-        ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
+        ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, text_c);
         if resp.has_focus() {
             ui.painter().rect_stroke(rect, radius, Stroke::new(1.5, p.accent), StrokeKind::Inside);
         }
     }
     resp
+}
+
+/// The selected row of a list on a `well`: a white card with a 1 px ring
+/// and the card shadow.
+fn raised(ui: &Ui, rect: Rect, radius: CornerRadius) {
+    let p = theme::pal(ui);
+    if !ui.visuals().dark_mode {
+        let shadow = egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(10) };
+        ui.painter().add(shadow.as_shape(rect, radius));
+    }
+    ui.painter().rect(rect, radius, p.surface, Stroke::new(1.0, p.border), StrokeKind::Outside);
+}
+
+/// A row of a navigation or picker list: optional icon, label, optional
+/// faint text on the right; the selected row is raised.
+pub(crate) fn nav_item(ui: &mut Ui, icon: Option<&str>, label: &str, trail: Option<&str>, selected: bool) -> Response {
+    pane_row(ui, icon, label, trail, selected, false)
+}
+
+/// A bordered list of rows (`.dl-vlist`): radius 9 on the surface.
+pub(crate) fn vlist<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let p = theme::pal(ui);
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui)
+        })
+        .inner
+}
+
+/// One row of a [`vlist`] (`.dl-vrow`): `height` high, 12 px in from the
+/// left and 10 from the right, a hairline above all but the first. Hovered
+/// rows get the `well` fill, selected ones the accent tint; `add` learns
+/// whether the row is hovered (to show its actions). Returns what `add`
+/// returns and the click response of the whole row (under its widgets).
+pub(crate) fn vrow<R>(
+    ui: &mut Ui,
+    (index, count): (usize, usize),
+    height: f32,
+    selected: bool,
+    add: impl FnOnce(&mut Ui, bool) -> R,
+) -> (R, Response) {
+    let p = theme::pal(ui);
+    let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
+    let row = ui.interact(rect, ui.scope_id().with(("vrow", rect.left() as i32, rect.top() as i32)), Sense::click());
+    let hovered = ui.rect_contains_pointer(rect);
+    let r = theme::RADIUS_CARD - 1;
+    let corners = CornerRadius {
+        nw: if index == 0 { r } else { 0 },
+        ne: if index == 0 { r } else { 0 },
+        sw: if index + 1 == count { r } else { 0 },
+        se: if index + 1 == count { r } else { 0 },
+    };
+    if selected {
+        ui.painter().rect_filled(rect, corners, p.accent_soft);
+    } else if hovered {
+        ui.painter().rect_filled(rect, corners, p.well);
+    }
+    if index > 0 {
+        ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
+    }
+    let inner = Rect::from_min_max(rect.min + vec2(12.0, 0.0), rect.max - vec2(10.0, 0.0));
+    let out = in_rect(ui, inner, Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        add(ui, hovered)
+    });
+    ui.advance_cursor_after_rect(rect);
+    (out, row)
+}
+
+/// An icon in a 28 px tile (`.dl-tile`): on the `well` with a border, or
+/// (`accent`) on the accent tint.
+pub(crate) fn tile(ui: &mut Ui, icon: &str, accent: bool) {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+    let radius = CornerRadius::same(theme::RADIUS);
+    if accent {
+        ui.painter().rect_filled(rect, radius, p.accent_soft);
+    } else {
+        ui.painter().rect(rect, radius, p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    }
+    let color = if accent { p.accent_text } else { p.text_muted };
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), color);
+}
+
+/// A name over a faint second line (a provider and its kind), as one
+/// block `width` wide, centered in a row.
+pub(crate) fn two_lines(ui: &mut Ui, title: &str, title_font: FontId, sub: &str, width: f32) -> Response {
+    let p = theme::pal(ui);
+    let tg = text_box(ui, title, title_font, p.text, width, false);
+    let sg = text_box(ui, sub, FontId::proportional(11.0), p.text_faint, width, false);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, tg.size().y + sg.size().y), Sense::hover());
+    let title_h = tg.size().y;
+    ui.painter().galley(rect.min, tg, p.text);
+    ui.painter().galley(rect.min + vec2(0.0, title_h), sg, p.text_faint);
+    resp
+}
+
+/// A `{{variable}}` chip in the color of secrets (mono 11.5).
+pub(crate) fn secret_chip(ui: &mut Ui, text: &str) {
+    let p = theme::pal(ui);
+    let g = ui.painter().layout_no_wrap(text.to_string(), theme::mono(11.5), p.info);
+    let (rect, _) = ui.allocate_exact_size(vec2(g.size().x + 6.0, 17.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(4), p.info_soft);
+    ui.painter().galley(pos2(rect.left() + 3.0, rect.center().y - g.size().y / 2.0), g, p.info);
+}
+
+/// Red buttons kit.rs has no kind for: `solid` (red fill, the Delete of an
+/// alert) or quiet (no frame, red text: Don't save, Clear all). `small`
+/// makes it 24 high instead of 30.
+pub(crate) fn danger_button(ui: &mut Ui, solid: bool, small: bool, icon: Option<&str>, text: &str) -> Response {
+    let p = theme::pal(ui);
+    let (h, font, icon_size, pad, gap, radius) = if small {
+        (24.0, 12.0, 13.0, 8.0, 5.0, theme::RADIUS_SM)
+    } else {
+        (30.0, 12.5, 15.0, 12.0, 6.0, theme::RADIUS)
+    };
+    let g = ui.painter().layout_no_wrap(text.to_string(), theme::medium(font), Color32::PLACEHOLDER);
+    let ig =
+        icon.map(|i| ui.painter().layout_no_wrap(i.to_string(), theme::icon_font(icon_size), Color32::PLACEHOLDER));
+    let content = g.size().x + ig.as_ref().map_or(0.0, |i| i.size().x + gap);
+    let (rect, resp) = ui.allocate_exact_size(vec2(content + pad * 2.0, h), Sense::click());
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
+    if ui.is_rect_visible(rect) {
+        let hot = enabled && (resp.hovered() || resp.is_pointer_button_down_on());
+        let cr = CornerRadius::same(radius);
+        let (fill, color) = if solid {
+            (if hot { darker(p.err) } else { p.err }, p.on_accent)
+        } else {
+            (if hot { p.hover } else { Color32::TRANSPARENT }, p.err)
+        };
+        let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+        ui.painter().rect_filled(rect, cr, fade(fill));
+        if resp.has_focus() {
+            let ring = CornerRadius::same(radius + 2);
+            ui.painter().rect_stroke(rect.expand(2.0), ring, Stroke::new(1.5, p.accent), StrokeKind::Outside);
+        }
+        let mut x = rect.center().x - content / 2.0;
+        if let Some(ig) = ig {
+            let w = ig.size().x;
+            ui.painter().galley(pos2(x, rect.center().y - ig.size().y / 2.0), ig, fade(color));
+            x += w + gap;
+        }
+        ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, fade(color));
+    }
+    resp
+}
+
+/// `c` a little darker (the hover of a filled button).
+fn darker(c: Color32) -> Color32 {
+    let d = |v: u8| (v as f32 * 0.88).round() as u8;
+    Color32::from_rgb(d(c.r()), d(c.g()), d(c.b()))
 }
 
 /// Small centered "nothing here" note for panes too small for
@@ -483,121 +792,23 @@ pub(crate) fn compact_empty(ui: &mut Ui, icon: &str, title: &str, text: &str) {
     ui.vertical_centered(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.label(RichText::new(icon).font(theme::icon_font(22.0)).color(p.text_faint));
-        ui.label(RichText::new(title).font(theme::medium(13.5)).color(p.text));
+        ui.label(RichText::new(title).font(theme::semibold(13.0)).color(p.text));
         if !text.is_empty() {
-            ui.label(RichText::new(text).size(12.5).color(p.text_muted));
+            ui.add(egui::Label::new(RichText::new(text).size(12.5).color(p.text_muted)).wrap());
         }
     });
 }
 
-/// Rows of a settings group: a label and help text on the left, the control
-/// on the right, hairlines between rows.
-struct Rows<'a> {
-    ui: &'a mut Ui,
-    n: usize,
-    enabled: bool,
-}
-
-impl Rows<'_> {
-    /// Greys out the rows added after this (and their controls) when false.
-    fn enabled(&mut self, on: bool) {
-        self.enabled = on;
-    }
-
-    fn separator(&mut self) {
-        if self.n > 0 {
-            let p = theme::pal(self.ui);
-            let y = self.ui.cursor().top();
-            self.ui.painter().hline(self.ui.max_rect().x_range(), y, Stroke::new(1.0, p.border));
-        }
-        self.n += 1;
-    }
-
-    fn row(&mut self, label: &str, help: &str, add: impl FnOnce(&mut Ui)) {
-        self.separator();
-        let ui = &mut *self.ui;
-        let p = theme::pal(ui);
-        let w = ui.available_width();
-        // The label column takes what the control leaves (measured on the
-        // previous pass); text fields fill a little under half the row.
-        let id = ui.make_persistent_id(("settings-row", label));
-        let measured: Option<f32> = ui.data(|d| d.get_temp(id));
-        let control_w = measured.unwrap_or(w * 0.46).min(w - 180.0).max(36.0);
-        let label_w = w - control_w - 24.0;
-        let lg = ui.painter().layout(label.to_string(), FontId::proportional(13.5), Color32::PLACEHOLDER, label_w);
-        let hg = (!help.is_empty())
-            .then(|| ui.painter().layout(help.to_string(), FontId::proportional(12.0), Color32::PLACEHOLDER, label_w));
-        let text_h = lg.size().y + hg.as_ref().map_or(0.0, |g| g.size().y + 2.0);
-        let pad = if help.is_empty() { 14.0 } else { 22.0 };
-        let (rect, _) = ui.allocate_exact_size(vec2(w, text_h.max(30.0) + pad), Sense::hover());
-        let fade = |c: Color32| if self.enabled { c } else { c.gamma_multiply(0.5) };
-        let y = rect.center().y - text_h / 2.0;
-        let label_h = lg.size().y;
-        ui.painter().galley(pos2(rect.left(), y), lg, fade(p.text));
-        if let Some(hg) = hg {
-            ui.painter().galley(pos2(rect.left(), y + label_h + 2.0), hg, fade(p.text_muted));
-        }
-        let control = Rect::from_min_max(pos2(rect.right() - control_w, rect.top()), rect.max);
-        let mut child = ui.new_child(UiBuilder::new().max_rect(control).layout(Layout::right_to_left(Align::Center)));
-        child.spacing_mut().interact_size = vec2(110.0, 30.0);
-        child.spacing_mut().item_spacing = vec2(8.0, 6.0);
-        if !self.enabled {
-            child.disable();
-        }
-        add(&mut child);
-        let used = child.min_rect().width();
-        if measured.is_none_or(|m| (m - used).abs() > 0.5) {
-            ui.data_mut(|d| d.insert_temp(id, used));
-            ui.ctx().request_discard("settings row width");
-        }
-    }
-
-    /// Free content across the whole group (lists, sub-forms).
-    fn custom(&mut self, add: impl FnOnce(&mut Ui)) {
-        self.separator();
-        let enabled = self.enabled;
-        egui::Frame::new().inner_margin(Margin::symmetric(0, 12)).show(self.ui, |ui| {
-            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
-            ui.set_width(ui.available_width());
-            if !enabled {
-                ui.disable();
-            }
-            add(ui);
-        });
-    }
-}
-
-/// A titled group of settings rows in a bordered card.
-fn group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Rows)) {
-    let p = theme::pal(ui);
-    ui.label(RichText::new(title).font(theme::semibold(13.0)).color(p.text));
-    ui.add_space(2.0);
-    kit::card(ui).inner_margin(Margin::symmetric(14, 0)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let mut rows = Rows { ui, n: 0, enabled: true };
-        add(&mut rows);
-    });
-    ui.add_space(18.0);
-}
-
-/// A segmented control from owned labels.
-pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[(T, String)]) -> bool {
+/// The small segmented control (26 high) from owned labels.
+pub(crate) fn segmented_sm<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[(T, String)]) -> bool {
     let items: Vec<(T, &str)> = items.iter().map(|(v, l)| (*v, l.as_str())).collect();
-    kit::segmented(ui, current, &items)
+    kit::segmented_sm(ui, current, &items)
 }
 
-/// Keyboard chips for `⌘T / ⌘W` style shortcuts, right to left.
-fn shortcut_chips(ui: &mut Ui, keys: &str) {
-    let p = theme::pal(ui);
-    ui.spacing_mut().item_spacing.x = 4.0;
-    let parts: Vec<&str> = keys.split(" / ").collect();
-    for (i, k) in parts.iter().enumerate().rev() {
-        kit::kbd(ui, k);
-        if i > 0 {
-            ui.label(RichText::new("/").color(p.text_faint));
-        }
-    }
+/// The color of an environment's dot, from its place in the list (the
+/// workspace format has no color of its own).
+pub(crate) fn env_color(p: &theme::Palette, index: usize) -> Color32 {
+    [p.ok, p.warn, p.accent, p.info, p.text_muted][index % 5]
 }
 
 // ---------------------------------------------------------------------------
@@ -613,55 +824,63 @@ pub enum ConsoleFilter {
     Errors,
 }
 
+/// The console drawer at the bottom of the workbench card: a 36 px header
+/// (title, filter, search, copy / clear / close) over 26 px mono rows.
 pub fn console_ui(app: &mut TernaryWireApp, ui: &mut Ui) {
     use ternarywire_runner::ConsoleKind as K;
-    let p = theme::pal(ui);
     let search_id = egui::Id::unique("console-search");
     let mut search: String = ui.data(|d| d.get_temp(search_id).unwrap_or_default());
     let problems = app.console.iter().filter(|l| matches!(l.kind, K::Error | K::Warn)).count();
     let wide = ui.available_width() > 760.0;
-    let mut copy = false;
-    ui.horizontal(|ui| {
-        ui.set_height(30.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(RichText::new(icons::TERMINAL_WINDOW).font(theme::icon_font(16.0)).color(p.text_muted));
-        ui.label(RichText::new(tr("Console")).font(theme::semibold(13.0)).color(p.text));
-        kit::vdivider(ui, 18.0);
-        let errors = if problems > 0 { format!("{}  {problems}", tr("Errors")) } else { tr("Errors").to_string() };
-        segmented(
+    let has_lines = !app.console.is_empty();
+    let (mut copy, mut clear, mut close) = (false, false, false);
+    let errors = if problems > 0 { format!("{} {problems}", tr("Errors")) } else { tr("Errors").to_string() };
+    kit::bar(ui, 36.0, true, |ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.scope(|ui| {
+            let p = theme::pal(ui);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(icons::TERMINAL_WINDOW).font(theme::icon_font(13.0)).color(p.text_muted));
+            ui.label(kit::section_title(tr("Console")).color(p.text));
+        });
+        kit::segmented_sm(
             ui,
             &mut app.console_filter,
             &[
-                (ConsoleFilter::All, tr("All").to_string()),
-                (ConsoleFilter::Logs, tr("Logs").to_string()),
-                (ConsoleFilter::Network, tr("Network").to_string()),
-                (ConsoleFilter::Errors, errors),
+                (ConsoleFilter::All, tr("All")),
+                (ConsoleFilter::Logs, tr("Logs")),
+                (ConsoleFilter::Network, tr("Network")),
+                (ConsoleFilter::Errors, &errors),
             ],
         );
         trailing(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if kit::icon_button(ui, icons::X, &format!("{} (⌥⌘C)", tr("Close console"))).clicked() {
-                app.console_open = false;
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if kit::icon_button_sm(ui, icons::X, &format!("{} (⌥⌘C)", tr("Close console"))).clicked() {
+                close = true;
             }
-            let has_lines = !app.console.is_empty();
             if ui
-                .add_enabled_ui(has_lines, |ui| kit::icon_button(ui, icons::TRASH, tr("Clear console")))
+                .add_enabled_ui(has_lines, |ui| kit::icon_button_sm(ui, icons::BROOM, tr("Clear console")))
                 .inner
                 .clicked()
             {
-                app.console.clear();
+                clear = true;
             }
-            if ui.add_enabled_ui(has_lines, |ui| kit::icon_button(ui, icons::COPY, tr("Copy lines"))).inner.clicked() {
+            if ui.add_enabled_ui(has_lines, |ui| kit::icon_button_sm(ui, icons::COPY, tr("Copy lines"))).inner.clicked()
+            {
                 copy = true;
             }
             if wide {
-                ui.add_space(6.0);
-                kit::search_field(ui, "console-filter", &mut search, tr("Filter"), 200.0);
+                kit::search_field_sm(ui, "console-filter", &mut search, tr("Filter"), 200.0);
             }
         });
     });
     ui.data_mut(|d| d.insert_temp(search_id, search.clone()));
-    ui.add_space(4.0);
+    if close {
+        app.console_open = false;
+    }
+    if clear {
+        app.console.clear();
+    }
     let filter = app.console_filter;
     let needle = search.trim().to_lowercase();
     let rows: Vec<&ternarywire_runner::ConsoleLine> = app
@@ -681,50 +900,37 @@ pub fn console_ui(app: &mut TernaryWireApp, ui: &mut Ui) {
         let text = rows.iter().map(|l| format!("[{}] {}: {}", l.phase, l.source, l.message)).collect::<Vec<_>>();
         ui.ctx().copy_text(text.join("\n"));
     }
-    let frame = egui::Frame::new()
-        .fill(p.surface)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(1));
-    frame.show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.set_height(ui.available_height());
-        if rows.is_empty() {
-            ui.add_space((ui.available_height() / 2.0 - 34.0).max(4.0));
-            if app.console.is_empty() {
-                compact_empty(
-                    ui,
-                    icons::TERMINAL_WINDOW,
-                    tr("No console output yet"),
-                    tr("console.log() from scripts and every request you send show up here."),
-                );
-            } else {
-                compact_empty(ui, icons::FUNNEL, tr("Nothing matches this filter"), "");
-            }
-            return;
-        }
-        let row_h = 24.0;
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            egui::ScrollArea::vertical().id_salt("console").stick_to_bottom(true).auto_shrink([false; 2]).show_rows(
+    if rows.is_empty() {
+        ui.add_space((ui.available_height() / 2.0 - 34.0).max(8.0));
+        if app.console.is_empty() {
+            compact_empty(
                 ui,
-                row_h,
-                rows.len(),
-                |ui, range| {
-                    for l in &rows[range] {
-                        console_row(ui, l, row_h, wide);
-                    }
-                },
+                icons::TERMINAL_WINDOW,
+                tr("No console output yet"),
+                tr("console.log() from scripts and every request you send show up here."),
             );
-        });
+        } else {
+            compact_empty(ui, icons::FUNNEL, tr("Nothing matches this filter"), "");
+        }
+        return;
+    }
+    let area = egui::ScrollArea::vertical().id_salt("console").stick_to_bottom(true).auto_shrink([false; 2]);
+    kit::show_rows(area, ui, 26.0, rows.len(), |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for l in &rows[range] {
+            console_row(ui, l, wide);
+        }
     });
 }
 
-fn console_row(ui: &mut Ui, l: &ternarywire_runner::ConsoleLine, h: f32, wide: bool) {
+/// One console line: time (86 px), kind icon in its tone, the message, and
+/// the request (and script phase) on the right. Errors and warnings are
+/// tinted.
+fn console_row(ui: &mut Ui, l: &ternarywire_runner::ConsoleLine, wide: bool) {
     use ternarywire_runner::ConsoleKind as K;
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
     if !ui.is_rect_visible(rect) {
         return;
     }
@@ -735,47 +941,54 @@ fn console_row(ui: &mut Ui, l: &ternarywire_runner::ConsoleLine, h: f32, wide: b
         .and_then(|(_, rest)| rest.get(..3))
         .and_then(|code| code.parse::<u16>().ok())
         .filter(|s| (100..600).contains(s));
-    let (icon, color, tinted) = match l.kind {
-        K::Error => (icons::X_CIRCLE, p.err, true),
-        K::Warn => (icons::WARNING, p.warn, true),
-        K::Network => (icons::ARROWS_DOWN_UP, status.map(|s| theme::status_color(s, dark)).unwrap_or(p.info), false),
-        K::Info => (icons::INFO, p.text_muted, false),
-        K::Debug => (icons::BUG, p.text_faint, false),
-        K::Log => (icons::CARET_RIGHT, p.text_faint, false),
+    let (icon, color, tint) = match l.kind {
+        K::Error => (icons::WARNING_CIRCLE, p.err, Some(p.err_soft)),
+        K::Warn => (icons::WARNING, p.warn, Some(p.warn_soft)),
+        K::Network => (icons::GLOBE_SIMPLE, status.map(|s| theme::status_color(s, dark)).unwrap_or(p.text_muted), None),
+        K::Info => (icons::INFO, p.text_muted, None),
+        K::Debug => (icons::BUG, p.text_faint, None),
+        K::Log => (icons::TERMINAL, p.text_muted, None),
     };
     let painter = ui.painter();
-    if tinted {
-        painter.rect_filled(rect, 0.0, theme::soft(color, if dark { 0.10 } else { 0.06 }));
+    if let Some(bg) = tint {
+        painter.rect_filled(rect, 0.0, bg);
     } else if resp.hovered() {
         painter.rect_filled(rect, 0.0, p.faint_row());
     }
-    painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, theme::soft(p.border, 0.7)));
     let cy = rect.center().y;
-    let mut x = rect.left() + 10.0;
+    let mut x = rect.left() + 12.0;
     let time = chrono::DateTime::from_timestamp_millis(l.at_ms)
-        .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
         .unwrap_or_default();
-    painter.text(pos2(x, cy), Align2::LEFT_CENTER, time, theme::mono(11.0), p.text_faint);
-    x += 66.0;
-    painter.text(pos2(x + 7.0, cy), Align2::CENTER_CENTER, icon, theme::icon_font(14.0), color);
-    x += 22.0;
-    if wide {
-        let g = line_galley(ui, &l.source, FontId::proportional(12.0), 140.0);
-        ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text_muted);
-        x += 152.0;
+    painter.text(pos2(x, cy), Align2::LEFT_CENTER, time, theme::mono(12.0), p.text_faint);
+    x += 86.0 + 10.0;
+    let ig = painter.layout_no_wrap(icon.to_string(), theme::icon_font(12.5), color);
+    let iw = ig.size().x;
+    painter.galley(pos2(x, cy - ig.size().y / 2.0), ig, color);
+    x += iw + 10.0;
+    let mut right = rect.right() - 12.0;
+    let source = if l.phase.is_empty() || l.phase == "network" || l.source.is_empty() {
+        l.source.clone()
+    } else {
+        format!("{} · {}", l.source, l.phase)
+    };
+    if !source.is_empty() {
+        let max: f32 = if wide { 240.0 } else { 120.0 };
+        let g = line_galley(ui, &source, FontId::proportional(11.0), max.min((right - x) * 0.4));
+        let w = g.size().x;
+        ui.painter().galley(pos2(right - w, cy - g.size().y / 2.0), g, p.text_faint);
+        right -= w + 10.0;
     }
     let first = l.message.lines().next().unwrap_or("");
     let multiline = l.message.trim_end().contains('\n');
     let shown = if multiline { format!("{first} …") } else { first.to_string() };
-    let g = line_galley(ui, &shown, theme::mono(12.0), rect.right() - x - 10.0);
+    let g = line_galley(ui, &shown, theme::mono(12.0), right - x);
     let elided = g.elided || multiline;
-    let text_color = if tinted { color } else { p.text };
-    ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, text_color);
+    ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
     let resp = if elided { resp.on_hover_text(RichText::new(&l.message).monospace()) } else { resp };
     resp.context_menu(|ui| {
-        if ui.button(kit::with_icon(icons::COPY, tr("Copy message"))).clicked() {
+        if kit::menu_item(ui, Some(icons::COPY), tr("Copy message"), None).clicked() {
             ui.ctx().copy_text(l.message.clone());
-            ui.close();
         }
     });
 }
@@ -1305,11 +1518,26 @@ impl SettingsPage {
             SettingsPage::General => icons::SLIDERS_HORIZONTAL,
             SettingsPage::Requests => icons::PAPER_PLANE_RIGHT,
             SettingsPage::Scripts => icons::CODE,
-            SettingsPage::Proxy => icons::GLOBE_SIMPLE,
+            SettingsPage::Proxy => icons::SHARE,
             SettingsPage::Certificates => icons::SHIELD_CHECK,
             SettingsPage::Shortcuts => icons::KEYBOARD,
             SettingsPage::About => icons::INFO,
         }
+    }
+
+    /// The page named `name` (`general`, `requests`, `scripts`, `proxy`,
+    /// `certs`, `shortcuts`, `about`), for automation.
+    pub fn from_name(name: &str) -> Option<SettingsPage> {
+        Some(match name {
+            "general" => SettingsPage::General,
+            "requests" => SettingsPage::Requests,
+            "scripts" => SettingsPage::Scripts,
+            "proxy" => SettingsPage::Proxy,
+            "certs" | "certificates" => SettingsPage::Certificates,
+            "shortcuts" => SettingsPage::Shortcuts,
+            "about" => SettingsPage::About,
+            _ => return None,
+        })
     }
 
     fn label(self) -> &'static str {
@@ -1486,6 +1714,109 @@ pub fn show(app: &mut TernaryWireApp, ctx: &egui::Context) {
     }
 }
 
+/// Opens a dialog by the name automation scripts use: `settings:<page>`,
+/// `palette:<query>`, `requests:<query>`, `env-switch`, `vault:providers`,
+/// `vault:link:<name>`, `import:<file>`, `snippet`, `save`, `new-ws[:<name>|<folder>]`,
+/// `name-prompt`, `confirm:<request or collection>`, `unsaved`,
+/// `update[:progress]`. Returns false for other names.
+pub fn open_named(app: &mut TernaryWireApp, name: &str) -> bool {
+    let (kind, arg) = name.split_once(':').unwrap_or((name, ""));
+    let dialog = match kind {
+        "settings" if !arg.is_empty() => Dialog::Settings {
+            draft: Box::new(app.settings.clone()),
+            section: SettingsPage::from_name(arg).unwrap_or_default(),
+        },
+        "palette" | "requests" if !arg.is_empty() => {
+            Dialog::Palette { query: arg.to_string(), requests_only: kind == "requests", selected: 0 }
+        }
+        "env-switch" => Dialog::env_switcher(),
+        "vault" if arg == "providers" => Dialog::Vault(Box::new(crate::vault_ui::VaultDialog::providers())),
+        "vault" if arg.starts_with("link") => {
+            let name = arg.strip_prefix("link").unwrap_or("").trim_start_matches(':');
+            Dialog::Vault(Box::new(crate::vault_ui::VaultDialog::linking(name)))
+        }
+        "import" if !arg.is_empty() => match read_import(std::path::Path::new(arg)) {
+            Ok(text) => Dialog::Import { text, error: None, preview: None, source: arg.to_string() },
+            Err(e) => Dialog::Import { text: String::new(), error: Some(e), preview: None, source: String::new() },
+        },
+        "snippet" | "codegen" => {
+            let Some(tab) = app.tabs.get(app.active) else { return false };
+            let found = match (tab.kind.location(), tab.kind.scratch()) {
+                (Some(l), _) => app
+                    .ws
+                    .data
+                    .collection(&l.collection)
+                    .and_then(|c| c.find_request(&l.item))
+                    .map(|i| (i.clone(), Some(l.collection.clone()))),
+                (None, Some(s)) => Some((s.clone(), None)),
+                _ => None,
+            };
+            let Some((item, collection)) = found else { return false };
+            Dialog::codegen(app, &item, collection.as_deref())
+        }
+        "save" => {
+            let Some(tab) = app.tabs.get(app.active) else { return false };
+            Dialog::save_as(tab.id, &app.ws)
+        }
+        // `new-ws:<name>|<folder>`, both optional.
+        "new-ws" => {
+            let (name, folder) = arg.split_once('|').unwrap_or((arg, ""));
+            let path = (!folder.is_empty()).then(|| PathBuf::from(folder));
+            let name = if name.is_empty() { "My Workspace".to_string() } else { name.to_string() };
+            Dialog::NewWorkspace { name, path }
+        }
+        "name-prompt" => Dialog::prompt_new_collection(),
+        "confirm" => {
+            let request =
+                app.ws.data.collections.iter().find_map(|c| {
+                    c.requests().into_iter().find(|r| r.name == arg).map(|r| (c.id.clone(), r.id.clone()))
+                });
+            match request {
+                Some((c, r)) => Dialog::confirm_delete(c, Some(r), arg.to_string()),
+                None => match app.ws.data.collections.iter().find(|c| c.name == arg) {
+                    Some(c) => Dialog::confirm_delete(c.id.clone(), None, arg.to_string()),
+                    None => return false,
+                },
+            }
+        }
+        "unsaved" => {
+            let Some(tab) = app.tabs.get(app.active) else { return false };
+            Dialog::CloseUnsaved { tab: tab.id }
+        }
+        "update" => {
+            crate::update::show_example(app, arg == "progress");
+            return true;
+        }
+        _ => return false,
+    };
+    app.dialog = Some(dialog);
+    true
+}
+
+/// Merges `patch` (settings JSON) into the draft of the open Settings
+/// dialog, as if it had been edited there.
+pub fn merge_settings_draft(app: &mut TernaryWireApp, patch: &serde_json::Value) {
+    fn merge(into: &mut serde_json::Value, patch: &serde_json::Value) {
+        match (into, patch) {
+            (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                for (k, v) in b {
+                    merge(a.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+                }
+            }
+            (a, b) => *a = b.clone(),
+        }
+    }
+    if let Some(Dialog::Settings { draft, .. }) = &mut app.dialog
+        && let Ok(mut v) = serde_json::to_value(&**draft)
+    {
+        merge(&mut v, patch);
+        match serde_json::from_value(v) {
+            Ok(s) => **draft = s,
+            Err(e) => eprintln!("automation: settings_draft: {e}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command palette, request search and environment switcher
 // ---------------------------------------------------------------------------
@@ -1518,6 +1849,12 @@ impl Group {
 enum Lead {
     Method(String),
     Icon(&'static str),
+    /// A faint icon ("No environment" in the switcher).
+    Faint(&'static str),
+    /// An environment's color.
+    Dot(Color32),
+    /// The active environment in the switcher: a green check.
+    Active,
 }
 
 struct PaletteEntry {
@@ -1700,31 +2037,32 @@ fn request_entries(app: &TernaryWireApp, out: &mut Vec<PaletteEntry>) {
     }
 }
 
-fn environment_entries(app: &TernaryWireApp, out: &mut Vec<PaletteEntry>) {
+fn environment_entries(app: &TernaryWireApp, out: &mut Vec<PaletteEntry>, dark: bool) {
     let active = app.ws.data.active_environment.as_deref();
+    let p = theme::palette(dark);
     out.push(
-        PaletteEntry::new(Group::Environments, icons::X_CIRCLE, tr("No environment"), PaletteAction::Env(None))
+        PaletteEntry::new(Group::Environments, icons::CIRCLE, tr("No environment"), PaletteAction::Env(None))
             .extra("environment")
             .current(active.is_none()),
     );
-    for e in &app.ws.data.environments {
+    for (i, e) in app.ws.data.environments.iter().enumerate() {
         let n = e.variables.iter().filter(|v| v.enabled).count();
         let vars = if n == 1 { tr("1 variable").to_string() } else { trf("{} variables", &[&n]) };
-        out.push(
-            PaletteEntry::new(
-                Group::Environments,
-                icons::GLOBE,
-                e.name.clone(),
-                PaletteAction::Env(Some(e.id.clone())),
-            )
-            .detail(vars)
-            .extra("environment")
-            .current(active == Some(e.id.as_str())),
-        );
+        let mut entry = PaletteEntry::new(
+            Group::Environments,
+            icons::GLOBE,
+            e.name.clone(),
+            PaletteAction::Env(Some(e.id.clone())),
+        )
+        .detail(vars)
+        .extra("environment")
+        .current(active == Some(e.id.as_str()));
+        entry.lead = Lead::Dot(env_color(&p, i));
+        out.push(entry);
     }
 }
 
-fn palette_entries(app: &TernaryWireApp, requests_only: bool) -> Vec<PaletteEntry> {
+fn palette_entries(app: &TernaryWireApp, requests_only: bool, dark: bool) -> Vec<PaletteEntry> {
     let mut out = Vec::new();
     if !requests_only {
         use PaletteAction as A;
@@ -1752,11 +2090,11 @@ fn palette_entries(app: &TernaryWireApp, requests_only: bool) -> Vec<PaletteEntr
         out.push(PaletteEntry::new(a, icons::GEAR_SIX, tr("Settings"), A::Settings).keys("⌘,").extra("preferences"));
         out.push(PaletteEntry::new(a, icons::ARROWS_CLOCKWISE, tr("Check for updates…"), A::CheckUpdates));
         let mut envs = Vec::new();
-        environment_entries(app, &mut envs);
+        environment_entries(app, &mut envs, dark);
         out.extend(envs);
         for col in &app.ws.data.collections {
             out.push(
-                PaletteEntry::new(Group::Runner, icons::PLAY_CIRCLE, col.name.clone(), A::Run(col.id.clone()))
+                PaletteEntry::new(Group::Runner, icons::PLAY, col.name.clone(), A::Run(col.id.clone()))
                     .detail(tr("Collection runner"))
                     .extra("run runner"),
             );
@@ -1796,97 +2134,125 @@ fn nav_keys(ui: &mut Ui) -> (bool, bool, bool) {
     })
 }
 
-/// The large search field at the top of the palette and switcher.
-fn search_header(ui: &mut Ui, id: &str, query: &mut String, hint: &str) -> Response {
+/// The search row at the top of the palette and the switcher (`.dl-pal-in`):
+/// 54 high, an 18 px icon, a frameless 15 px field and an `esc` key cap.
+fn search_header(ui: &mut Ui, id: &str, query: &mut String, hint: &str, icon: &str) -> Response {
     let p = theme::pal(ui);
-    let r = egui::Frame::new()
-        .inner_margin(Margin { left: 18, right: 14, top: 10, bottom: 10 })
-        .show(ui, |ui| {
-            let w = ui.available_width();
-            ui.allocate_ui_with_layout(vec2(w, 36.0), Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                ui.label(RichText::new(icons::MAGNIFYING_GLASS).font(theme::icon_font(19.0)).color(p.text_muted));
-                let edit = egui::TextEdit::singleline(query)
-                    .id(egui::Id::unique(id))
-                    .hint_text(RichText::new(hint).color(p.text_faint))
-                    .font(FontId::proportional(16.5))
-                    .frame(egui::Frame::NONE)
-                    .margin(Margin::ZERO)
-                    .min_size(vec2(0.0, 36.0))
-                    .align(Align2::LEFT_CENTER)
-                    .desired_width(ui.available_width() - 48.0);
-                let r = ui.add(edit);
-                trailing(ui, |ui| kit::kbd(ui, "esc"));
-                r
-            })
-            .inner
-        })
-        .inner;
-    hairline(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
+    let cy = rect.center().y;
+    let ig = ui.painter().layout_no_wrap(icon.to_string(), theme::icon_font(18.0), p.text_faint);
+    let iw = ig.size().x;
+    ui.painter().galley(pos2(rect.left() + 16.0, cy - ig.size().y / 2.0), ig, p.text_faint);
+    let kbd_w = ui.painter().layout_no_wrap("esc".into(), FontId::proportional(10.5), p.text_muted).size().x + 10.0;
+    let kbd = Rect::from_min_size(pos2(rect.right() - 16.0 - kbd_w, cy - 9.0), vec2(kbd_w, 18.0));
+    place(ui, kbd, |ui: &mut Ui| kit::kbd(ui, "esc"));
+    let field =
+        Rect::from_min_max(pos2(rect.left() + 16.0 + iw + 10.0, rect.top()), pos2(kbd.left() - 10.0, rect.bottom()));
+    let edit = egui::TextEdit::singleline(query)
+        .id(egui::Id::unique(id))
+        .hint_text(RichText::new(hint).font(FontId::proportional(15.0)).color(p.text_faint))
+        .font(FontId::proportional(15.0))
+        .frame(egui::Frame::NONE)
+        .margin(Margin::ZERO)
+        .min_size(vec2(0.0, 54.0))
+        .align(Align2::LEFT_CENTER)
+        .desired_width(field.width());
+    let r = place(ui, field, edit);
     r.request_focus();
     widgets::a11y_name(&r, hint);
     r
 }
 
-/// The `⌘N`-style chip painted at the right edge of a row; returns its width.
-fn paint_kbd(ui: &Ui, right: f32, cy: f32, keys: &str) -> f32 {
-    let p = theme::pal(ui);
-    let g = ui.painter().layout_no_wrap(keys.to_string(), FontId::proportional(11.5), p.text_muted);
-    let rect = Rect::from_min_max(pos2(right - g.size().x - 12.0, cy - 10.0), pos2(right, cy + 10.0));
-    ui.painter().rect(rect, CornerRadius::same(4), p.subtle, Stroke::new(1.0, p.border), StrokeKind::Inside);
-    ui.painter().galley(rect.center() - g.size() / 2.0, g, p.text_muted);
-    rect.width()
+/// What the right end of a result row shows besides its shortcut.
+#[derive(Clone, Copy)]
+enum RowEnd {
+    /// The palette: a check on the current theme, language or environment.
+    Check,
+    /// The environment switcher: an `Active` pill on the active one.
+    ActivePill,
 }
 
-fn palette_row(ui: &mut Ui, e: &PaletteEntry, query: &str, selected: bool) -> Response {
+/// A result row (`.dl-pal-row`): 36 high, a 38 px lead column (method,
+/// icon or environment dot), the name with the matched characters in bold
+/// accent, a faint detail, and on the right the shortcut or the check. The
+/// highlighted row is tinted and says what ↩ does.
+fn palette_row(ui: &mut Ui, e: &PaletteEntry, query: &str, selected: bool, end: RowEnd, enter: &str) -> Response {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
     widgets::a11y_button(&resp, &e.label);
     if !ui.is_rect_visible(rect) {
         return resp;
     }
-    let radius = CornerRadius::same(7);
+    let radius = CornerRadius::same(theme::RADIUS);
     if selected {
         ui.painter().rect_filled(rect, radius, p.accent_soft);
     } else if resp.hovered() {
         ui.painter().rect_filled(rect, radius, p.hover);
     }
     let cy = rect.center().y;
-    let mut x = rect.left() + 12.0;
+    let lead = pos2(rect.left() + 10.0 + 19.0, cy);
     match &e.lead {
         Lead::Method(m) => {
-            let short = match m.as_str() {
-                "DELETE" => "DEL",
-                "OPTIONS" => "OPT",
-                other => other,
-            };
             let color = theme::method_color(m, dark);
-            ui.painter().text(pos2(x, cy), Align2::LEFT_CENTER, short, theme::semibold(10.5), color);
-            x += 46.0;
+            ui.painter().text(lead, Align2::CENTER_CENTER, widgets::method_short(m), theme::semibold(10.5), color);
         }
         Lead::Icon(icon) => {
-            let color = if selected { p.accent_text } else { p.text_muted };
-            ui.painter().text(pos2(x + 8.0, cy), Align2::CENTER_CENTER, *icon, theme::icon_font(16.0), color);
-            x += 30.0;
+            ui.painter().text(lead, Align2::CENTER_CENTER, *icon, theme::icon_font(16.0), p.text_muted);
+        }
+        Lead::Faint(icon) => {
+            ui.painter().text(lead, Align2::CENTER_CENTER, *icon, theme::icon_font(16.0), p.text_faint);
+        }
+        Lead::Dot(c) => {
+            ui.painter().circle_filled(lead, 4.0, *c);
+        }
+        Lead::Active => {
+            ui.painter().text(lead, Align2::CENTER_CENTER, icons::CHECK_CIRCLE, theme::icon_font(16.0), p.ok);
         }
     }
-    let mut right = rect.right() - 12.0;
-    if e.current {
-        ui.painter().text(pos2(right - 8.0, cy), Align2::CENTER_CENTER, icons::CHECK, theme::icon_font(15.0), p.accent);
-        right -= 26.0;
+    let mut x = rect.left() + 10.0 + 38.0 + 10.0;
+    let mut right = rect.right() - 10.0;
+    if selected {
+        let tg = ui.painter().layout_no_wrap(enter.to_string(), FontId::proportional(12.0), p.accent_text);
+        let ig = ui.painter().layout_no_wrap(icons::ARROW_BEND_UP_LEFT.into(), theme::icon_font(12.0), p.accent_text);
+        let tx = right - tg.size().x;
+        let ix = tx - 4.0 - ig.size().x;
+        ui.painter().galley(pos2(tx, cy - tg.size().y / 2.0), tg, p.accent_text);
+        ui.painter().galley(pos2(ix, cy - ig.size().y / 2.0), ig, p.accent_text);
+        right = ix - 10.0;
+    } else {
+        if e.current {
+            match end {
+                RowEnd::Check => {
+                    let g = ui.painter().layout_no_wrap(icons::CHECK.into(), theme::icon_font(13.0), p.accent_text);
+                    let w = g.size().x;
+                    ui.painter().galley(pos2(right - w, cy - g.size().y / 2.0), g, p.accent_text);
+                    right -= w + 10.0;
+                }
+                RowEnd::ActivePill => {
+                    let g = ui.painter().layout_no_wrap(tr("Active").into(), theme::medium(11.5), p.ok);
+                    let pill = Rect::from_min_max(pos2(right - g.size().x - 14.0, cy - 10.0), pos2(right, cy + 10.0));
+                    ui.painter().rect_filled(pill, CornerRadius::same(10), p.ok_soft);
+                    ui.painter().galley(pill.center() - g.size() / 2.0, g, p.ok);
+                    right = pill.left() - 10.0;
+                }
+            }
+        }
+        if !e.keys.is_empty() {
+            let w = ui.painter().layout_no_wrap(e.keys.to_string(), FontId::proportional(10.5), p.text_muted).size().x
+                + 10.0;
+            let r = Rect::from_min_size(pos2(right - w, cy - 9.0), vec2(w, 18.0));
+            place(ui, r, |ui: &mut Ui| kit::kbd(ui, e.keys));
+            right -= w + 10.0;
+        }
     }
-    if !e.keys.is_empty() {
-        right -= paint_kbd(ui, right, cy, e.keys) + 10.0;
-    } else if selected && !e.current {
-        right -= paint_kbd(ui, right, cy, "↩") + 10.0;
-    }
-    // Name with the matched characters in the accent color, then the muted
+    // The name with the matched characters in bold accent, then the faint
     // detail when there is room.
     let marks = match_marks(&e.label, query);
     let mut job = LayoutJob::default();
-    let plain = TextFormat::simple(theme::medium(13.5), p.text);
-    let hit = TextFormat::simple(theme::semibold(13.5), p.accent_text);
+    let plain = TextFormat::simple(FontId::proportional(13.0), p.text);
+    let hit = TextFormat::simple(theme::semibold(13.0), p.accent_text);
     let mut run = String::new();
     let mut run_hit = false;
     for (c, m) in e.label.chars().zip(marks.iter().copied()) {
@@ -1899,20 +2265,38 @@ fn palette_row(ui: &mut Ui, e: &PaletteEntry, query: &str, selected: bool) -> Re
     if !run.is_empty() {
         job.append(&run, 0.0, if run_hit { hit } else { plain });
     }
-    let name_max = (right - x - 8.0).max(40.0);
+    let name_max = (right - x).max(40.0);
     job.wrap = TextWrapping { max_width: name_max, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     let name = ui.painter().layout_job(job);
     let name_w = name.size().x;
     ui.painter().galley(pos2(x, cy - name.size().y / 2.0), name, p.text);
     x += name_w + 10.0;
-    if !e.detail.is_empty() && right - x > 48.0 {
-        let g = line_galley(ui, &e.detail, FontId::proportional(12.5), right - x - 8.0);
-        ui.painter().galley(pos2(x, cy - g.size().y / 2.0 + 0.5), g, p.text_muted);
+    if !e.detail.is_empty() && right - x > 40.0 {
+        let g = line_galley(ui, &e.detail, FontId::proportional(12.0), right - x);
+        ui.painter().galley(pos2(x, cy - g.size().y / 2.0 + 0.5), g, p.text_faint);
     }
     resp
 }
 
-/// The grouped result list. Returns the entry that was clicked.
+/// A group header in the result list (`.dl-pal-grp`): 10.5 semibold faint
+/// capitals, 10 px above and 4 below.
+fn group_header(ui: &mut Ui, text: &str) {
+    let p = theme::pal(ui);
+    let line = (10.5f32 * 1.45).round();
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0 + line + 4.0), Sense::hover());
+    let format = TextFormat {
+        font_id: theme::semibold(10.5),
+        color: p.text_faint,
+        extra_letter_spacing: 0.63,
+        ..Default::default()
+    };
+    let g = ui.painter().layout_job(LayoutJob::single_section(text.to_uppercase(), format));
+    ui.painter().galley(pos2(rect.left() + 10.0, rect.top() + 10.0 + (line - g.size().y) / 2.0), g, p.text_faint);
+}
+
+/// The grouped result list (`.dl-pal-list`, padding 4 8 8). Returns the
+/// entry that was clicked.
+#[allow(clippy::too_many_arguments)]
 fn result_list(
     ui: &mut Ui,
     entries: &[PaletteEntry],
@@ -1921,28 +2305,24 @@ fn result_list(
     selected: &mut usize,
     scroll: bool,
     max_h: f32,
+    end: RowEnd,
+    enter: &str,
 ) -> Option<usize> {
-    let p = theme::pal(ui);
     let mut chosen = None;
     let first_group = order.first().map(|i| entries[*i].group);
     let headers = order.iter().any(|i| Some(entries[*i].group) != first_group);
     let moved = ui.input(|i| i.pointer.delta() != Vec2::ZERO);
     egui::ScrollArea::vertical().id_salt("results").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-        egui::Frame::new().inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+        egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 8 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let mut last = None;
             for (row, &i) in order.iter().enumerate() {
                 let e = &entries[i];
                 if headers && last != Some(e.group) {
-                    ui.add_space(if last.is_some() { 10.0 } else { 4.0 });
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(e.group.label()).font(theme::medium(11.5)).color(p.text_faint));
-                    });
-                    ui.add_space(4.0);
+                    group_header(ui, e.group.label());
                     last = Some(e.group);
                 }
-                let r = palette_row(ui, e, query, row == *selected);
+                let r = palette_row(ui, e, query, row == *selected, end, enter);
                 if row == *selected && scroll {
                     r.scroll_to_me(None);
                 }
@@ -1963,19 +2343,19 @@ fn no_results(ui: &mut Ui, title: &str, text: &str) {
     let p = theme::pal(ui);
     ui.vertical_centered(|ui| {
         ui.add_space(34.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::hover());
-        ui.painter().circle_filled(rect.center(), 23.0, p.subtle);
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
+        ui.painter().rect(rect, CornerRadius::same(14), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
             icons::MAGNIFYING_GLASS,
-            theme::icon_font(21.0),
+            theme::icon_font(24.0),
             p.text_muted,
         );
-        ui.add_space(12.0);
-        ui.label(RichText::new(title).font(theme::semibold(14.5)).color(p.text));
-        ui.add_space(4.0);
-        ui.label(RichText::new(text).color(p.text_muted));
+        ui.add_space(14.0);
+        ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.text));
+        ui.add_space(2.0);
+        ui.label(RichText::new(text).size(12.5).color(p.text_muted));
         ui.add_space(34.0);
     });
 }
@@ -2002,16 +2382,17 @@ fn palette(
     requests_only: bool,
     selected: &mut usize,
 ) -> Outcome {
-    let mut entries = palette_entries(app, requests_only);
+    let dark = ctx.global_style().visuals.dark_mode;
+    let mut entries = palette_entries(app, requests_only, dark);
     let q = query.trim().to_string();
     let order = rank(&entries, &q);
     let no_requests = !entries.iter().any(|e| e.group == Group::Requests);
-    let max_h = fit_height(ctx, 260.0, 420.0);
+    let max_h = fit_height(ctx, 260.0, if q.is_empty() { 440.0 } else { 300.0 });
     let mut chosen = None;
     let outcome = Modal::new("palette", 660.0).top().show(ctx, |ui| {
         let (up, down, enter) = nav_keys(ui);
         let hint = if requests_only { tr("Search requests…") } else { tr("Search requests and commands…") };
-        if search_header(ui, "palette-search", query, hint).changed() {
+        if search_header(ui, "palette-search", query, hint, icons::MAGNIFYING_GLASS).changed() {
             *selected = 0;
         }
         step(selected, order.len(), up, down);
@@ -2022,13 +2403,13 @@ fn palette(
                 no_results(ui, &trf("No results for “{}”", &[&q]), tr("Check the spelling or try another word."));
             }
         } else {
-            chosen = result_list(ui, &entries, &order, &q, selected, up || down, max_h);
+            chosen = result_list(ui, &entries, &order, &q, selected, up || down, max_h, RowEnd::Check, tr("Open"));
         }
         if enter {
             chosen = order.get(*selected).copied();
         }
         footer(ui, |ui| {
-            key_hints(ui, &[("↑↓", tr("Navigate")), ("↩", tr("Open")), ("esc", tr("Close"))]);
+            key_hints(ui, &[(&["↑", "↓"], tr("Navigate")), (&["↩"], tr("Open")), (&["esc"], tr("Close"))]);
             trailing(ui, |ui| {
                 let n = order.len();
                 let text = if n == 1 { tr("1 result").to_string() } else { trf("{} results", &[&n]) };
@@ -2098,32 +2479,43 @@ fn env_switcher(
     query: &mut String,
     selected: &mut Option<usize>,
 ) -> Outcome {
+    let dark = ctx.global_style().visuals.dark_mode;
     let mut entries = Vec::new();
-    environment_entries(app, &mut entries);
+    environment_entries(app, &mut entries, dark);
+    // The switcher marks the active environment with a green check and
+    // "No environment" with a faint circle.
+    for e in &mut entries {
+        if e.current && matches!(e.lead, Lead::Dot(_)) {
+            e.lead = Lead::Active;
+        } else if let Lead::Icon(i) = e.lead {
+            e.lead = Lead::Faint(i);
+        }
+    }
     let q = query.trim().to_string();
     let order = rank(&entries, &q);
     let mut sel = selected.unwrap_or_else(|| order.iter().position(|i| entries[*i].current).unwrap_or(0));
-    let max_h = fit_height(ctx, 260.0, 360.0);
+    let max_h = fit_height(ctx, 260.0, 440.0);
     let mut chosen = None;
     let mut edit = false;
     let out = Modal::new("env-switch", 500.0).top().show(ctx, |ui| {
         let (up, down, enter) = nav_keys(ui);
-        if search_header(ui, "env-search", query, tr("Switch environment…")).changed() {
+        if search_header(ui, "env-search", query, tr("Switch environment…"), icons::GLOBE).changed() {
             sel = 0;
         }
         step(&mut sel, order.len(), up, down);
         if order.is_empty() {
             no_results(ui, &trf("No results for “{}”", &[&q]), tr("Check the spelling or try another word."));
         } else {
-            chosen = result_list(ui, &entries, &order, &q, &mut sel, up || down, max_h);
+            chosen =
+                result_list(ui, &entries, &order, &q, &mut sel, up || down, max_h, RowEnd::ActivePill, tr("Activate"));
         }
         if enter {
             chosen = order.get(sel).copied();
         }
         footer(ui, |ui| {
-            key_hints(ui, &[("↑↓", tr("Navigate")), ("↩", tr("Activate"))]);
+            key_hints(ui, &[(&["↑", "↓"], tr("Navigate")), (&["↩"], tr("Activate"))]);
             trailing(ui, |ui| {
-                if kit::ghost(ui, Some(icons::PENCIL_SIMPLE), tr("Edit variables")).clicked() {
+                if kit::ghost(ui, Some(icons::SLIDERS_HORIZONTAL), tr("Edit variables")).clicked() {
                     edit = true;
                 }
             });
@@ -2146,73 +2538,88 @@ fn env_switcher(
 // Quick look
 // ---------------------------------------------------------------------------
 
-/// A card listing variables: header with an Edit button, then key/value rows.
-/// Returns true when Edit was pressed.
+/// What the head of a quick look card shows in front of its name.
+enum CardLead {
+    Dot(Color32),
+    Icon(&'static str),
+}
+
+/// A card listing variables (`.card` in the quick look): a 42 px head with
+/// the name, an `Active` pill, the count and an Edit button, then key/value
+/// rows of 30 px with hairlines. Returns true when Edit was pressed.
 fn variables_card(
     ui: &mut Ui,
-    icon: &str,
+    lead: CardLead,
     title: &str,
-    tag: Option<&str>,
+    active: bool,
     vars: &[ternarywire_core::variables::Variable],
 ) -> bool {
     let p = theme::pal(ui);
     let mut edit = false;
+    let shown: Vec<_> = vars.iter().filter(|v| v.enabled).collect();
     kit::card(ui).inner_margin(Margin::ZERO).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 0.0;
-        egui::Frame::new().inner_margin(Margin { left: 14, right: 8, top: 8, bottom: 8 }).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(p.text_muted));
-                ui.label(RichText::new(title).font(theme::semibold(13.5)).color(p.text));
-                if let Some(tag) = tag {
-                    kit::pill(ui, tag, p.ok);
+        let w = ui.available_width();
+        let head = Rect::from_min_size(ui.cursor().min, vec2(w, 42.0));
+        ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
+        let inner = Rect::from_min_max(head.min + vec2(14.0, 0.0), head.max - vec2(10.0, 1.0));
+        in_rect(ui, inner, Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            match lead {
+                CardLead::Dot(c) => {
+                    kit::dot(ui, c, 4.0);
                 }
-                trailing(ui, |ui| {
-                    if kit::ghost(ui, Some(icons::PENCIL_SIMPLE), tr("Edit")).clicked() {
-                        edit = true;
-                    }
-                });
+                CardLead::Icon(i) => {
+                    ui.label(RichText::new(i).font(theme::icon_font(13.0)).color(p.text_muted));
+                }
+            }
+            ui.label(RichText::new(title).font(theme::semibold(13.0)).color(p.text));
+            if active {
+                kit::tone_pill(ui, tr("Active"), kit::Tone::Ok);
+            }
+            let n = shown.len();
+            let count = if n == 1 { tr("1 variable").to_string() } else { trf("{} variables", &[&n]) };
+            ui.label(RichText::new(count).size(12.0).color(p.text_faint));
+            trailing(ui, |ui| {
+                if kit::ghost(ui, Some(icons::PENCIL_SIMPLE), tr("Edit")).clicked() {
+                    edit = true;
+                }
             });
         });
-        let shown: Vec<_> = vars.iter().filter(|v| v.enabled).collect();
-        let w = ui.available_width();
+        ui.advance_cursor_after_rect(head);
         if shown.is_empty() {
-            hairline(ui);
-            egui::Frame::new().inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
-                ui.label(RichText::new(tr("No variables")).color(p.text_muted));
+            egui::Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+                ui.label(RichText::new(tr("No variables")).size(12.0).color(p.text_muted));
             });
         }
-        let key_w = (w * 0.38).min(220.0);
-        for v in shown {
-            hairline(ui);
+        // Columns .9fr / 1.3fr with a 12 px gap, 14 px in from the sides.
+        let key_w = (w - 28.0 - 12.0) * 0.9 / 2.2;
+        for (i, v) in shown.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
-            if resp.hovered() {
-                ui.painter().rect_filled(rect, 0.0, p.faint_row());
+            if i > 0 {
+                ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
             }
             let cy = rect.center().y;
-            let kg = line_galley(ui, &v.key, theme::mono(12.0), key_w - 20.0);
-            ui.painter().galley(pos2(rect.left() + 14.0, cy - kg.size().y / 2.0), kg, p.text);
-            let vx = rect.left() + key_w;
+            let kg = line_galley(ui, &v.key, theme::mono(12.0), key_w);
+            ui.painter().galley(pos2(rect.left() + 14.0, cy - kg.size().y / 2.0), kg, p.text_muted);
+            let vx = rect.left() + 14.0 + key_w + 12.0;
             if v.is_secret() {
+                let lock = ui.painter().layout_no_wrap(icons::LOCK_SIMPLE.into(), theme::icon_font(12.0), p.text_faint);
+                let lw = lock.size().x;
+                ui.painter().galley(pos2(vx, cy - lock.size().y / 2.0), lock, p.text_faint);
                 ui.painter().text(
-                    pos2(vx, cy),
-                    Align2::LEFT_CENTER,
-                    icons::LOCK_SIMPLE,
-                    theme::icon_font(13.0),
-                    p.text_faint,
-                );
-                ui.painter().text(
-                    pos2(vx + 18.0, cy),
+                    pos2(vx + lw + 4.0, cy),
                     Align2::LEFT_CENTER,
                     "••••••••",
                     theme::mono(12.0),
-                    p.text_muted,
+                    p.text_faint,
                 );
             } else {
                 let value = v.effective();
                 let g = line_galley(ui, value, theme::mono(12.0), rect.right() - vx - 14.0);
                 let elided = g.elided;
-                ui.painter().galley(pos2(vx, cy - g.size().y / 2.0), g, p.text_muted);
+                ui.painter().galley(pos2(vx, cy - g.size().y / 2.0), g, p.text);
                 if elided {
                     let _ = resp.on_hover_text(RichText::new(value).monospace());
                 }
@@ -2225,48 +2632,46 @@ fn variables_card(
 fn quick_look(app: &mut TernaryWireApp, ctx: &egui::Context) -> Outcome {
     let mut open_env = None;
     let mut choose = false;
-    let max_h = fit_height(ctx, 220.0, 520.0);
     let out = Modal::new("quick-look", 620.0)
         .title(tr("Quick look"))
         .subtitle(tr("Variables in scope right now"))
         .icon(icons::EYE)
         .show(ctx, |ui| {
             body(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                    match app.ws.data.active_environment() {
-                        Some(e) => {
-                            if variables_card(ui, icons::GLOBE, &e.name, Some(tr("Active")), &e.variables) {
-                                open_env = Some(Some(e.id.clone()));
-                            }
+                ui.spacing_mut().item_spacing.y = 12.0;
+                let active = app.ws.data.active_environment.clone();
+                let index = app.ws.data.environments.iter().position(|e| Some(&e.id) == active.as_ref());
+                match (app.ws.data.active_environment(), index) {
+                    (Some(e), Some(i)) => {
+                        let color = env_color(&theme::pal(ui), i);
+                        if variables_card(ui, CardLead::Dot(color), &e.name, true, &e.variables) {
+                            open_env = Some(Some(e.id.clone()));
                         }
-                        None => {
-                            kit::card(ui).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let p = theme::pal(ui);
-                                    ui.label(
-                                        RichText::new(icons::GLOBE).font(theme::icon_font(16.0)).color(p.text_faint),
-                                    );
-                                    ui.label(RichText::new(tr("No environment is active")).color(p.text_muted));
-                                    trailing(ui, |ui| {
-                                        if kit::secondary(ui, None, tr("Choose…")).clicked() {
-                                            choose = true;
-                                        }
-                                    });
+                    }
+                    _ => {
+                        kit::card(ui).inner_margin(Margin { left: 14, right: 10, top: 0, bottom: 0 }).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.set_height(42.0);
+                                let p = theme::pal(ui);
+                                ui.label(RichText::new(icons::GLOBE).font(theme::icon_font(13.0)).color(p.text_faint));
+                                ui.label(RichText::new(tr("No environment is active")).color(p.text_muted));
+                                trailing(ui, |ui| {
+                                    if kit::button_ex(ui, kit::Kind::Secondary, None, tr("Choose…"), true).clicked() {
+                                        choose = true;
+                                    }
                                 });
                             });
-                        }
+                        });
                     }
-                    ui.add_space(12.0);
-                    if variables_card(ui, icons::GLOBE_SIMPLE, tr("Globals"), None, &app.ws.data.globals) {
-                        open_env = Some(None);
-                    }
-                });
+                }
+                let globals = CardLead::Icon(icons::GLOBE_SIMPLE);
+                if variables_card(ui, globals, tr("Globals"), false, &app.ws.data.globals) {
+                    open_env = Some(None);
+                }
             });
             footer(ui, |ui| {
-                let p = theme::pal(ui);
-                ui.label(RichText::new(icons::LOCK_SIMPLE).font(theme::icon_font(13.0)).color(p.text_faint));
-                ui.label(RichText::new(tr("Secret values stay hidden.")).size(12.0).color(p.text_muted));
+                icon_hint(ui, icons::LOCK_SIMPLE, tr("Secret values stay hidden."));
                 trailing(ui, |ui| {
                     if kit::secondary(ui, None, tr("Close")).clicked() { Outcome::Close } else { Outcome::Keep }
                 })
@@ -2287,6 +2692,246 @@ fn quick_look(app: &mut TernaryWireApp, ctx: &egui::Context) -> Outcome {
 // Settings
 // ---------------------------------------------------------------------------
 
+/// Height of the Settings dialog: fixed, so changing pages doesn't make it jump.
+const SETTINGS_H: f32 = 640.0;
+
+/// The help line of a settings row.
+#[derive(Clone, Copy)]
+enum Help<'a> {
+    None,
+    Text(&'a str),
+    /// A header or a path, in the code font.
+    Mono(&'a str),
+}
+
+/// Heights of the controls of settings rows, which set the row's height.
+mod ctl {
+    pub const SWITCH: f32 = 18.0;
+    pub const SMALL: f32 = 26.0;
+    pub const BUTTON_SM: f32 = 24.0;
+    pub const KBD: f32 = 18.0;
+    pub const TEXT: f32 = 17.0;
+    pub const FIELD: f32 = 30.0;
+}
+
+/// A settings row (`.frow`) of a `kit::group`: the label (13 medium) and its
+/// help (12 muted) take what the control leaves; the control (`ctrl_h`
+/// high) sits on the right, vertically centered. `on: false` dims the row
+/// and disables its control. The control is laid out right to left: add its
+/// parts last to first.
+fn frow(
+    g: &mut kit::GroupRows,
+    ui: &mut Ui,
+    on: bool,
+    label: &str,
+    help: Help<'_>,
+    ctrl_h: f32,
+    add: impl FnOnce(&mut Ui),
+) {
+    g.block(ui, |ui| {
+        let p = theme::pal(ui);
+        let w = ui.available_width();
+        let id = ui.make_persistent_id(("settings-row", label));
+        let measured: Option<f32> = ui.data(|d| d.get_temp(id));
+        let min_label = 140.0f32.min(w * 0.4);
+        let label_w = (w - measured.unwrap_or(w * 0.4) - 14.0).max(min_label);
+        let fade = |c: Color32| if on { c } else { c.gamma_multiply(0.45) };
+        let lg = text_box(ui, label, theme::medium(13.0), p.text, label_w, true);
+        let hg = match help {
+            Help::None => None,
+            Help::Text(t) => Some(text_box(ui, t, FontId::proportional(12.0), p.text_muted, label_w, true)),
+            Help::Mono(t) => Some(text_box(ui, t, theme::mono(12.0), p.text_muted, label_w, true)),
+        };
+        let text_h = lg.size().y + hg.as_ref().map_or(0.0, |g| g.size().y + 1.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(w, text_h.max(ctrl_h)), Sense::hover());
+        let y = rect.center().y - text_h / 2.0;
+        let label_h = lg.size().y;
+        ui.painter().galley(pos2(rect.left(), y), lg, fade(p.text));
+        if let Some(hg) = hg {
+            ui.painter().galley(pos2(rect.left(), y + label_h + 1.0), hg, fade(p.text_muted));
+        }
+        let area = Rect::from_min_max(pos2(rect.left() + min_label + 14.0, rect.top()), rect.max);
+        let mut child = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
+        child.spacing_mut().item_spacing = vec2(8.0, 6.0);
+        if !on {
+            child.disable();
+        }
+        add(&mut child);
+        let used = child.min_rect().width();
+        if measured.is_none_or(|m| (m - used).abs() > 0.5) {
+            ui.data_mut(|d| d.insert_temp(id, used));
+            ui.ctx().request_discard("settings row width");
+        }
+    });
+}
+
+/// A number field (`numUnit`): a small right-aligned input `width` wide and
+/// a faint unit after it. Text that is not a number is ignored; the value
+/// is kept in `range`.
+pub(crate) fn number<N: egui::emath::Numeric>(
+    ui: &mut Ui,
+    name: &str,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    unit: &str,
+    width: f32,
+) {
+    let p = theme::pal(ui);
+    let id = ui.make_persistent_id(("number", name));
+    let text_id = id.with("text");
+    let shown = |v: N| {
+        let f = v.to_f64();
+        if N::INTEGRAL { format!("{}", f.round() as i64) } else { format!("{f}") }
+    };
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut text: String =
+        if focused { ui.data(|d| d.get_temp(text_id)).unwrap_or_else(|| shown(*value)) } else { shown(*value) };
+    let rtl = ui.layout().prefer_right_to_left();
+    let unit_label = |ui: &mut Ui| {
+        if !unit.is_empty() {
+            ui.label(RichText::new(unit).color(p.text_faint));
+        }
+    };
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if rtl {
+            unit_label(ui);
+        }
+        let edit = line_edit(ui, &mut text, "", true, false).id(id).align(Align2::RIGHT_CENTER).desired_width(width);
+        let r = add_input(ui, edit, true);
+        if !rtl {
+            unit_label(ui);
+        }
+        widgets::a11y_name(&r, name);
+        if r.changed()
+            && let Ok(v) = text.trim().parse::<f64>()
+        {
+            *value = N::from_f64(v.clamp(range.start().to_f64(), range.end().to_f64()));
+        }
+        if r.has_focus() {
+            ui.data_mut(|d| d.insert_temp(text_id, text));
+        } else {
+            ui.data_mut(|d| d.remove::<String>(text_id));
+        }
+    });
+}
+
+/// A size in MB stored as bytes.
+fn megabytes(ui: &mut Ui, name: &str, bytes: &mut u64, max: u32) {
+    let mut mb = (*bytes / (1024 * 1024)) as u32;
+    let before = mb;
+    number(ui, name, &mut mb, 1..=max, "MB", 72.0);
+    if mb != before {
+        *bytes = mb as u64 * 1024 * 1024;
+    }
+}
+
+/// A slider (`.dl-slider`): 150 × 18, a 4 px track, the accent fill up to a
+/// 16 px white knob. Arrow keys step it when focused.
+fn slider(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, step: f32, name: &str) -> Response {
+    let p = theme::pal(ui);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(150.0, 18.0), Sense::click_and_drag());
+    let (lo, hi) = (*range.start(), *range.end());
+    let before = *value;
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        *value = ((lo + t * (hi - lo)) / step).round() * step;
+    }
+    if resp.has_focus() {
+        let (less, more) = ui.input(|i| {
+            (
+                i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowDown),
+                i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::ArrowUp),
+            )
+        });
+        if less {
+            *value -= step;
+        }
+        if more {
+            *value += step;
+        }
+    }
+    *value = value.clamp(lo, hi);
+    if *value != before {
+        resp.mark_changed();
+    }
+    let enabled = ui.is_enabled();
+    let v = *value as f64;
+    resp.widget_info(|| egui::WidgetInfo::slider(enabled, v, name));
+    if ui.is_rect_visible(rect) {
+        let t = (*value - lo) / (hi - lo).max(f32::EPSILON);
+        let cy = rect.center().y;
+        let x = rect.left() + t * rect.width();
+        let track = Rect::from_min_max(pos2(rect.left(), cy - 2.0), pos2(rect.right(), cy + 2.0));
+        ui.painter().rect_filled(track, CornerRadius::same(2), p.subtle);
+        ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::same(2), p.accent);
+        let knob = pos2(x, cy);
+        ui.painter().circle_filled(knob + vec2(0.0, 1.0), 8.5, Color32::from_black_alpha(36));
+        ui.painter().circle(knob, 8.0, Color32::WHITE, Stroke::new(1.0, p.border_strong));
+        if resp.has_focus() {
+            ui.painter().circle_stroke(knob, 10.5, Stroke::new(1.5, p.accent));
+        }
+    }
+    resp
+}
+
+/// A secret already in the secret store (`stored()`): an outlined `Stored
+/// in the Keychain` pill and a Change button. Returns true when Change was
+/// pressed.
+fn stored(ui: &mut Ui) -> bool {
+    let rtl = ui.layout().prefer_right_to_left();
+    let pill = |ui: &mut Ui| {
+        let o = kit::PillOpts { outline: true, icon: Some(icons::LOCK_SIMPLE), ..Default::default() };
+        kit::pill_ex(ui, tr("Stored in the Keychain"), kit::Tone::Neutral, o);
+    };
+    if !rtl {
+        pill(ui);
+    }
+    let change = kit::ghost(ui, None, tr("Change")).clicked();
+    if rtl {
+        pill(ui);
+    }
+    change
+}
+
+/// An editable path in the look of `.dl-pathbox` (30 high, `well` fill, mono 12).
+fn path_input(ui: &mut Ui, value: &mut String, name: &str, width: f32) -> Response {
+    let p = theme::pal(ui);
+    let edit = egui::TextEdit::singleline(value)
+        .font(theme::mono(12.0))
+        .hint_text(RichText::new(tr("No file")).size(12.0).color(p.text_faint))
+        .background_color(p.well)
+        .margin(Margin::symmetric(10, 0))
+        .min_size(vec2(0.0, 30.0))
+        .align(Align2::LEFT_CENTER)
+        .desired_width(width);
+    let r = ui
+        .scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            w.inactive.bg_stroke = Stroke::new(1.0, p.border);
+            ui.spacing_mut().interact_size.y = 30.0;
+            add_input(ui, edit, false)
+        })
+        .inner;
+    widgets::a11y_name(&r, name);
+    r
+}
+
+/// A file path field with a Choose button after it, laid out left to right.
+fn path_field(ui: &mut Ui, value: &mut String, name: &str, width: f32) {
+    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        path_input(ui, value, name, width - 28.0);
+        if kit::icon_button_sm(ui, icons::FOLDER_OPEN, tr("Choose file…")).clicked()
+            && let Some(p) = rfd::FileDialog::new().pick_file()
+        {
+            *value = p.display().to_string();
+        }
+    });
+}
+
 fn settings(
     app: &mut TernaryWireApp,
     ctx: &egui::Context,
@@ -2295,54 +2940,50 @@ fn settings(
 ) -> Outcome {
     let mut save = false;
     let changed = *draft != app.settings;
-    let height = fit_height(ctx, 190.0, 540.0);
     let current = *page;
-    let out = Modal::new("settings", 860.0).title(tr("Settings")).icon(icons::GEAR_SIX).sticky().show(ctx, |ui| {
-        split(
-            ui,
-            height,
-            200.0,
-            |ui| {
-                egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    for pg in SettingsPage::ALL {
-                        if nav_item(ui, Some(pg.icon()), pg.label(), None, *page == pg).clicked() {
-                            *page = pg;
-                        }
-                    }
-                });
-            },
-            |ui| {
-                egui::ScrollArea::vertical().id_salt(("settings-page", current)).auto_shrink([false; 2]).show(
-                    ui,
-                    |ui| {
-                        egui::Frame::new().inner_margin(Margin { left: 26, right: 26, top: 20, bottom: 8 }).show(
-                            ui,
-                            |ui| {
-                                ui.set_width(ui.available_width());
-                                settings_page(app, ui, draft, current);
-                            },
-                        );
-                    },
-                );
-            },
-        );
-        footer(ui, |ui| {
-            let p = theme::pal(ui);
-            if changed {
-                kit::dot(ui, p.accent, 3.5);
-                ui.label(RichText::new(tr("Unsaved changes")).size(12.0).color(p.text_muted));
-            } else {
-                ui.label(RichText::new(tr("Changes apply when you save.")).size(12.0).color(p.text_faint));
-            }
-            trailing(ui, |ui| {
-                if kit::primary(ui, tr("Save")).clicked() {
-                    save = true;
+    let out =
+        Modal::new("settings", 860.0).title(tr("Settings")).icon(icons::GEAR_SIX).sticky().center().show(ctx, |ui| {
+            // The header is 58 high: the content keeps the dialog at 640.
+            let height = room(ui).min(SETTINGS_H - 58.0 - FOOTER_H);
+            split(
+                ui,
+                height,
+                195.0,
+                |ui| settings_nav(ui, page),
+                |ui| {
+                    egui::ScrollArea::vertical().id_salt(("settings-page", current)).auto_shrink([false; 2]).show(
+                        ui,
+                        |ui| {
+                            egui::Frame::new().inner_margin(Margin { left: 24, right: 24, top: 20, bottom: 28 }).show(
+                                ui,
+                                |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.spacing_mut().item_spacing.y = 20.0;
+                                    settings_page(app, ui, draft, current);
+                                },
+                            );
+                        },
+                    );
+                },
+            );
+            footer(ui, |ui| {
+                let p = theme::pal(ui);
+                if changed {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    kit::dot(ui, p.accent, 4.0);
+                    ui.label(RichText::new(tr("Unsaved changes")).size(12.0).color(p.text));
+                } else {
+                    ui.label(RichText::new(tr("Changes apply when you save.")).size(12.0).color(p.text_muted));
                 }
-                if kit::secondary(ui, None, tr("Cancel")).clicked() { Outcome::Close } else { Outcome::Keep }
+                trailing(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if kit::primary(ui, tr("Save")).clicked() {
+                        save = true;
+                    }
+                    if kit::secondary(ui, None, tr("Cancel")).clicked() { Outcome::Close } else { Outcome::Keep }
+                })
             })
-        })
-    });
+        });
     if save {
         app.apply_settings(draft.clone());
         return Outcome::Close;
@@ -2350,13 +2991,32 @@ fn settings(
     out
 }
 
+/// The page list of Settings (`.dl-set-nav`), with a note at its bottom.
+fn settings_nav(ui: &mut Ui, page: &mut SettingsPage) {
+    let p = theme::pal(ui);
+    let rect = ui.max_rect().shrink2(vec2(8.0, 10.0));
+    in_rect(ui, rect, Layout::top_down(Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for pg in SettingsPage::ALL {
+            if pane_row(ui, Some(pg.icon()), pg.label(), None, *page == pg, true).clicked() {
+                *page = pg;
+            }
+        }
+    });
+    let note = tr("Settings are per user and apply to every workspace.");
+    let g = text_box(ui, note, FontId::proportional(11.5), p.text_muted, rect.width() - 20.0, true);
+    ui.painter().galley(pos2(rect.left() + 10.0, rect.bottom() - 8.0 - g.size().y), g, p.text_muted);
+}
+
 fn settings_page(app: &TernaryWireApp, ui: &mut Ui, draft: &mut AppSettings, page: SettingsPage) {
     let p = theme::pal(ui);
     if page != SettingsPage::About {
-        ui.label(RichText::new(page.label()).font(theme::semibold(17.0)).color(p.text));
-        ui.add_space(2.0);
-        ui.label(RichText::new(page.blurb()).color(p.text_muted));
-        ui.add_space(18.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let w = ui.available_width();
+            ui.label(text_box(ui, page.label(), theme::semibold(16.0), p.text, w, false));
+            ui.label(text_box(ui, page.blurb(), FontId::proportional(12.5), p.text_muted, w, true));
+        });
     }
     match page {
         SettingsPage::General => general_page(ui, draft),
@@ -2369,376 +3029,357 @@ fn settings_page(app: &TernaryWireApp, ui: &mut Ui, draft: &mut AppSettings, pag
     }
 }
 
-/// A number field with a unit, for settings rows.
-fn number<N: egui::emath::Numeric>(
-    ui: &mut Ui,
-    name: &str,
-    value: &mut N,
-    range: std::ops::RangeInclusive<N>,
-    unit: &str,
-) {
-    let speed = (range.end().to_f64() - range.start().to_f64()) / 2000.0;
-    let r = ui.add(egui::DragValue::new(value).range(range).suffix(unit).speed(speed.clamp(0.05, 50.0)));
-    crate::widgets::a11y_name(&r, name);
-}
-
-/// A size in MB stored as bytes.
-fn megabytes(ui: &mut Ui, name: &str, bytes: &mut u64, max: u32) {
-    let mut mb = (*bytes / (1024 * 1024)) as u32;
-    let before = mb;
-    number(ui, name, &mut mb, 1..=max, " MB");
-    if mb != before {
-        *bytes = mb as u64 * 1024 * 1024;
-    }
-}
-
 fn general_page(ui: &mut Ui, draft: &mut AppSettings) {
-    group(ui, tr("Appearance"), |g| {
-        g.row(tr("Theme"), tr("Follow the system, or always use light or dark."), |ui| {
-            segmented(
+    kit::group(ui, tr("Appearance"), "", |ui, g| {
+        let help = Help::Text(tr("Follow the system, or always use light or dark."));
+        frow(g, ui, true, tr("Theme"), help, ctl::SMALL, |ui| {
+            kit::segmented_ex(
                 ui,
                 &mut draft.ui.theme,
                 &[
-                    (ThemePreference::System, format!("{}  {}", icons::CIRCLE_HALF, tr("System"))),
-                    (ThemePreference::Light, format!("{}  {}", icons::SUN, tr("Light"))),
-                    (ThemePreference::Dark, format!("{}  {}", icons::MOON, tr("Dark"))),
+                    (ThemePreference::System, Some(icons::MONITOR), tr("System")),
+                    (ThemePreference::Light, Some(icons::SUN), tr("Light")),
+                    (ThemePreference::Dark, Some(icons::MOON), tr("Dark")),
                 ],
+                true,
             );
         });
-        g.row(tr("Language"), tr("The language of menus and messages."), |ui| {
-            segmented(
+        let help = Help::Text(tr("The language of menus and messages."));
+        frow(g, ui, true, tr("Language"), help, ctl::SMALL, |ui| {
+            kit::segmented_sm(
                 ui,
                 &mut draft.ui.language,
-                &[(UiLanguage::En, "English".to_string()), (UiLanguage::Id, "Bahasa Indonesia".to_string())],
+                &[(UiLanguage::En, "English"), (UiLanguage::Id, "Bahasa Indonesia")],
             );
         });
-        g.row(tr("Font size"), tr("Text size of the whole interface."), |ui| {
+        let help = Help::Text(tr("Text size of the whole interface."));
+        frow(g, ui, true, tr("Font size"), help, ctl::SWITCH, |ui| {
             let p = theme::pal(ui);
-            ui.label(RichText::new(format!("{} px", draft.ui.font_size)).font(theme::medium(12.5)).color(p.text_muted));
-            ui.spacing_mut().slider_width = 150.0;
-            let r = ui.add(egui::Slider::new(&mut draft.ui.font_size, 10.0..=20.0).step_by(0.5).show_value(false));
-            crate::widgets::a11y_name(&r, tr("Font size"));
-            widgets::a11y_name(&r, tr("Font size"));
+            ui.spacing_mut().item_spacing.x = 12.0;
+            slider(ui, &mut draft.ui.font_size, 10.0..=20.0, 0.5, tr("Font size"));
+            let (r, _) = ui.allocate_exact_size(vec2(44.0, 18.0), Sense::hover());
+            let text = format!("{} px", draft.ui.font_size);
+            ui.painter().text(pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, text, theme::mono(12.0), p.text);
         });
-        g.row(tr("Response panel"), tr("Where the response appears next to the request."), |ui| {
-            segmented(
+        let help = Help::Text(tr("Where the response appears next to the request."));
+        frow(g, ui, true, tr("Response panel"), help, ctl::SMALL, |ui| {
+            kit::segmented_ex(
                 ui,
                 &mut draft.ui.layout,
                 &[
-                    (ResponseLayout::Below, format!("{}  {}", icons::ROWS, tr("Below"))),
-                    (ResponseLayout::Side, format!("{}  {}", icons::COLUMNS, tr("Side by side"))),
+                    (ResponseLayout::Below, Some(icons::ROWS), tr("Below")),
+                    (ResponseLayout::Side, Some(icons::COLUMNS), tr("Side by side")),
                 ],
+                true,
             );
         });
     });
-    group(ui, tr("Updates"), |g| {
+    kit::group(ui, tr("Updates"), "", |ui, g| {
         let label = tr("Check for updates on startup");
-        g.row(
-            label,
-            tr("TernaryWire asks the release feed for the latest version and shows what is new. Nothing about you or your work is sent."),
-            |ui| {
-                toggle(ui, &mut draft.updates.check_on_startup, label);
-            },
-        );
-        g.row(
-            &trf("TernaryWire {}", &[&crate::update::CURRENT]),
-            tr("The version installed on this computer."),
-            |ui| {
-                if kit::secondary(ui, Some(icons::ARROWS_CLOCKWISE), tr("Check now")).clicked() {
-                    crate::update::request_check(ui.ctx());
-                }
-            },
-        );
+        let help = Help::Text(tr(
+            "TernaryWire asks the release feed for the latest version and shows what is new. Nothing about you or your work is sent.",
+        ));
+        frow(g, ui, true, label, help, ctl::SWITCH, |ui| {
+            toggle(ui, &mut draft.updates.check_on_startup, label);
+        });
+        let version = trf("TernaryWire {}", &[&crate::update::CURRENT]);
+        let help = Help::Text(tr("The version installed on this computer."));
+        frow(g, ui, true, &version, help, ctl::BUTTON_SM, |ui| {
+            if kit::button_ex(ui, kit::Kind::Secondary, Some(icons::ARROWS_CLOCKWISE), tr("Check now"), true).clicked()
+            {
+                crate::update::request_check(ui.ctx());
+            }
+        });
     });
-    group(ui, tr("History"), |g| {
-        g.row(tr("History entries"), tr("The oldest entries are removed when History is full."), |ui| {
-            number(ui, tr("History entries"), &mut draft.history_limit, 10..=100_000, "");
+    kit::group(ui, tr("History"), "", |ui, g| {
+        let help = Help::Text(tr("The oldest entries are removed when History is full."));
+        frow(g, ui, true, tr("History entries"), help, ctl::SMALL, |ui| {
+            number(ui, tr("History entries"), &mut draft.history_limit, 10..=100_000, "", 96.0);
         });
     });
 }
 
 fn requests_page(ui: &mut Ui, draft: &mut AppSettings) {
     let r = &mut draft.request;
-    group(ui, tr("Sending"), |g| {
-        g.row(tr("Request timeout"), tr("How long to wait for a response; 0 waits forever."), |ui| {
-            number(ui, tr("Request timeout"), &mut r.timeout_ms, 0..=3_600_000, " ms");
+    kit::group(ui, tr("Sending"), "", |ui, g| {
+        let help = Help::Text(tr("How long to wait for a response; 0 waits forever."));
+        frow(g, ui, true, tr("Request timeout"), help, ctl::SMALL, |ui| {
+            number(ui, tr("Request timeout"), &mut r.timeout_ms, 0..=3_600_000, "ms", 96.0);
         });
-        g.row(tr("HTTP version"), tr("Auto lets client and server agree on one."), |ui| {
-            segmented(
+        let help = Help::Text(tr("Auto lets client and server agree on one."));
+        frow(g, ui, true, tr("HTTP version"), help, ctl::SMALL, |ui| {
+            kit::segmented_sm(
                 ui,
                 &mut r.http_version,
-                &[
-                    (HttpVersion::Auto, tr("Auto").to_string()),
-                    (HttpVersion::Http1, "HTTP/1.1".to_string()),
-                    (HttpVersion::Http2, "HTTP/2".to_string()),
-                ],
+                &[(HttpVersion::Auto, tr("Auto")), (HttpVersion::Http1, "HTTP/1.1"), (HttpVersion::Http2, "HTTP/2")],
             );
         });
-        g.row(tr("Encode URL automatically"), tr("Percent-encode characters that are not allowed in a URL."), |ui| {
+        let help = Help::Text(tr("Percent-encode characters that are not allowed in a URL."));
+        frow(g, ui, true, tr("Encode URL automatically"), help, ctl::SWITCH, |ui| {
             toggle(ui, &mut r.encode_url, tr("Encode URL automatically"));
         });
     });
-    group(ui, tr("Redirects"), |g| {
-        g.row(tr("Follow redirects"), tr("Go on to the address a 3xx response points to."), |ui| {
+    kit::group(ui, tr("Redirects"), "", |ui, g| {
+        let help = Help::Text(tr("Go on to the address a 3xx response points to."));
+        frow(g, ui, true, tr("Follow redirects"), help, ctl::SWITCH, |ui| {
             toggle(ui, &mut r.follow_redirects, tr("Follow redirects"));
         });
-        g.enabled(r.follow_redirects);
-        g.row(tr("Maximum redirects"), "", |ui| {
-            number(ui, tr("Maximum redirects"), &mut r.max_redirects, 0..=100, "");
+        frow(g, ui, r.follow_redirects, tr("Maximum redirects"), Help::None, ctl::SMALL, |ui| {
+            number(ui, tr("Maximum redirects"), &mut r.max_redirects, 0..=100, "", 72.0);
         });
     });
-    group(ui, tr("Security"), |g| {
-        g.row(
-            tr("Verify SSL certificates"),
-            tr("Turn this off only for local servers with self-signed certificates."),
-            |ui| {
-                toggle(ui, &mut r.verify_ssl, tr("Verify SSL certificates"));
-            },
-        );
+    kit::group(ui, tr("Security"), "", |ui, g| {
+        let help = Help::Text(tr("Turn this off only for local servers with self-signed certificates."));
+        frow(g, ui, true, tr("Verify SSL certificates"), help, ctl::SWITCH, |ui| {
+            toggle(ui, &mut r.verify_ssl, tr("Verify SSL certificates"));
+        });
     });
-    group(ui, tr("Default headers"), |g| {
+    kit::group(ui, tr("Default headers"), "", |ui, g| {
         let agent = format!("User-Agent: {}", ternarywire_core::settings::USER_AGENT);
-        g.row(tr("Send User-Agent header"), &agent, |ui| {
+        frow(g, ui, true, tr("Send User-Agent header"), Help::Mono(&agent), ctl::SWITCH, |ui| {
             toggle(ui, &mut r.send_user_agent, tr("Send User-Agent header"));
         });
-        g.row(tr("Send no-cache header"), "Cache-Control: no-cache", |ui| {
+        let help = Help::Mono("Cache-Control: no-cache");
+        frow(g, ui, true, tr("Send no-cache header"), help, ctl::SWITCH, |ui| {
             toggle(ui, &mut r.send_no_cache, tr("Send no-cache header"));
         });
     });
-    group(ui, tr("Responses"), |g| {
-        g.row(tr("Keep bodies in memory up to"), tr("Larger bodies are kept in a temporary file."), |ui| {
+    kit::group(ui, tr("Responses"), "", |ui, g| {
+        let help = Help::Text(tr("Larger bodies are kept in a temporary file."));
+        frow(g, ui, true, tr("Keep bodies in memory up to"), help, ctl::SMALL, |ui| {
             megabytes(ui, tr("Keep bodies in memory up to"), &mut draft.max_body_in_memory_bytes, 1024);
         });
-        g.row(tr("Pretty-print bodies up to"), tr("Larger bodies are shown as plain text."), |ui| {
+        let help = Help::Text(tr("Larger bodies are shown as plain text."));
+        frow(g, ui, true, tr("Pretty-print bodies up to"), help, ctl::SMALL, |ui| {
             megabytes(ui, tr("Pretty-print bodies up to"), &mut draft.max_pretty_bytes, 200);
         });
     });
 }
 
-fn scripts_page(app: &TernaryWireApp, ui: &mut Ui, draft: &mut AppSettings) {
-    group(ui, tr("Limits"), |g| {
-        g.row(tr("Script timeout"), tr("Scripts that run longer are stopped."), |ui| {
-            number(ui, tr("Script timeout"), &mut draft.script_timeout_ms, 100..=600_000, " ms");
+/// A titled section that is not a settings group: a section title with
+/// buttons on its right (`add_buttons`, right to left), then `add`.
+fn section(ui: &mut Ui, title: &str, add_buttons: impl FnOnce(&mut Ui), add: impl FnOnce(&mut Ui)) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.label(kit::section_title(title).color(theme::pal(ui).text));
+            trailing(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                add_buttons(ui);
+            });
         });
-        g.row(
-            tr("Script memory limit"),
-            tr("Scripts run in a separate process that is stopped when it uses more memory than this; 0 means no limit."),
-            |ui| {
-                number(ui, tr("Script memory limit"), &mut draft.script_memory_mb, 0..=65_536, " MB");
-            },
-        );
-        g.row(tr("Script engine"), "", |ui| {
-            ui.label(RichText::new(app.scripts.name().to_string()).color(theme::pal(ui).text_muted));
+        add(ui);
+    });
+}
+
+fn scripts_page(app: &TernaryWireApp, ui: &mut Ui, draft: &mut AppSettings) {
+    kit::group(ui, tr("Limits"), "", |ui, g| {
+        let help = Help::Text(tr("Scripts that run longer are stopped."));
+        frow(g, ui, true, tr("Script timeout"), help, ctl::SMALL, |ui| {
+            number(ui, tr("Script timeout"), &mut draft.script_timeout_ms, 100..=600_000, "ms", 96.0);
+        });
+        let help = Help::Text(tr(
+            "Scripts run in a separate process that is stopped when it uses more memory than this; 0 means no limit.",
+        ));
+        frow(g, ui, true, tr("Script memory limit"), help, ctl::SMALL, |ui| {
+            number(ui, tr("Script memory limit"), &mut draft.script_memory_mb, 0..=65_536, "MB", 72.0);
+        });
+        frow(g, ui, true, tr("Script engine"), Help::None, ctl::TEXT, |ui| {
+            ui.label(RichText::new(app.scripts.name().to_string()).size(12.0).color(theme::pal(ui).text_muted));
         });
     });
-    group(ui, tr("Package registry"), |g| {
-        g.row(
-            tr("Registry URL"),
-            tr("esm.sh-compatible; serves pm.require('npm:…') and pm.require('jsr:…')"),
-            |ui| {
-                let w = ui.available_width();
-                ui.add(input(&mut draft.package_registry).hint_text("https://esm.sh").desired_width(w));
-            },
-        );
+    kit::group(ui, tr("Package registry"), "", |ui, g| {
+        let help = Help::Text(tr("esm.sh-compatible; serves pm.require('npm:…') and pm.require('jsr:…')"));
+        frow(g, ui, true, tr("Registry URL"), help, ctl::SMALL, |ui| {
+            small_input(ui, &mut draft.package_registry, "https://esm.sh", tr("Registry URL"), 240.0, true);
+        });
     });
     let root = app.ws.root().to_path_buf();
     let dir = root.join("packages");
-    group(ui, tr("Package Library"), |g| {
-        g.custom(|ui| {
-            let p = theme::pal(ui);
-            ui.add(egui::Label::new(kit::hint(ui, tr("JavaScript modules in packages/ (CommonJS or ESM), loaded with pm.require('@team/name') or pm.require('name'). They are part of the workspace and can be committed."))).wrap());
-            ui.add_space(4.0);
-            let mut files: Vec<std::path::PathBuf> = Vec::new();
-            fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-                for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        walk(&p, out);
-                    } else if p.extension().is_some_and(|x| x == "js" || x == "mjs" || x == "cjs") {
-                        out.push(p);
-                    }
-                }
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "js" || x == "mjs" || x == "cjs") {
+                out.push(p);
             }
-            walk(&dir, &mut files);
-            files.sort();
+        }
+    }
+    walk(&dir, &mut files);
+    files.sort();
+    let buttons = |ui: &mut Ui| {
+        if kit::button_ex(ui, kit::Kind::Secondary, Some(icons::PLUS), tr("New package"), true).clicked() {
+            let mut n = 1;
+            let mut path = dir.join("my-helpers.js");
+            while path.exists() {
+                n += 1;
+                path = dir.join(format!("my-helpers-{n}.js"));
+            }
+            let body = "// Shared helpers: pm.require('my-helpers') in any script.\nmodule.exports = {\n  isoNow: () => new Date().toISOString(),\n};\n";
+            if std::fs::create_dir_all(&dir).is_ok()
+                && ternarywire_core::storage::write_atomic(&path, body.as_bytes()).is_ok()
+            {
+                let _ = open::that(&path);
+            }
+        }
+        if kit::ghost(ui, Some(icons::FOLDER_OPEN), tr("Open folder")).clicked() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = open::that(&dir);
+        }
+    };
+    section(ui, tr("Package Library"), buttons, |ui| {
+        let p = theme::pal(ui);
+        ui.label(kit::hint(ui, tr("Your own modules in packages/, shared by every script in the workspace.")));
+        vlist(ui, |ui| {
             if files.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::PACKAGE).font(theme::icon_font(15.0)).color(p.text_faint));
-                    ui.label(RichText::new(tr("No packages yet.")).color(p.text_muted));
+                vrow(ui, (0, 1), 38.0, false, |ui, _| {
+                    tile(ui, icons::PACKAGE, false);
+                    ui.label(RichText::new(tr("No packages yet.")).size(12.0).color(p.text_muted));
                 });
             }
-            for f in &files {
-                let rel = f.strip_prefix(&dir).unwrap_or(f).display().to_string();
+            for (i, f) in files.iter().enumerate() {
+                let rel = f.strip_prefix(&dir).unwrap_or(f).display().to_string().replace('\\', "/");
                 let name = rel
                     .trim_end_matches(".js")
                     .trim_end_matches(".mjs")
                     .trim_end_matches(".cjs")
-                    .trim_end_matches("/index");
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::PACKAGE).font(theme::icon_font(15.0)).color(p.text_muted));
+                    .trim_end_matches("/index")
+                    .to_string();
+                vrow(ui, (i, files.len()), 38.0, false, |ui, hovered| {
+                    tile(ui, icons::PACKAGE, false);
                     ui.label(RichText::new(format!("pm.require('{name}')")).font(theme::mono(12.0)).color(p.text));
                     trailing(ui, |ui| {
-                        if kit::icon_button_ex(ui, icons::ARROW_SQUARE_OUT, tr("Open"), false, 24.0).clicked() {
-                            let _ = open::that(f);
-                        }
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        ui.scope(|ui| {
+                            if !hovered {
+                                ui.set_invisible();
+                            }
+                            if kit::ghost(ui, None, tr("Open")).clicked() {
+                                let _ = open::that(f);
+                            }
+                        });
+                        ui.label(RichText::new(format!("packages/{rel}")).size(11.0).color(p.text_faint));
                     });
                 });
             }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if kit::secondary(ui, Some(icons::PLUS), tr("New package")).clicked() {
-                    let mut n = 1;
-                    let mut path = dir.join("my-helpers.js");
-                    while path.exists() {
-                        n += 1;
-                        path = dir.join(format!("my-helpers-{n}.js"));
-                    }
-                    let body = "// Shared helpers: pm.require('my-helpers') in any script.\nmodule.exports = {\n  isoNow: () => new Date().toISOString(),\n};\n";
-                    if std::fs::create_dir_all(&dir).is_ok()
-                        && ternarywire_core::storage::write_atomic(&path, body.as_bytes()).is_ok()
-                    {
-                        let _ = open::that(&path);
-                    }
-                }
-                if kit::ghost(ui, Some(icons::FOLDER_OPEN), tr("Open folder")).clicked() {
-                    let _ = std::fs::create_dir_all(&dir);
-                    let _ = open::that(&dir);
+        });
+        let lock = root.join("packages.lock.json");
+        if let Ok(text) = std::fs::read_to_string(&lock) {
+            let v = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+            let count = |k: &str| v.get(k).and_then(|m| m.as_object()).map(|o| o.len()).unwrap_or(0);
+            kit::well(ui).inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let summary = trf(
+                    "packages.lock.json: {} {} · {} {}",
+                    &[&count("packages"), &tr("packages"), &count("modules"), &tr("pinned modules")],
+                );
+                ui.label(RichText::new(summary).size(12.0).color(p.text_muted));
+                ui.add_space(2.0);
+                for (spec, url) in v.get("packages").and_then(|m| m.as_object()).into_iter().flatten() {
+                    let mut job = LayoutJob::default();
+                    let line = Some((11.5f32 * 1.7).round());
+                    let f = |color| TextFormat {
+                        font_id: theme::mono(11.5),
+                        color,
+                        line_height: line,
+                        ..Default::default()
+                    };
+                    job.append(spec, 0.0, f(p.text));
+                    job.append(&format!(" → {}", url.as_str().unwrap_or("")), 0.0, f(p.text_faint));
+                    job.wrap = TextWrapping::truncate_at_width(ui.available_width());
+                    ui.label(job);
                 }
             });
-            let lock = root.join("packages.lock.json");
-            if let Ok(text) = std::fs::read_to_string(&lock) {
-                let v = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
-                let count = |k: &str| v.get(k).and_then(|m| m.as_object()).map(|o| o.len()).unwrap_or(0);
-                ui.add_space(6.0);
-                ui.label(kit::hint(
-                    ui,
-                    &trf(
-                        "packages.lock.json: {} {} · {} {}",
-                        &[&count("packages"), &tr("packages"), &count("modules"), &tr("pinned modules")],
-                    ),
-                ));
-                for (spec, url) in v.get("packages").and_then(|m| m.as_object()).into_iter().flatten() {
-                    ui.label(
-                        RichText::new(format!("{spec} → {}", url.as_str().unwrap_or("")))
-                            .font(theme::mono(11.0))
-                            .color(p.text_muted),
-                    );
-                }
-            }
-        });
+        }
     });
 }
 
 fn proxy_page(ui: &mut Ui, draft: &mut AppSettings) {
     let px = &mut draft.proxy;
-    group(ui, tr("System proxy"), |g| {
-        g.row(
-            tr("Use system proxy"),
-            tr("Honours HTTP_PROXY / HTTPS_PROXY / NO_PROXY and the OS proxy settings, including a proxy auto-config (PAC) script."),
-            |ui| {
-                toggle(ui, &mut px.use_system, tr("Use system proxy"));
-            },
-        );
+    kit::group(ui, tr("System proxy"), "", |ui, g| {
+        let help = Help::Text(tr(
+            "Honours HTTP_PROXY / HTTPS_PROXY / NO_PROXY and the OS proxy settings, including a proxy auto-config (PAC) script.",
+        ));
+        frow(g, ui, true, tr("Use system proxy"), help, ctl::SWITCH, |ui| {
+            toggle(ui, &mut px.use_system, tr("Use system proxy"));
+        });
     });
-    group(ui, tr("Custom proxy"), |g| {
-        g.row(tr("Use custom proxy"), tr("Send requests through a proxy you set here."), |ui| {
+    kit::group(ui, tr("Custom proxy"), "", |ui, g| {
+        let help = Help::Text(tr("Send requests through a proxy you set here."));
+        frow(g, ui, true, tr("Use custom proxy"), help, ctl::SWITCH, |ui| {
             toggle(ui, &mut px.custom_enabled, tr("Use custom proxy"));
         });
-        g.enabled(px.custom_enabled);
-        g.row(tr("Proxy URL"), "", |ui| {
-            let w = ui.available_width();
-            ui.add(
-                input(&mut px.custom_url)
-                    .hint_text(tr("http://proxy:3128 or socks5://127.0.0.1:1080"))
-                    .desired_width(w),
-            );
+        let on = px.custom_enabled;
+        frow(g, ui, on, tr("Proxy URL"), Help::None, ctl::SMALL, |ui| {
+            let hint = tr("http://proxy:3128 or socks5://127.0.0.1:1080");
+            small_input(ui, &mut px.custom_url, hint, tr("Proxy URL"), 260.0, true);
         });
-        g.row(tr("Username"), "", |ui| {
-            let w = ui.available_width();
-            ui.add(input(&mut px.username).desired_width(w));
+        frow(g, ui, on, tr("Username"), Help::None, ctl::SMALL, |ui| {
+            small_input(ui, &mut px.username, "", tr("Username"), 260.0, false);
         });
-        g.row(tr("Password"), tr("Stored in the Keychain, not in the settings file."), |ui| {
+        let help = Help::Text(tr("Stored in the Keychain, not in the settings file."));
+        frow(g, ui, on, tr("Password"), help, ctl::SMALL, |ui| {
             if ternarywire_core::variables::is_pure_reference(&px.password) {
-                if kit::ghost(ui, Some(icons::PENCIL_SIMPLE), tr("Change")).clicked() {
+                if stored(ui) {
                     px.password.clear();
                 }
-                ui.label(
-                    RichText::new(format!("{}  {}", icons::LOCK_SIMPLE, tr("Stored in the Keychain")))
-                        .color(theme::pal(ui).text_muted),
-                );
             } else {
-                let w = ui.available_width();
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    secret_input(ui, "proxy-pass", &mut px.password, w);
-                });
+                let r = secret_input(ui, "proxy-pass", &mut px.password, "", 260.0);
+                widgets::a11y_name(&r, tr("Password"));
             }
         });
-        g.row(tr("Bypass"), tr("Hosts reached directly, separated by commas."), |ui| {
-            let w = ui.available_width();
-            ui.add(input(&mut px.bypass).hint_text(tr("localhost, *.internal")).desired_width(w));
+        let help = Help::Text(tr("Hosts reached directly, separated by commas."));
+        frow(g, ui, on, tr("Bypass"), help, ctl::SMALL, |ui| {
+            small_input(ui, &mut px.bypass, tr("localhost, *.internal"), tr("Bypass"), 260.0, true);
         });
-        g.row(
-            tr("Auto-config (PAC) URL"),
-            tr("A PAC script picks the proxy for each request instead of the proxy URL."),
-            |ui| {
-                let w = ui.available_width();
-                ui.add(input(&mut px.pac_url).hint_text("http://wpad.example/proxy.pac").desired_width(w));
-            },
-        );
-    });
-}
-
-/// A muted label in a fixed-width column, for small forms.
-fn cell_label(ui: &mut Ui, text: &str, width: f32) {
-    let p = theme::pal(ui);
-    ui.allocate_ui_with_layout(vec2(width, 30.0), Layout::left_to_right(Align::Center), |ui| {
-        ui.set_min_width(width);
-        ui.add(egui::Label::new(RichText::new(text).color(p.text_muted)).truncate());
-    });
-}
-
-/// A file path field with a Choose button.
-fn path_field(ui: &mut Ui, value: &mut String, name: &str, width: f32) {
-    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let r =
-            ui.add(input(value).font(egui::TextStyle::Monospace).hint_text(tr("No file")).desired_width(width - 36.0));
-        widgets::a11y_name(&r, name);
-        if kit::icon_button_ex(ui, icons::FOLDER_OPEN, tr("Choose file…"), false, 30.0).clicked()
-            && let Some(p) = rfd::FileDialog::new().pick_file()
-        {
-            *value = p.display().to_string();
-        }
+        let help = Help::Text(tr("A PAC script picks the proxy for each request instead of the proxy URL."));
+        frow(g, ui, on, tr("Auto-config (PAC) URL"), help, ctl::SMALL, |ui| {
+            let name = tr("Auto-config (PAC) URL");
+            small_input(ui, &mut px.pac_url, "http://wpad.example/proxy.pac", name, 260.0, true);
+        });
     });
 }
 
 fn certificates_page(ui: &mut Ui, draft: &mut AppSettings) {
     let certs = &mut draft.certificates;
-    group(ui, tr("Certificate authorities"), |g| {
-        g.row(
-            tr("Trust an extra CA certificate (PEM)"),
-            tr("Trusted in addition to the system certificate store."),
-            |ui| {
-                toggle(ui, &mut certs.ca_enabled, tr("Trust an extra CA certificate (PEM)"));
-            },
-        );
-        g.enabled(certs.ca_enabled);
-        g.row(tr("CA file"), "", |ui| {
-            let w = ui.available_width();
-            path_field(ui, &mut certs.ca_path, tr("CA file"), w);
+    kit::group(ui, tr("Certificate authorities"), "", |ui, g| {
+        let help = Help::Text(tr("Trusted in addition to the system certificate store."));
+        frow(g, ui, true, tr("Trust an extra CA certificate (PEM)"), help, ctl::SWITCH, |ui| {
+            toggle(ui, &mut certs.ca_enabled, tr("Trust an extra CA certificate (PEM)"));
         });
-    });
-    let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(tr("Client certificates")).font(theme::semibold(13.0)).color(p.text));
-        trailing(ui, |ui| {
-            if kit::ghost(ui, Some(icons::PLUS), tr("Add certificate")).clicked() {
-                certs.client_certs.push(ClientCertificate { enabled: true, ..Default::default() });
+        frow(g, ui, certs.ca_enabled, tr("CA file"), Help::None, ctl::FIELD, |ui| {
+            if kit::icon_button_sm(ui, icons::FOLDER_OPEN, tr("Choose file…")).clicked()
+                && let Some(p) = rfd::FileDialog::new().pick_file()
+            {
+                certs.ca_path = p.display().to_string();
             }
+            ui.add_space(-2.0);
+            path_input(ui, &mut certs.ca_path, tr("CA file"), 272.0);
         });
     });
-    ui.add_space(2.0);
-    if certs.client_certs.is_empty() {
+    let mut add_clicked = false;
+    section(
+        ui,
+        tr("Client certificates"),
+        |ui| {
+            if kit::ghost(ui, Some(icons::PLUS), tr("Add certificate")).clicked() {
+                add_clicked = true;
+            }
+        },
+        |ui| client_certificates(ui, &mut certs.client_certs),
+    );
+    if add_clicked {
+        certs.client_certs.push(ClientCertificate { enabled: true, ..Default::default() });
+    }
+}
+
+/// The client certificates, one card each: on/off and host, the three
+/// files, the passphrase.
+fn client_certificates(ui: &mut Ui, certs: &mut Vec<ClientCertificate>) {
+    if certs.is_empty() {
         kit::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.add_space(6.0);
@@ -2752,23 +3393,23 @@ fn certificates_page(ui: &mut Ui, draft: &mut AppSettings) {
         });
     }
     let mut remove = None;
-    for (i, c) in certs.client_certs.iter_mut().enumerate() {
+    for (i, c) in certs.iter_mut().enumerate() {
         ui.push_id(i, |ui| {
-            kit::card(ui).show(ui, |ui| {
+            kit::card(ui).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 8.0;
                 let w = ui.available_width();
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
                     toggle(ui, &mut c.enabled, tr("Enabled"));
-                    let r = ui.add(
-                        input(&mut c.host)
-                            .hint_text(tr("api.example.com:443, *.example.com or *"))
-                            .desired_width(w - 90.0),
-                    );
-                    widgets::a11y_name(&r, tr("Host"));
                     trailing(ui, |ui| {
-                        if kit::icon_button(ui, icons::TRASH, tr("Remove certificate")).clicked() {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        if kit::icon_button_sm(ui, icons::TRASH, tr("Remove certificate")).clicked() {
                             remove = Some(i);
                         }
+                        let w = ui.available_width();
+                        let hint = tr("api.example.com:443, *.example.com or *");
+                        small_input(ui, &mut c.host, hint, tr("Host"), w, true);
                     });
                 });
                 ui.add_space(4.0);
@@ -2777,54 +3418,91 @@ fn certificates_page(ui: &mut Ui, draft: &mut AppSettings) {
                     [("CRT (PEM)", &mut c.cert_path), ("KEY (PEM)", &mut c.key_path), ("PFX / P12", &mut c.pfx_path)]
                 {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         cell_label(ui, label, label_w);
                         path_field(ui, value, label, w - label_w - 8.0);
                     });
                 }
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     cell_label(ui, tr("Passphrase"), label_w);
                     if ternarywire_core::variables::is_pure_reference(&c.passphrase) {
-                        ui.label(RichText::new(format!("{}  {}", icons::LOCK_SIMPLE, tr("Stored in the Keychain"))).color(p.text_muted));
-                        if kit::ghost(ui, Some(icons::PENCIL_SIMPLE), tr("Change")).clicked() {
+                        if stored(ui) {
                             c.passphrase.clear();
                         }
                     } else {
-                        secret_input(ui, ("cert-pass", i), &mut c.passphrase, w - label_w - 8.0);
+                        let r = secret_input(ui, ("cert-pass", i), &mut c.passphrase, "", w - label_w - 8.0);
+                        widgets::a11y_name(&r, tr("Passphrase"));
                     }
                 });
                 ui.add_space(2.0);
-                ui.label(kit::hint(ui, tr("A PKCS#12 bundle replaces the PEM files. The passphrase is stored in the Keychain, not in the settings file.")));
+                ui.add(
+                    egui::Label::new(kit::hint(
+                        ui,
+                        tr("A PKCS#12 bundle replaces the PEM files. The passphrase is stored in the Keychain, not in the settings file."),
+                    ))
+                    .wrap(),
+                );
             });
         });
-        ui.add_space(8.0);
     }
     if let Some(i) = remove {
-        certs.client_certs.remove(i);
+        certs.remove(i);
+    }
+}
+
+/// A muted 12 px label in a fixed-width column, for small forms.
+fn cell_label(ui: &mut Ui, text: &str, width: f32) {
+    let p = theme::pal(ui);
+    ui.allocate_ui_with_layout(vec2(width, 30.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_width(width);
+        ui.add(egui::Label::new(RichText::new(text).size(12.0).color(p.text_muted)).truncate());
+    });
+}
+
+/// Key caps for a shortcut written as `⌘ N` (one cap per key) or, for two
+/// shortcuts, `⇧ ⌘ [ ⇧ ⌘ ]`. Laid out right to left.
+fn shortcut_chips(ui: &mut Ui, keys: &str) {
+    ui.spacing_mut().item_spacing.x = 3.0;
+    for k in keys.split(' ').rev() {
+        kit::kbd(ui, k);
     }
 }
 
 fn shortcuts_page(ui: &mut Ui) {
-    group(ui, tr("Requests"), |g| {
-        for (action, keys) in
-            [("Send request", "⌘↩"), ("New request", "⌘N"), ("Save", "⌘S"), ("Accept variable suggestion", "Tab")]
-        {
-            g.row(tr(action), "", |ui| shortcut_chips(ui, keys));
-        }
-    });
-    group(ui, tr("Navigation"), |g| {
-        for (action, keys) in [
-            ("Search requests", "⌘K"),
-            ("Command palette", "⇧⌘P"),
-            ("Switch environment", "⌘E"),
-            ("New tab / close tab", "⌘T / ⌘W"),
-            ("Next / previous tab", "⇧⌘] / ⇧⌘["),
-            ("Toggle sidebar", "⌘B"),
-            ("Console", "⌥⌘C"),
-            ("Settings", "⌘,"),
-        ] {
-            g.row(tr(action), "", |ui| shortcut_chips(ui, keys));
-        }
-    });
+    let groups: [(&str, &[(&str, &str)]); 3] = [
+        (
+            "General",
+            &[
+                ("New request", "⌘ N"),
+                ("New request (tab)", "⌘ T"),
+                ("Send request · run or stop a flow", "⌘ ↩"),
+                ("Send a message (WebSocket, gRPC, AI…)", "⇧ ⌘ ↩"),
+                ("Save", "⌘ S"),
+                ("Close tab", "⌘ W"),
+            ],
+        ),
+        (
+            "Navigation",
+            &[
+                ("Search requests", "⌘ K"),
+                ("Command palette", "⇧ ⌘ P"),
+                ("Switch environment", "⌘ E"),
+                ("Toggle sidebar", "⌘ B"),
+                ("Toggle console", "⌥ ⌘ C"),
+                ("Settings", "⌘ ,"),
+                ("Previous / next tab", "⇧ ⌘ [ ⇧ ⌘ ]"),
+            ],
+        ),
+        ("Editing", &[("Accept a variable suggestion", "Tab"), ("Close a dialog or filter", "esc")]),
+    ];
+    for (title, rows) in groups {
+        kit::group(ui, tr(title), "", |ui, g| {
+            for (action, keys) in rows {
+                frow(g, ui, true, tr(action), Help::None, ctl::KBD, |ui| shortcut_chips(ui, keys));
+            }
+        });
+    }
     ui.label(kit::hint(ui, tr("⌘ is Ctrl on Windows and Linux.")));
 }
 
@@ -2833,63 +3511,62 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 fn about_page(app: &TernaryWireApp, ui: &mut Ui) {
     let p = theme::pal(ui);
     ui.vertical_centered(|ui| {
-        ui.add_space(10.0);
+        ui.spacing_mut().item_spacing.y = 10.0;
+        ui.add_space(12.0);
         ui.add(
             egui::Image::new(egui::include_image!("../assets/icon-256.png"))
                 .fit_to_exact_size(vec2(76.0, 76.0))
-                .corner_radius(17),
+                .corner_radius(18),
         );
-        ui.add_space(10.0);
-        ui.label(RichText::new("TernaryWire").font(theme::semibold(22.0)).color(p.text));
-        ui.add_space(4.0);
-        kit::pill(ui, &trf("Version {}", &[&crate::update::CURRENT]), p.accent_text);
-        ui.add_space(10.0);
-        ui.label(RichText::new(tr("A lightweight API client written in Rust. No account, no telemetry: data stays in your workspace folder.")).color(p.text_muted));
-        ui.add_space(14.0);
-        // Centered row of links: measure once, then indent by half the slack.
+        ui.label(RichText::new("TernaryWire").font(theme::semibold(20.0)).color(p.text));
+        kit::tone_pill(ui, &trf("Version {}", &[&crate::update::CURRENT]), kit::Tone::Accent);
+        ui.scope(|ui| {
+            ui.set_max_width(420.0);
+            ui.add(
+                egui::Label::new(RichText::new(tr("A lightweight API client written in Rust. No account, no telemetry: data stays in your workspace folder.")).color(p.text_muted))
+                    .halign(Align::Center)
+                    .wrap(),
+            );
+        });
+        // Centered row of links: measured on the previous frame.
         let links = [
-            (icons::ARROW_SQUARE_OUT, tr("Source code"), REPOSITORY.to_string()),
-            (icons::FILE_TEXT, tr("Release notes"), format!("{REPOSITORY}/releases")),
+            (icons::GIT_BRANCH, tr("Source code"), REPOSITORY.to_string()),
+            (icons::NOTE, tr("Release notes"), format!("{REPOSITORY}/releases")),
             (icons::BUG, tr("Report an issue"), format!("{REPOSITORY}/issues")),
         ];
         let id = ui.scope_id().with("about-links");
-        let row_w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(430.0));
+        let row_w: f32 = ui.data(|d| d.get_temp(id).unwrap_or(330.0));
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - row_w) / 2.0).max(0.0));
             let start = ui.cursor().left();
             for (icon, label, url) in &links {
-                if kit::secondary(ui, Some(*icon), label).on_hover_text(url).clicked() {
+                let b = kit::button_ex(ui, kit::Kind::Secondary, Some(*icon), label, true);
+                if b.on_hover_text(url).clicked() {
                     widgets::open_web_link(url);
                 }
             }
             let w = ui.min_rect().right() - start;
-            ui.data_mut(|d| d.insert_temp(id, w));
+            if (w - row_w).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(id, w));
+            }
         });
-        ui.add_space(22.0);
+        ui.add_space(4.0);
     });
-    group(ui, tr("System"), |g| {
+    kit::group(ui, tr("System"), "", |ui, g| {
         let path = app.settings_path.display().to_string();
-        g.row(tr("Settings file"), "", |ui| {
-            if kit::icon_button(ui, icons::COPY, tr("Copy path")).clicked() {
+        frow(g, ui, true, tr("Settings file"), Help::Mono(&path), ctl::BUTTON_SM, |ui| {
+            if kit::ghost(ui, Some(icons::COPY), tr("Copy path")).clicked() {
                 ui.ctx().copy_text(path.clone());
             }
-            let w = (ui.available_width() - 60.0).max(80.0);
-            ui.add_sized(
-                [w, 20.0],
-                egui::Label::new(RichText::new(&path).font(theme::mono(11.5)).color(theme::pal(ui).text_muted))
-                    .truncate(),
-            )
-            .on_hover_text(&path);
         });
-        g.row(tr("Secrets"), "", |ui| {
-            ui.label(RichText::new(app.ws.secrets.backend_description()).color(theme::pal(ui).text_muted));
-        });
-        g.row(tr("Script engine"), "", |ui| {
-            ui.label(RichText::new(app.scripts.name().to_string()).color(theme::pal(ui).text_muted));
-        });
-        g.row(tr("License"), "", |ui| {
-            ui.label(RichText::new(env!("CARGO_PKG_LICENSE")).color(theme::pal(ui).text_muted));
-        });
+        let muted = |ui: &mut Ui, text: String| {
+            let label = egui::Label::new(RichText::new(&text).size(12.0).color(theme::pal(ui).text_muted)).truncate();
+            ui.add(label).on_hover_text(text);
+        };
+        frow(g, ui, true, tr("Secrets"), Help::None, ctl::TEXT, |ui| muted(ui, app.ws.secrets.backend_description()));
+        frow(g, ui, true, tr("Script engine"), Help::None, ctl::TEXT, |ui| muted(ui, app.scripts.name().to_string()));
+        frow(g, ui, true, tr("License"), Help::None, ctl::TEXT, |ui| muted(ui, env!("CARGO_PKG_LICENSE").to_string()));
     });
 }
 
@@ -2922,96 +3599,102 @@ fn cookies(
         (0, _) => tr("Cookies set by responses are kept here and sent with matching requests.").to_string(),
         (n, d) => format!("{} · {}", plural(n, "{} cookie", "{} cookies"), plural(d, "{} domain", "{} domains")),
     };
-    let height = fit_height(ctx, 200.0, 440.0);
-    let out =
-        Modal::new("cookies", 880.0).title(tr("Cookies")).subtitle(subtitle).icon(icons::COOKIE).show(ctx, |ui| {
+    let out = Modal::new("cookies", 880.0).title(tr("Cookies")).subtitle(subtitle).icon(icons::COOKIE).center().show(
+        ctx,
+        |ui| {
             let current = domain.clone();
+            let height = room(ui).min(440.0);
             split(
                 ui,
                 height,
-                230.0,
+                229.0,
                 |ui| {
-                    egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
-                        let p = theme::pal(ui);
-                        ui.horizontal(|ui| {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(tr("Domains")).font(theme::medium(11.5)).color(p.text_faint));
-                        });
-                        let list_h = ui.available_height() - 44.0;
-                        egui::ScrollArea::vertical()
-                            .id_salt("cookie-domains")
-                            .max_height(list_h)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 2.0;
+                    let p = theme::pal(ui);
+                    pane_head(ui, tr("Domains"), &domains.len().to_string());
+                    let list_h = (ui.available_height() - 43.0).max(40.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("cookie-domains")
+                        .max_height(list_h)
+                        .min_scrolled_height(list_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            egui::Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 1.0;
                                 if domains.is_empty() {
-                                    ui.add_space(6.0);
+                                    ui.add_space(4.0);
                                     ui.horizontal(|ui| {
                                         ui.add_space(4.0);
-                                        ui.label(RichText::new(tr("No domains yet")).color(p.text_muted));
+                                        ui.label(RichText::new(tr("No domains yet")).size(12.0).color(p.text_muted));
                                     });
                                 }
                                 for d in &domains {
                                     let n = all.iter().filter(|c| &c.domain == d).count().to_string();
-                                    if nav_item(
-                                        ui,
-                                        Some(icons::GLOBE_SIMPLE),
-                                        d,
-                                        Some(n.as_str()),
-                                        current.as_deref() == Some(d),
-                                    )
-                                    .clicked()
-                                    {
+                                    let on = current.as_deref() == Some(d);
+                                    if nav_item(ui, Some(icons::GLOBE_SIMPLE), d, Some(n.as_str()), on).clicked() {
                                         picked = Some(d.clone());
                                     }
                                 }
                             });
-                        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                            let r = ui.add(
-                                input(new_domain).hint_text(tr("Add a domain…")).desired_width(ui.available_width()),
-                            );
-                            widgets::a11y_name(&r, tr("Add a domain"));
-                            if r.lost_focus()
-                                && ui.input(|i| i.key_pressed(Key::Enter))
-                                && !new_domain.trim().is_empty()
-                            {
-                                picked = Some(new_domain.trim().to_string());
-                                new_domain.clear();
+                        });
+                    let r = ui.max_rect();
+                    let foot = Rect::from_min_max(pos2(r.left(), r.bottom() - 43.0), r.max);
+                    ui.painter().hline(foot.x_range(), foot.top() + 0.5, Stroke::new(1.0, p.border));
+                    let mut foot_ui =
+                        ui.new_child(UiBuilder::new().max_rect(foot.shrink(8.0).translate(vec2(0.0, 0.5))));
+                    let w = foot_ui.available_width();
+                    let r = small_input(&mut foot_ui, new_domain, tr("Add a domain…"), tr("Add a domain"), w, false);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !new_domain.trim().is_empty() {
+                        picked = Some(new_domain.trim().to_string());
+                        new_domain.clear();
+                    }
+                },
+                |ui| {
+                    let Some(d) = current.clone() else {
+                        ui.add_space(ui.available_height() / 2.0 - 50.0);
+                        compact_empty(
+                            ui,
+                            icons::COOKIE,
+                            tr("No cookies yet"),
+                            tr("Cookies set by responses appear here. Add a domain to set one by hand."),
+                        );
+                        return;
+                    };
+                    let list: Vec<_> = all.iter().filter(|c| c.domain == d).collect();
+                    pane_bar(ui, 48.0, 16.0, |ui| {
+                        let p = theme::pal(ui);
+                        ui.label(RichText::new(&d).font(theme::semibold(13.0)).color(p.text));
+                        ui.label(
+                            RichText::new(plural(list.len(), "{} cookie", "{} cookies")).size(12.0).color(p.text_faint),
+                        );
+                        trailing(ui, |ui| {
+                            let r = ui.add_enabled_ui(!list.is_empty(), |ui| {
+                                danger_button(ui, false, true, Some(icons::TRASH), tr("Clear all"))
+                            });
+                            if r.inner.clicked() {
+                                jar.clear_domain(&d);
+                                changed = true;
                             }
                         });
                     });
-                },
-                |ui| {
-                    egui::Frame::new().inner_margin(Margin { left: 20, right: 20, top: 16, bottom: 14 }).show(
-                        ui,
-                        |ui| {
+                    egui::ScrollArea::vertical().id_salt("cookie-page").auto_shrink([false; 2]).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(Margin::symmetric(16, 14)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            let Some(d) = current.clone() else {
-                                ui.add_space(ui.available_height() / 2.0 - 50.0);
-                                compact_empty(
-                                    ui,
-                                    icons::COOKIE,
-                                    tr("No cookies yet"),
-                                    tr("Cookies set by responses appear here. Add a domain to set one by hand."),
-                                );
-                                return;
-                            };
-                            changed |= cookie_table(ui, &jar, &all, &d, new_cookie, error);
-                        },
-                    );
+                            ui.spacing_mut().item_spacing.y = 14.0;
+                            changed |= cookie_table(ui, &jar, &list, new_cookie, error);
+                            changed |= add_cookie(ui, &jar, &d, new_cookie, error);
+                        });
+                    });
                 },
             );
             footer(ui, |ui| {
-                let p = theme::pal(ui);
-                ui.label(RichText::new(icons::INFO).font(theme::icon_font(14.0)).color(p.text_faint));
-                ui.label(
-                    RichText::new(tr("Stored in this workspace, never committed.")).size(12.0).color(p.text_muted),
-                );
+                icon_hint(ui, icons::LOCK_SIMPLE, tr("Stored in this workspace, never committed."));
                 trailing(ui, |ui| {
                     if kit::secondary(ui, None, tr("Close")).clicked() { Outcome::Close } else { Outcome::Keep }
                 })
             })
-        });
+        },
+    );
     if let Some(d) = picked {
         *domain = Some(d);
         *error = None;
@@ -3022,135 +3705,149 @@ fn cookies(
     out
 }
 
-/// The cookies of one domain with their actions and the "add" field.
-/// Returns true when the jar changed.
+/// The cookies of one domain (`.tbl`): Name 22 % · Value · Path 12 % ·
+/// Expires 22 % · actions 64 px; the row being edited is selected and the
+/// actions show on hover. Returns true when the jar changed.
 fn cookie_table(
     ui: &mut Ui,
     jar: &ternarywire_http::cookies::CookieJar,
-    all: &[ternarywire_http::cookies::CookieInfo],
-    d: &str,
+    list: &[&ternarywire_http::cookies::CookieInfo],
     new_cookie: &mut String,
     error: &mut Option<String>,
 ) -> bool {
     let p = theme::pal(ui);
     let mut changed = false;
-    let list: Vec<_> = all.iter().filter(|c| c.domain == d).collect();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(d).font(theme::semibold(15.0)).color(p.text));
-        ui.label(RichText::new(plural(list.len(), "{} cookie", "{} cookies")).color(p.text_muted));
-        trailing(ui, |ui| {
-            let r = ui.add_enabled_ui(!list.is_empty(), |ui| {
-                kit::button_ex(ui, kit::Kind::Danger, Some(icons::TRASH), tr("Clear all"), true)
-            });
-            if r.inner.clicked() {
-                jar.clear_domain(d);
-                changed = true;
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let w = ui.available_width();
+            let widths = [w * 0.22, 0.0, w * 0.12, w * 0.22, 64.0];
+            let value_w = w - widths.iter().sum::<f32>();
+            let widths = [widths[0], value_w, widths[2], widths[3], widths[4]];
+            let starts: Vec<f32> = widths
+                .iter()
+                .scan(0.0, |x, w| {
+                    let s = *x;
+                    *x += w;
+                    Some(s)
+                })
+                .collect();
+            let (head, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+            let r = theme::RADIUS_CARD - 1;
+            ui.painter().rect_filled(head, CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, p.well);
+            ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
+            for (i, t) in [tr("Name"), tr("Value"), tr("Path"), tr("Expires")].into_iter().enumerate() {
+                let g = line_galley(ui, t, theme::medium(11.5), widths[i] - 24.0);
+                ui.painter().galley(
+                    pos2(head.left() + starts[i] + 12.0, head.center().y - g.size().y / 2.0),
+                    g,
+                    p.text_muted,
+                );
             }
-        });
-    });
-    ui.add_space(8.0);
-    let table_h = (ui.available_height() - 96.0).max(80.0);
-    kit::card(ui).inner_margin(Margin::ZERO).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let w = ui.available_width();
-        let cols = [0.0, 0.26, 0.62, 0.74];
-        let x_of = |rect: Rect, f: f32| rect.left() + 12.0 + (w - 70.0) * f;
-        // Header
-        let (head, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
-        ui.painter().rect_filled(head, CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, side_fill(ui));
-        for (f, t) in cols.iter().zip([tr("Name"), tr("Value"), tr("Path"), tr("Expires")]) {
-            ui.painter().text(
-                pos2(x_of(head, *f), head.center().y),
-                Align2::LEFT_CENTER,
-                t,
-                theme::medium(12.0),
-                p.text_muted,
-            );
-        }
-        hairline(ui);
-        egui::ScrollArea::vertical().id_salt("cookie-rows").max_height(table_h).auto_shrink([false, true]).show(
-            ui,
-            |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                if list.is_empty() {
-                    egui::Frame::new().inner_margin(Margin::symmetric(12, 14)).show(ui, |ui| {
-                        ui.label(RichText::new(tr("No cookies for this domain. Add one below.")).color(p.text_muted));
-                    });
-                }
-                for (i, c) in list.iter().enumerate() {
-                    if i > 0 {
-                        hairline(ui);
-                    }
-                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::hover());
-                    if resp.hovered() {
-                        ui.painter().rect_filled(rect, 0.0, p.faint_row());
-                    }
-                    let cy = rect.center().y;
-                    let cell = |f0: f32, f1: f32| x_of(rect, f1) - x_of(rect, f0) - 10.0;
-                    let name = line_galley(ui, &c.name, theme::mono(12.0), cell(cols[0], cols[1]));
-                    ui.painter().galley(pos2(x_of(rect, cols[0]), cy - name.size().y / 2.0), name, p.text);
-                    let value = line_galley(ui, &c.value, theme::mono(12.0), cell(cols[1], cols[2]));
-                    ui.painter().galley(pos2(x_of(rect, cols[1]), cy - value.size().y / 2.0), value, p.text_muted);
-                    let path = line_galley(ui, &c.path, theme::mono(12.0), cell(cols[2], cols[3]));
-                    ui.painter().galley(pos2(x_of(rect, cols[2]), cy - path.size().y / 2.0), path, p.text_muted);
-                    let expires = c
-                        .expires
-                        .and_then(|e| chrono::DateTime::from_timestamp(e, 0))
-                        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| tr("Session").to_string());
-                    let eg = line_galley(
-                        ui,
-                        &expires,
-                        FontId::proportional(12.0),
-                        rect.right() - 70.0 - x_of(rect, cols[3]),
+            if list.is_empty() {
+                egui::Frame::new().inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(tr("No cookies for this domain. Add one below.")).size(12.5).color(p.text_muted),
                     );
-                    ui.painter().galley(pos2(x_of(rect, cols[3]), cy - eg.size().y / 2.0), eg, p.text_muted);
-                    let _ = resp.on_hover_text(RichText::new(c.to_set_cookie()).monospace());
-                    let actions = Rect::from_min_max(pos2(rect.right() - 62.0, rect.top()), rect.max);
+                });
+            }
+            for (i, c) in list.iter().enumerate() {
+                let set_cookie = c.to_set_cookie();
+                let selected = !new_cookie.is_empty() && *new_cookie == set_cookie;
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::hover());
+                let last = i + 1 == list.len();
+                let corners = if last { CornerRadius { nw: 0, ne: 0, sw: r, se: r } } else { CornerRadius::ZERO };
+                let hovered = ui.rect_contains_pointer(rect);
+                if selected {
+                    ui.painter().rect_filled(rect, corners, p.accent_soft);
+                } else if hovered {
+                    ui.painter().rect_filled(rect, corners, p.well);
+                }
+                if !last {
+                    ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
+                }
+                let cy = rect.center().y;
+                let at = |col: usize| rect.left() + starts[col] + 12.0;
+                let cell = |col: usize| widths[col] - 24.0;
+                let name = line_galley(ui, &c.name, theme::mono(12.5), cell(0));
+                ui.painter().galley(pos2(at(0), cy - name.size().y / 2.0), name, p.text);
+                let value = line_galley(ui, &c.value, theme::mono(12.5), cell(1));
+                ui.painter().galley(pos2(at(1), cy - value.size().y / 2.0), value, p.text_muted);
+                let path = line_galley(ui, &c.path, theme::mono(12.5), cell(2));
+                ui.painter().galley(pos2(at(2), cy - path.size().y / 2.0), path, p.text);
+                match c.expires.and_then(|e| chrono::DateTime::from_timestamp(e, 0)) {
+                    Some(t) => {
+                        let text = t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string();
+                        let g = line_galley(ui, &text, FontId::proportional(12.5), cell(3));
+                        ui.painter().galley(pos2(at(3), cy - g.size().y / 2.0), g, p.text_muted);
+                    }
+                    None => {
+                        let cell_rect =
+                            Rect::from_min_max(pos2(at(3), rect.top()), pos2(at(3) + cell(3), rect.bottom()));
+                        let mut cell = ui.new_child(
+                            UiBuilder::new().max_rect(cell_rect).layout(Layout::left_to_right(Align::Center)),
+                        );
+                        kit::tone_pill(&mut cell, tr("Session"), kit::Tone::Neutral);
+                    }
+                }
+                let _ = resp.on_hover_text(RichText::new(&set_cookie).monospace());
+                if hovered || selected {
+                    let actions = Rect::from_min_max(pos2(rect.right() - 56.0, rect.top()), rect.max - vec2(8.0, 0.0));
                     let mut child =
                         ui.new_child(UiBuilder::new().max_rect(actions).layout(Layout::right_to_left(Align::Center)));
-                    child.spacing_mut().item_spacing.x = 2.0;
-                    if kit::icon_button_ex(&mut child, icons::TRASH, tr("Delete cookie"), false, 26.0).clicked() {
+                    child.spacing_mut().item_spacing.x = 0.0;
+                    if kit::icon_button_sm(&mut child, icons::TRASH, tr("Delete cookie")).clicked() {
                         jar.remove(&c.domain, &c.path, &c.name);
                         changed = true;
                     }
-                    if kit::icon_button_ex(&mut child, icons::PENCIL_SIMPLE, tr("Edit cookie"), false, 26.0).clicked() {
-                        *new_cookie = c.to_set_cookie();
+                    if kit::icon_button_sm(&mut child, icons::PENCIL_SIMPLE, tr("Edit cookie")).clicked() {
+                        *new_cookie = set_cookie.clone();
                         *error = None;
                     }
                 }
-            },
-        );
-    });
-    ui.add_space(12.0);
-    field_label(ui, tr("Add or replace a cookie"));
-    ui.allocate_ui_with_layout(vec2(ui.available_width(), 30.0), Layout::right_to_left(Align::Center), |ui| {
-        let add = kit::secondary(ui, Some(icons::PLUS), tr("Add")).clicked();
-        let w = ui.available_width();
-        let r = ui.add(
-            input(new_cookie)
-                .font(egui::TextStyle::Monospace)
-                .hint_text(tr("name=value; Path=/; Expires=…"))
-                .desired_width(w),
-        );
-        widgets::a11y_name(&r, tr("Cookie"));
-        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        if (add || enter) && !new_cookie.trim().is_empty() {
-            match jar.set(d, new_cookie) {
-                Ok(()) => {
-                    new_cookie.clear();
-                    *error = None;
-                    changed = true;
-                }
-                Err(e) => *error = Some(e),
             }
+        });
+    changed
+}
+
+/// "Add or replace a cookie": a Set-Cookie field and Add. Returns true when
+/// the jar changed.
+fn add_cookie(
+    ui: &mut Ui,
+    jar: &ternarywire_http::cookies::CookieJar,
+    d: &str,
+    new_cookie: &mut String,
+    error: &mut Option<String>,
+) -> bool {
+    let mut changed = false;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.label(kit::section_title(tr("Add or replace a cookie")).color(theme::pal(ui).text));
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 26.0), Layout::right_to_left(Align::Center), |ui| {
+            let add = kit::button_ex(ui, kit::Kind::Secondary, Some(icons::PLUS), tr("Add"), true).clicked();
+            let w = ui.available_width();
+            let r = small_input(ui, new_cookie, tr("name=value; Path=/; Expires=…"), tr("Cookie"), w, true);
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if (add || enter) && !new_cookie.trim().is_empty() {
+                match jar.set(d, new_cookie) {
+                    Ok(()) => {
+                        new_cookie.clear();
+                        *error = None;
+                        changed = true;
+                    }
+                    Err(e) => *error = Some(e),
+                }
+            }
+        });
+        ui.label(kit::hint(ui, tr("Paste a Set-Cookie value. Hover a row to see its Set-Cookie text.")));
+        if let Some(e) = error {
+            banner(ui, Tone::Err, e);
         }
     });
-    if let Some(e) = error {
-        ui.add_space(4.0);
-        banner(ui, Tone::Err, e);
-    }
     changed
 }
 
@@ -3187,6 +3884,64 @@ pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { trf(one, &[&n]) } else { trf(many, &[&n]) }
 }
 
+/// A recessed code box (`.dl-codebox`): an editable, highlighted text of
+/// `height` on the `well` fill, frameless inside, mono 12.5 on 20 px lines.
+fn code_box(
+    ui: &mut Ui,
+    id: &str,
+    text: &mut String,
+    lang: crate::highlight::Lang,
+    hint: &str,
+    height: f32,
+) -> Response {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    kit::well(ui)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let h = height - 2.0;
+            egui::ScrollArea::vertical()
+                .id_salt(id)
+                .max_height(h)
+                .min_scrolled_height(h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                        let key = crate::highlight::HlKey {
+                            text: buf.as_str(),
+                            lang,
+                            dark,
+                            search: "",
+                            vars: None,
+                            font_size: 12.5,
+                            wrap: true,
+                        };
+                        let mut job = crate::highlight::cached(ui.ctx(), key);
+                        job.wrap.max_width = wrap_width;
+                        for s in &mut job.sections {
+                            s.format.line_height = Some(20.0);
+                        }
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    };
+                    let edit = egui::TextEdit::multiline(text)
+                        .id_salt(id)
+                        .font(theme::mono(12.5))
+                        .hint_text(RichText::new(hint).font(theme::mono(12.5)).color(p.text_faint))
+                        // A framed TextEdit ignores `margin`: the padding goes in the frame.
+                        .frame(egui::Frame::NONE.inner_margin(Margin::symmetric(14, 10)))
+                        .min_size(vec2(0.0, h))
+                        .desired_width(f32::INFINITY)
+                        .lock_focus(true)
+                        .layouter(&mut layouter);
+                    let r = ui.add(edit);
+                    widgets::a11y_name(&r, hint);
+                    r
+                })
+                .inner
+        })
+        .inner
+}
+
 fn import(
     app: &mut TernaryWireApp,
     ctx: &egui::Context,
@@ -3220,99 +3975,33 @@ fn import(
         .show(ctx, |ui| {
             body(ui, |ui| {
                 let p = theme::pal(ui);
-                // Drop zone (also a button that opens the file picker).
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 112.0), Sense::click());
-                widgets::a11y_button(&resp, tr("Choose file…"));
-                let hot = hovering || resp.hovered();
-                ui.painter().rect_filled(rect, CornerRadius::same(10), if hot { p.accent_soft } else { side_fill(ui) });
-                let stroke = Stroke::new(1.2, if hot { p.accent } else { p.border_strong });
-                ui.painter().extend(egui::Shape::dashed_line(
-                    &rounded_outline(rect.shrink(0.5), 10.0),
-                    stroke,
-                    6.0,
-                    4.0,
-                ));
-                let cy = rect.center().y;
-                ui.painter().text(
-                    pos2(rect.center().x, cy - 26.0),
-                    Align2::CENTER_CENTER,
-                    icons::FILE_ARROW_UP,
-                    theme::icon_font(26.0),
-                    if hot { p.accent_text } else { p.text_muted },
-                );
-                let title =
-                    if hovering { tr("Drop to import") } else { tr("Drop a file here, or click to choose one") };
-                ui.painter().text(
-                    pos2(rect.center().x, cy + 6.0),
-                    Align2::CENTER_CENTER,
-                    title,
-                    theme::medium(13.5),
-                    p.text,
-                );
-                ui.painter().text(
-                    pos2(rect.center().x, cy + 26.0),
-                    Align2::CENTER_CENTER,
-                    "Postman · OpenAPI / Swagger · Insomnia · HAR · Hoppscotch · Thunder Client · WSDL · cURL",
-                    FontId::proportional(11.5),
-                    p.text_muted,
-                );
-                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
-                    && let Some(path) = rfd::FileDialog::new().pick_file()
-                {
-                    match read_import(&path) {
-                        Ok(t) => {
-                            *text = t;
-                            *source = path.display().to_string();
-                            *preview = None;
-                            *error = None;
+                ui.spacing_mut().item_spacing.y = 14.0;
+                if source.is_empty() || hovering {
+                    if drop_zone(ui, hovering)
+                        && let Some(path) = rfd::FileDialog::new().pick_file()
+                    {
+                        match read_import(&path) {
+                            Ok(t) => {
+                                *text = t;
+                                *source = path.display().to_string();
+                                *preview = None;
+                                *error = None;
+                            }
+                            Err(e) => *error = Some(e),
                         }
-                        Err(e) => *error = Some(e),
                     }
+                } else if file_chip(ui, source) {
+                    source.clear();
+                    text.clear();
                 }
-                if !source.is_empty() {
-                    ui.add_space(8.0);
-                    let mut clear = false;
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(RichText::new(icons::FILE_TEXT).font(theme::icon_font(15.0)).color(p.text_muted));
-                        let path = std::path::Path::new(source.as_str());
-                        let name =
-                            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| source.clone());
-                        ui.label(RichText::new(name).font(theme::medium(13.0)).color(p.text));
-                        trailing(ui, |ui| {
-                            if kit::icon_button_ex(ui, icons::X, tr("Clear"), false, 22.0).clicked() {
-                                clear = true;
-                            }
-                            if let Some(dir) = path.parent() {
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(dir.display().to_string()).size(12.0).color(p.text_faint),
-                                        )
-                                        .truncate(),
-                                    );
-                                });
-                            }
-                        });
-                    });
-                    if clear {
-                        source.clear();
-                        text.clear();
-                    }
-                }
-                ui.add_space(12.0);
                 // "or paste" divider
-                ui.horizontal(|ui| {
-                    let label = tr("or paste the content");
-                    let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(11.5), p.text_faint);
-                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
-                    let gw = g.size().x;
-                    let mid = r.center();
-                    ui.painter().hline(r.left()..=mid.x - gw / 2.0 - 10.0, mid.y, Stroke::new(1.0, p.border));
-                    ui.painter().hline(mid.x + gw / 2.0 + 10.0..=r.right(), mid.y, Stroke::new(1.0, p.border));
-                    ui.painter().galley(mid - g.size() / 2.0, g, p.text_faint);
-                });
-                ui.add_space(8.0);
+                let label = tr("or paste the content");
+                let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(11.5), p.text_faint);
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
+                let (gw, mid) = (g.size().x, r.center());
+                ui.painter().hline(r.left()..=mid.x - gw / 2.0 - 10.0, mid.y, Stroke::new(1.0, p.border));
+                ui.painter().hline(mid.x + gw / 2.0 + 10.0..=r.right(), mid.y, Stroke::new(1.0, p.border));
+                ui.painter().galley(mid - g.size() / 2.0, g, p.text_faint);
                 let trimmed = text.trim_start();
                 let lang = if trimmed.starts_with('{') || trimmed.starts_with('[') {
                     crate::highlight::Lang::Json
@@ -3323,20 +4012,9 @@ fn import(
                 } else {
                     crate::highlight::Lang::Text
                 };
-                let r = egui::ScrollArea::vertical()
-                    .id_salt("import-scroll")
-                    .max_height(fit_height(ui.ctx(), 520.0, 180.0))
-                    .show(ui, |ui| widgets::code_editor(ui, "import-text", text, lang, None, 6, false))
-                    .inner;
-                if text.is_empty() {
-                    ui.painter().text(
-                        r.rect.left_top() + vec2(9.0, 7.0),
-                        Align2::LEFT_TOP,
-                        tr("A Postman or OpenAPI file, a HAR export or a cURL command…"),
-                        theme::mono(12.0),
-                        p.text_faint,
-                    );
-                }
+                let hint = tr("A Postman or OpenAPI file, a HAR export or a cURL command…");
+                let height = if source.is_empty() { 150.0 } else { 96.0 };
+                let r = code_box(ui, "import-text", text, lang, hint, height);
                 if r.changed() || (preview.is_none() && error.is_none() && !text.trim().is_empty()) {
                     match ternarywire_convert::import_auto(text) {
                         Ok(pr) => {
@@ -3356,19 +4034,22 @@ fn import(
                     }
                 }
                 if let Some(e) = error {
-                    ui.add_space(10.0);
                     banner(ui, Tone::Err, &trf("This can't be imported: {}", &[&e]));
                 }
-                if let Some(pr) = preview {
-                    ui.add_space(10.0);
-                    import_summary(ui, text, pr);
+                match preview {
+                    Some(pr) => import_summary(ui, text, pr),
+                    None if error.is_none() => {
+                        ui.label(kit::hint(
+                            ui,
+                            tr("The format is detected as you paste. A file dropped anywhere on the window is imported too."),
+                        ));
+                    }
+                    None => {}
                 }
             });
             footer(ui, |ui| {
                 let p = theme::pal(ui);
-                ui.label(
-                    RichText::new(tr("Imported items are added to this workspace.")).size(12.0).color(p.text_muted),
-                );
+                ui.label(RichText::new(tr("Imported items are added to this workspace.")).size(12.0).color(p.text_muted));
                 trailing(ui, |ui| {
                     let r = ui.add_enabled_ui(preview.is_some(), |ui| {
                         kit::primary_icon(ui, icons::DOWNLOAD_SIMPLE, tr("Import"))
@@ -3409,54 +4090,200 @@ fn import(
     out
 }
 
+/// The drop zone (`.dl-dz`): 112 high, a dashed outline on the `well`; a
+/// button that opens the file picker. Returns true when clicked.
+fn drop_zone(ui: &mut Ui, hovering: bool) -> bool {
+    let p = theme::pal(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 112.0), Sense::click());
+    widgets::a11y_button(&resp, tr("Choose file…"));
+    let hot = hovering || resp.hovered();
+    ui.painter().rect_filled(rect, CornerRadius::same(12), if hot { p.accent_soft } else { p.well });
+    let stroke = Stroke::new(1.5, if hot { p.accent } else { p.border_strong });
+    ui.painter().extend(egui::Shape::dashed_line(&rounded_outline(rect.shrink(0.75), 12.0), stroke, 5.0, 4.0));
+    let cy = rect.center().y;
+    ui.painter().text(
+        pos2(rect.center().x, cy - 23.0),
+        Align2::CENTER_CENTER,
+        icons::FILE_ARROW_DOWN,
+        theme::icon_font(24.0),
+        p.accent_text,
+    );
+    let title = if hovering { tr("Drop to import") } else { tr("Drop a file here, or click to choose one") };
+    ui.painter().text(pos2(rect.center().x, cy + 4.5), Align2::CENTER_CENTER, title, theme::medium(13.0), p.text);
+    ui.painter().text(
+        pos2(rect.center().x, cy + 26.5),
+        Align2::CENTER_CENTER,
+        "Postman · OpenAPI / Swagger · Insomnia · HAR · Hoppscotch · Thunder Client · WSDL · cURL",
+        FontId::proportional(12.0),
+        p.text_faint,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// The chosen file: a tile, its name and folder, and a clear button.
+/// Returns true when it was cleared.
+fn file_chip(ui: &mut Ui, source: &str) -> bool {
+    let p = theme::pal(ui);
+    let mut clear = false;
+    let path = std::path::Path::new(source);
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| source.to_string());
+    let dir = path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+    kit::well(ui).corner_radius(CornerRadius::same(theme::RADIUS_CARD)).inner_margin(Margin::symmetric(12, 10)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                tile(ui, icons::FILE_TEXT, true);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(RichText::new(name).font(theme::medium(13.0)).color(p.text));
+                    ui.add(egui::Label::new(RichText::new(dir).font(theme::mono(11.0)).color(p.text_faint)).truncate());
+                });
+                trailing(ui, |ui| {
+                    if kit::icon_button_sm(ui, icons::X, tr("Clear")).clicked() {
+                        clear = true;
+                    }
+                });
+            });
+        },
+    );
+    clear
+}
+
 /// "Ready to import" card: detected format, what will be added, warnings.
 fn import_summary(ui: &mut Ui, text: &str, pr: &ternarywire_convert::Imported) {
     let p = theme::pal(ui);
-    kit::card(ui).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(17.0)).color(p.ok));
-            ui.label(RichText::new(tr("Ready to import")).font(theme::semibold(13.5)).color(p.text));
-            if let Some(fmt) = ternarywire_convert::detect(text) {
-                trailing(ui, |ui| kit::pill(ui, fmt.label(), p.accent_text));
-            }
-        });
-        ui.add_space(6.0);
-        let reqs: usize = pr.collections.iter().map(|c| c.request_count()).sum();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 18.0;
-            let stats = [
-                (icons::STACK, pr.collections.len(), "{} collection", "{} collections"),
-                (icons::FILE, reqs, "{} request", "{} requests"),
-                (icons::GLOBE, pr.environments.len(), "{} environment", "{} environments"),
-                (icons::GLOBE_SIMPLE, pr.globals.len(), "{} global variable", "{} global variables"),
-            ];
-            for (i, (icon, n, one, many)) in stats.into_iter().enumerate() {
-                if i >= 2 && n == 0 {
-                    continue;
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.ok.lerp_to_gamma(p.border, 0.6)))
+        .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // Rows as tall as their text (egui's rows are 30 by default).
+            ui.spacing_mut().interact_size.y = 20.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(RichText::new(icons::CHECK_CIRCLE).font(theme::icon_font(13.0)).color(p.ok));
+                ui.label(RichText::new(tr("Ready to import")).font(theme::semibold(13.0)).color(p.text));
+                if let Some(fmt) = ternarywire_convert::detect(text) {
+                    kit::tone_pill(ui, fmt.label(), kit::Tone::Ok);
                 }
-                ui.label(RichText::new(format!("{icon}  {}", plural(n, one, many))).color(p.text_muted));
+            });
+            ui.add_space(6.0);
+            let reqs: usize = pr.collections.iter().map(|c| c.request_count()).sum();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                let stats = [
+                    (icons::STACK, pr.collections.len(), "{} collection", "{} collections"),
+                    (icons::GLOBE, reqs, "{} request", "{} requests"),
+                    (icons::GLOBE_SIMPLE, pr.environments.len(), "{} environment", "{} environments"),
+                    (icons::HASH, pr.globals.len(), "{} global variable", "{} global variables"),
+                ];
+                for (i, (icon, n, one, many)) in stats.into_iter().enumerate() {
+                    if i >= 2 && n == 0 {
+                        continue;
+                    }
+                    ui.label(RichText::new(format!("{icon} {}", plural(n, one, many))).size(12.0).color(p.text_muted));
+                }
+            });
+            if !pr.warnings.is_empty() {
+                ui.add_space(10.0);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for w in pr.warnings.iter().take(6) {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new(icons::WARNING).font(theme::icon_font(12.0)).color(p.warn));
+                        ui.add(egui::Label::new(RichText::new(w).size(12.0).color(p.text_muted)).wrap());
+                    });
+                }
+                if pr.warnings.len() > 6 {
+                    ui.label(kit::hint(ui, &trf("{} more warnings", &[&(pr.warnings.len() - 6)])));
+                }
             }
         });
-        if !pr.warnings.is_empty() {
-            ui.add_space(8.0);
-            for w in pr.warnings.iter().take(6) {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(RichText::new(icons::WARNING).font(theme::icon_font(13.0)).color(p.warn));
-                    ui.add(egui::Label::new(RichText::new(w).size(12.0).color(p.text_muted)).wrap());
-                });
-            }
-            if pr.warnings.len() > 6 {
-                ui.label(kit::hint(ui, &trf("{} more warnings", &[&(pr.warnings.len() - 6)])));
-            }
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
 // Code snippet
 // ---------------------------------------------------------------------------
+
+/// The name of a snippet language's family, shown next to it.
+fn language_family(lang: Language) -> &'static str {
+    match lang.syntax() {
+        "bash" => tr("Shell"),
+        "http" => "HTTP",
+        "javascript" => "JavaScript",
+        "python" => "Python",
+        "go" => "Go",
+        "rust" => "Rust",
+        "java" => "Java",
+        "kotlin" => "Kotlin",
+        "csharp" => "C#",
+        "php" => "PHP",
+        "swift" => "Swift",
+        "ruby" => "Ruby",
+        "dart" => "Dart",
+        "powershell" => "PowerShell",
+        other => other,
+    }
+}
+
+/// Read-only code with a line-number gutter (`.code`): mono 12.5 on 20 px
+/// lines, wrapped (anywhere) or scrolling sideways. The text can be selected.
+fn code_view(ui: &mut Ui, id: &str, code: &str, lang: crate::highlight::Lang, wrap: bool) {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    let rect = ui.available_rect_before_wrap();
+    let lines = code.split('\n').count().max(1);
+    // `.gut div`: 12 px in, the number, 4 px, a 10 px fold column, 8 px.
+    let gutter_w = 12.0 + lines.to_string().len().max(1) as f32 * 7.5 + 4.0 + 10.0 + 8.0;
+    let gutter = Rect::from_min_max(rect.min, pos2(rect.left() + gutter_w, rect.bottom()));
+    ui.painter().rect_filled(gutter, 0.0, p.well);
+    ui.painter().vline(gutter.right() - 0.5, gutter.y_range(), Stroke::new(1.0, p.border));
+    let key = crate::highlight::HlKey { text: code, lang, dark, search: "", vars: None, font_size: 12.5, wrap };
+    let mut job = crate::highlight::cached(ui.ctx(), key);
+    for s in &mut job.sections {
+        s.format.line_height = Some(20.0);
+    }
+    job.wrap = if wrap {
+        TextWrapping { max_width: rect.width() - gutter_w - 28.0, break_anywhere: true, ..Default::default() }
+    } else {
+        TextWrapping::no_max_width()
+    };
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let content = Rect::from_min_max(pos2(gutter.right(), rect.top()), rect.max);
+    let mut child = ui.new_child(UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(content.intersect(ui.clip_rect()));
+    let out = egui::ScrollArea::new([!wrap, true]).id_salt(id).auto_shrink([false; 2]).show(&mut child, |ui| {
+        egui::Frame::new().inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
+            ui.add(egui::Label::new(galley.clone()).selectable(true));
+        });
+    });
+    let top = content.top() + 8.0 - out.state.clamped_offset().y;
+    let painter = ui.painter().with_clip_rect(gutter.intersect(ui.clip_rect()));
+    let mut n = 0;
+    let mut new_line = true;
+    for row in &galley.rows {
+        if new_line {
+            n += 1;
+            let y = top + row.rect().center().y;
+            if y > gutter.top() - 20.0 && y < gutter.bottom() + 20.0 {
+                painter.text(
+                    pos2(gutter.right() - 22.0, y),
+                    Align2::RIGHT_CENTER,
+                    n.to_string(),
+                    theme::mono(12.5),
+                    p.text_faint,
+                );
+            }
+        }
+        new_line = row.ends_with_newline;
+    }
+    ui.advance_cursor_after_rect(rect);
+}
 
 fn codegen(
     app: &mut TernaryWireApp,
@@ -3467,68 +4294,102 @@ fn codegen(
     code: &mut String,
 ) -> Outcome {
     let mut regenerate = false;
-    let height = fit_height(ctx, 200.0, 500.0);
     let copied_id = egui::Id::unique("codegen-copied");
+    let wrap_id = egui::Id::unique("codegen-wrap");
+    let filter_id = egui::Id::unique("codegen-filter");
     let now = ctx.input(|i| i.time);
     let copied_at: Option<f64> = ctx.data(|d| d.get_temp(copied_id));
     let copied = copied_at.is_some_and(|t| now - t < 1.6);
     if copied {
         ctx.request_repaint_after(std::time::Duration::from_millis(300));
     }
+    let mut wrap: bool = ctx.data(|d| d.get_temp(wrap_id).unwrap_or(true));
+    let mut filter: String = ctx.data(|d| d.get_temp(filter_id).unwrap_or_default());
     let out = Modal::new("codegen", 920.0)
         .title(tr("Code snippet"))
         .subtitle(item.name.clone())
         .icon(icons::CODE)
+        .center()
         .show(ctx, |ui| {
             let current = *lang;
+            let height = room(ui).min(460.0);
             split(
                 ui,
                 height,
-                220.0,
+                219.0,
                 |ui| {
+                    egui::Frame::new().inner_margin(Margin::same(8)).show(ui, |ui| {
+                        let w = ui.available_width();
+                        kit::search_field_sm(ui, "codegen-filter", &mut filter, tr("Filter languages"), w);
+                    });
+                    let needle = filter.trim().to_lowercase();
                     egui::ScrollArea::vertical().id_salt("codegen-langs").auto_shrink([false; 2]).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            for l in Language::ALL {
-                                let (name, variant) = l.label().split_once(" - ").unwrap_or((l.label(), ""));
-                                let trail = (!variant.is_empty()).then_some(variant);
-                                if nav_item(ui, None, name, trail, *lang == *l).clicked() && *lang != *l {
-                                    *lang = *l;
-                                    regenerate = true;
+                        egui::Frame::new().inner_margin(Margin { left: 6, right: 6, top: 0, bottom: 6 }).show(
+                            ui,
+                            |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                let shown: Vec<&Language> = Language::ALL
+                                    .iter()
+                                    .filter(|l| l.label().to_lowercase().contains(&needle))
+                                    .collect();
+                                if shown.is_empty() {
+                                    ui.add_space(6.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(4.0);
+                                        ui.label(kit::hint(ui, tr("No languages match the filter.")));
+                                    });
                                 }
-                            }
-                        });
+                                for l in shown {
+                                    let (name, variant) = l.label().split_once(" - ").unwrap_or((l.label(), ""));
+                                    let trail = (!variant.is_empty()).then_some(variant);
+                                    if nav_item(ui, None, name, trail, *lang == *l).clicked() && *lang != *l {
+                                        *lang = *l;
+                                        regenerate = true;
+                                    }
+                                }
+                            },
+                        );
                     });
                 },
                 |ui| {
-                    egui::Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let hl = match current.syntax() {
-                            "http" => crate::highlight::Lang::Text,
-                            _ => crate::highlight::Lang::JavaScript,
-                        };
-                        let mut shown = code.clone();
-                        let rows = ((height - 40.0) / 17.0) as usize;
-                        egui::ScrollArea::vertical().id_salt("codegen-code").max_height(height - 32.0).show(ui, |ui| {
-                            widgets::code_editor(ui, ("codegen", current.id()), &mut shown, hl, None, rows, true);
+                    pane_bar(ui, 42.0, 12.0, |ui| {
+                        let p = theme::pal(ui);
+                        let name = current.label().split_once(" - ").map_or(current.label(), |(n, _)| n);
+                        ui.label(RichText::new(name).font(theme::semibold(13.0)).color(p.text));
+                        ui.label(RichText::new(language_family(current)).size(12.0).color(p.text_faint));
+                        trailing(ui, |ui| {
+                            if kit::icon_button_ex(ui, icons::TEXT_ALIGN_LEFT, tr("Wrap lines"), wrap, 22.0).clicked() {
+                                wrap = !wrap;
+                            }
                         });
                     });
+                    let hl = match current.syntax() {
+                        "http" => crate::highlight::Lang::Text,
+                        _ => crate::highlight::Lang::JavaScript,
+                    };
+                    code_view(ui, &format!("codegen-{}", current.id()), code, hl, wrap);
                 },
             );
             footer(ui, |ui| {
                 let p = theme::pal(ui);
-                ui.label(RichText::new(icons::WARNING).font(theme::icon_font(14.0)).color(p.warn));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(tr(
-                            "Variables are resolved with the active environment; secrets appear in clear text.",
-                        ))
-                        .size(12.0)
-                        .color(p.text_muted),
-                    )
-                    .truncate(),
-                );
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(RichText::new(icons::WARNING).font(theme::icon_font(12.0)).color(p.warn));
+                let w = (ui.available_width() - 190.0).max(60.0);
+                ui.allocate_ui_with_layout(vec2(w, 20.0), Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(tr(
+                                "Variables are resolved with the active environment; secrets appear in clear text.",
+                            ))
+                            .size(12.0)
+                            .color(p.text_muted),
+                        )
+                        .truncate(),
+                    );
+                });
                 trailing(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     let (icon, label) = if copied { (icons::CHECK, tr("Copied")) } else { (icons::COPY, tr("Copy")) };
                     if kit::primary_icon(ui, icon, label).clicked() {
                         ui.ctx().copy_text(code.clone());
@@ -3538,6 +4399,10 @@ fn codegen(
                 })
             })
         });
+    ctx.data_mut(|d| {
+        d.insert_temp(wrap_id, wrap);
+        d.insert_temp(filter_id, filter);
+    });
     if regenerate {
         *code = codegen_item(app, item, collection, *lang);
     }
@@ -3548,13 +4413,14 @@ fn codegen(
 // Save request
 // ---------------------------------------------------------------------------
 
-/// A row of the collection/folder picker.
+/// A row of the collection/folder picker (`.dl-tree-pick .tp`): 30 high,
+/// 18 px per level, the target tinted with a check.
 fn tree_row(ui: &mut Ui, depth: usize, icon: &str, label: &str, selected: bool) -> Response {
     let p = theme::pal(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     widgets::a11y_tab(&resp, label, selected);
     if ui.is_rect_visible(rect) {
-        let radius = CornerRadius::same(theme::RADIUS);
+        let radius = CornerRadius::same(theme::RADIUS_SM);
         if selected {
             ui.painter().rect_filled(rect, radius, p.accent_soft);
         } else if resp.hovered() {
@@ -3562,19 +4428,24 @@ fn tree_row(ui: &mut Ui, depth: usize, icon: &str, label: &str, selected: bool) 
         }
         let cy = rect.center().y;
         let x = rect.left() + 10.0 + 18.0 * depth as f32;
-        let color = if selected { p.accent_text } else { p.text_muted };
-        ui.painter().text(pos2(x + 8.0, cy), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), color);
-        let font = if depth == 0 { theme::medium(13.0) } else { FontId::proportional(13.0) };
-        let g = line_galley(ui, label, font, rect.right() - x - 54.0);
-        ui.painter().galley(pos2(x + 24.0, cy - g.size().y / 2.0), g, p.text);
+        let (color, icon_c) = if selected { (p.accent_text, p.accent_text) } else { (p.text, p.text_muted) };
+        let ig = ui.painter().layout_no_wrap(icon.to_string(), theme::icon_font(15.0), icon_c);
+        let iw = ig.size().x;
+        ui.painter().galley(pos2(x, cy - ig.size().y / 2.0), ig, icon_c);
+        let font = if selected { theme::medium(12.5) } else { FontId::proportional(12.5) };
+        let g = line_galley(ui, label, font, rect.right() - x - iw - 40.0);
+        ui.painter().galley(pos2(x + iw + 8.0, cy - g.size().y / 2.0), g, color);
         if selected {
             ui.painter().text(
-                pos2(rect.right() - 16.0, cy),
-                Align2::CENTER_CENTER,
+                pos2(rect.right() - 10.0, cy),
+                Align2::RIGHT_CENTER,
                 icons::CHECK,
-                theme::icon_font(14.0),
-                p.accent,
+                theme::icon_font(13.0),
+                p.accent_text,
             );
+        }
+        if resp.has_focus() {
+            ui.painter().rect_stroke(rect, radius, Stroke::new(1.5, p.accent), StrokeKind::Inside);
         }
     }
     resp
@@ -3615,79 +4486,82 @@ fn save_as(
         path
     });
     let valid = collection.is_some() && !name.trim().is_empty();
-    let list_h = fit_height(ctx, 420.0, 260.0);
     let out =
         Modal::new("save-as", 520.0).title(tr("Save request")).icon(icons::FLOPPY_DISK).sticky().show(ctx, |ui| {
             body(ui, |ui| {
-                field_label(ui, tr("Name"));
-                let r = ui.add(input(name).desired_width(f32::INFINITY));
-                widgets::a11y_name(&r, tr("Name"));
-                if ui.memory(|m| m.focused().is_none()) {
-                    r.request_focus();
-                }
-                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && valid {
-                    save = true;
-                }
-                ui.add_space(12.0);
-                field_label(ui, tr("Save to"));
-                kit::card(ui).inner_margin(Margin::same(6)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    egui::ScrollArea::vertical()
-                        .id_salt("save-tree")
-                        .max_height(list_h)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            if app.ws.data.collections.is_empty() {
-                                egui::Frame::new().inner_margin(Margin::symmetric(8, 10)).show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new(tr("No collections yet. Create one below."))
-                                            .color(theme::pal(ui).text_muted),
-                                    );
-                                });
-                            }
-                            for c in &app.ws.data.collections {
-                                let selected = collection.as_deref() == Some(&c.id) && folder.is_none();
-                                if tree_row(ui, 0, icons::STACK, &c.name, selected).clicked() {
-                                    *collection = Some(c.id.clone());
-                                    *folder = None;
+                ui.spacing_mut().item_spacing.y = 14.0;
+                kit::field(ui, tr("Name"), "", |ui| {
+                    let edit = line_edit(ui, name, "", false, false).desired_width(f32::INFINITY);
+                    let r = add_input(ui, edit, false);
+                    widgets::a11y_name(&r, tr("Name"));
+                    if ui.memory(|m| m.focused().is_none()) {
+                        r.request_focus();
+                    }
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && valid {
+                        save = true;
+                    }
+                });
+                kit::field(ui, tr("Save to"), "", |ui| {
+                    kit::well(ui).inner_margin(Margin::same(4)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::ScrollArea::vertical()
+                            .id_salt("save-tree")
+                            .max_height(212.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                if app.ws.data.collections.is_empty() {
+                                    egui::Frame::new().inner_margin(Margin::symmetric(8, 8)).show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(tr("No collections yet. Create one below."))
+                                                .size(12.5)
+                                                .color(theme::pal(ui).text_muted),
+                                        );
+                                    });
                                 }
-                                fn folders(
-                                    ui: &mut Ui,
-                                    c: &ternarywire_core::model::Collection,
-                                    items: &[Item],
-                                    depth: usize,
-                                    collection: &mut Option<Id>,
-                                    folder: &mut Option<Id>,
-                                ) {
-                                    for i in items {
-                                        if let Item::Folder(f) = i {
-                                            let selected = folder.as_deref() == Some(&f.id);
-                                            let icon = if selected { icons::FOLDER_OPEN } else { icons::FOLDER_SIMPLE };
-                                            if tree_row(ui, depth, icon, &f.name, selected).clicked() {
-                                                *collection = Some(c.id.clone());
-                                                *folder = Some(f.id.clone());
+                                for c in &app.ws.data.collections {
+                                    let selected = collection.as_deref() == Some(&c.id) && folder.is_none();
+                                    if tree_row(ui, 0, icons::STACK, &c.name, selected).clicked() {
+                                        *collection = Some(c.id.clone());
+                                        *folder = None;
+                                    }
+                                    fn folders(
+                                        ui: &mut Ui,
+                                        c: &ternarywire_core::model::Collection,
+                                        items: &[Item],
+                                        depth: usize,
+                                        collection: &mut Option<Id>,
+                                        folder: &mut Option<Id>,
+                                    ) {
+                                        for i in items {
+                                            if let Item::Folder(f) = i {
+                                                let selected = folder.as_deref() == Some(&f.id);
+                                                let icon =
+                                                    if selected { icons::FOLDER_OPEN } else { icons::FOLDER_SIMPLE };
+                                                if tree_row(ui, depth, icon, &f.name, selected).clicked() {
+                                                    *collection = Some(c.id.clone());
+                                                    *folder = Some(f.id.clone());
+                                                }
+                                                folders(ui, c, &f.items, depth + 1, collection, folder);
                                             }
-                                            folders(ui, c, &f.items, depth + 1, collection, folder);
                                         }
                                     }
+                                    folders(ui, c, &c.items, 1, collection, folder);
                                 }
-                                folders(ui, c, &c.items, 1, collection, folder);
-                            }
-                        });
+                            });
+                    });
                 });
-                ui.add_space(8.0);
                 ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), 30.0),
+                    vec2(ui.available_width(), 26.0),
                     Layout::right_to_left(Align::Center),
                     |ui| {
                         let ok = !new_collection.trim().is_empty();
                         let b = ui.add_enabled_ui(ok, |ui| {
-                            kit::secondary(ui, Some(icons::FOLDER_PLUS), tr("Create collection"))
+                            kit::button_ex(ui, kit::Kind::Secondary, Some(icons::PLUS), tr("Create collection"), true)
                         });
                         let w = ui.available_width();
-                        let r = ui.add(input(new_collection).hint_text(tr("New collection name")).desired_width(w));
-                        widgets::a11y_name(&r, tr("New collection name"));
+                        let hint = tr("New collection name");
+                        let r = small_input(ui, new_collection, hint, hint, w, false);
                         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                         if (b.inner.clicked() || enter) && ok {
                             create = true;
@@ -3696,16 +4570,22 @@ fn save_as(
                 );
             });
             footer(ui, |ui| {
-                let p = theme::pal(ui);
                 if let Some(t) = &target {
-                    ui.label(RichText::new(icons::FOLDER_SIMPLE).font(theme::icon_font(14.0)).color(p.text_faint));
+                    let p = theme::pal(ui);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new(icons::FOLDER_OPEN).font(theme::icon_font(12.0)).color(p.text_muted));
                     let w = (ui.available_width() - 190.0).max(40.0);
                     ui.allocate_ui_with_layout(vec2(w, 20.0), Layout::left_to_right(Align::Center), |ui| {
                         ui.add(egui::Label::new(RichText::new(t).size(12.0).color(p.text_muted)).truncate());
                     });
                 }
                 trailing(ui, |ui| {
-                    if ui.add_enabled_ui(valid, |ui| kit::primary(ui, tr("Save"))).inner.clicked() {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui
+                        .add_enabled_ui(valid, |ui| kit::primary_icon(ui, icons::FLOPPY_DISK, tr("Save")))
+                        .inner
+                        .clicked()
+                    {
                         save = true;
                     }
                     if kit::secondary(ui, None, tr("Cancel")).clicked() { Outcome::Close } else { Outcome::Keep }
@@ -3742,22 +4622,23 @@ fn save_as(
 // Alerts: unsaved changes, delete
 // ---------------------------------------------------------------------------
 
-/// The top of an alert: a tinted icon, a title and a sentence.
-fn alert_body(ui: &mut Ui, icon: &str, color: Color32, title: &str, text: &str) {
+/// The top of an alert (no header): a 44 px tinted circle with an icon, a
+/// 15 px semibold title and a muted sentence.
+fn alert_body(ui: &mut Ui, icon: &str, tone: kit::Tone, title: &str, text: &str) {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    egui::Frame::new().inner_margin(Margin { left: 22, right: 22, top: 22, bottom: 20 }).show(ui, |ui| {
+    let (fg, bg) = p.tone(tone);
+    egui::Frame::new().inner_margin(Margin { left: 20, right: 20, top: 22, bottom: 18 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
-            ui.painter().circle_filled(rect.center(), 20.0, theme::soft(color, if dark { 0.18 } else { 0.12 }));
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(20.0), color);
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 22.0, bg);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, theme::icon_font(22.0), fg);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                ui.add_space(1.0);
-                ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(15.5)).color(p.text)).wrap());
-                ui.add(egui::Label::new(RichText::new(text).color(p.text_muted)).wrap());
+                let w = ui.available_width();
+                ui.label(text_box(ui, title, theme::semibold(15.0), p.text, w, true));
+                ui.label(text_box(ui, text, FontId::proportional(13.0), p.text_muted, w, true));
             });
         });
     });
@@ -3775,26 +4656,30 @@ fn close_unsaved(app: &mut TernaryWireApp, ctx: &egui::Context, tab: u64) -> Out
     let (name, _, _) = tab_title(&app.tabs[idx], &app.ws);
     let mut choice = None;
     // Enter saves and Escape cancels (the modal closes on Escape).
-    let out = Modal::new("close-unsaved", 460.0).show(ctx, |ui| {
-        let warn = theme::pal(ui).warn;
+    let out = Modal::new("close-unsaved", 460.0).center().show(ctx, |ui| {
         alert_body(
             ui,
             icons::WARNING,
-            warn,
+            kit::Tone::Warn,
             &trf("Save changes to “{}”?", &[&name]),
             tr("Your changes will be lost if you close the tab without saving them."),
         );
         footer(ui, |ui| {
-            let discard = kit::button_ex(ui, kit::Kind::Danger, None, tr("Don't save"), false);
+            let discard = danger_button(ui, false, false, None, tr("Don't save"));
             widgets::a11y_name(&discard, &trf("Don't save \"{}\"", &[&name]));
             if discard.clicked() {
                 choice = Some(CloseChoice::Discard);
             }
             trailing(ui, |ui| {
-                let save = kit::primary(ui, tr("Save…")).on_hover_text(tr("Enter"));
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let o = kit::ButtonOpts { kbd: Some("↩"), ..Default::default() };
+                let save =
+                    kit::button(ui, kit::Kind::Primary, kit::Size::Md, tr("Save…"), o).on_hover_text(tr("Enter"));
                 widgets::a11y_name(&save, &trf("Save \"{}\"…", &[&name]));
                 widgets::a11y_shortcut(&save, "Enter");
-                let cancel = kit::secondary(ui, None, tr("Cancel")).on_hover_text(tr("Esc"));
+                let o = kit::ButtonOpts { kbd: Some("esc"), ..Default::default() };
+                let cancel =
+                    kit::button(ui, kit::Kind::Secondary, kit::Size::Md, tr("Cancel"), o).on_hover_text(tr("Esc"));
                 widgets::a11y_name(&cancel, &trf("Cancel closing \"{}\"", &[&name]));
                 widgets::a11y_shortcut(&cancel, "Escape");
                 // Save… is the default button: focused unless another one is (Tab
@@ -3857,12 +4742,12 @@ fn confirm(app: &mut TernaryWireApp, ctx: &egui::Context, target: &DeleteTarget,
             tr("The environment and its variables are removed from the workspace folder."),
         ),
     };
-    let out = Modal::new("confirm", 460.0).show(ctx, |ui| {
-        let err = theme::pal(ui).err;
-        alert_body(ui, icons::TRASH, err, &title, text);
+    let out = Modal::new("confirm", 460.0).center().show(ctx, |ui| {
+        alert_body(ui, icons::TRASH, kit::Tone::Err, &title, text);
         footer(ui, |ui| {
             trailing(ui, |ui| {
-                if kit::button_ex(ui, kit::Kind::Danger, Some(icons::TRASH), tr("Delete"), false).clicked() {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if danger_button(ui, true, false, Some(icons::TRASH), tr("Delete")).clicked() {
                     yes = true;
                 }
                 let cancel = kit::secondary(ui, None, tr("Cancel"));
@@ -3905,46 +4790,36 @@ fn new_workspace(
         .sticky()
         .show(ctx, |ui| {
             body(ui, |ui| {
-                let p = theme::pal(ui);
-                field_label(ui, tr("Name"));
-                let r = ui.add(input(name).desired_width(f32::INFINITY));
-                widgets::a11y_name(&r, tr("Name"));
-                ui.add_space(12.0);
-                field_label(ui, tr("Location"));
-                ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), 30.0),
-                    Layout::right_to_left(Align::Center),
-                    |ui| {
-                        if kit::secondary(ui, Some(icons::FOLDER_OPEN), tr("Choose folder…")).clicked()
-                            && let Some(dir) = rfd::FileDialog::new().pick_folder()
-                        {
-                            *path = Some(dir);
-                        }
-                        let w = ui.available_width();
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            egui::Frame::new()
-                                .fill(side_fill(ui))
-                                .stroke(Stroke::new(1.0, p.border))
-                                .corner_radius(CornerRadius::same(theme::RADIUS))
-                                .inner_margin(Margin::symmetric(8, 6))
-                                .show(ui, |ui| {
-                                    ui.set_width(w - 18.0);
-                                    match path {
-                                        Some(pth) => ui.add(
-                                            egui::Label::new(
-                                                RichText::new(pth.display().to_string())
-                                                    .font(theme::mono(12.0))
-                                                    .color(p.text),
-                                            )
-                                            .truncate(),
-                                        ),
-                                        None => ui.label(RichText::new(tr("No folder selected")).color(p.text_faint)),
-                                    };
-                                });
-                        });
-                    },
-                );
-                ui.add_space(10.0);
+                ui.spacing_mut().item_spacing.y = 14.0;
+                kit::field(ui, tr("Name"), "", |ui| {
+                    let r = add_input(ui, line_edit(ui, name, "", false, false).desired_width(f32::INFINITY), false);
+                    widgets::a11y_name(&r, tr("Name"));
+                });
+                kit::field(ui, tr("Location"), "", |ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width(), 30.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            let choose = kit::button_ex(
+                                ui,
+                                kit::Kind::Secondary,
+                                Some(icons::FOLDER_OPEN),
+                                tr("Choose folder…"),
+                                true,
+                            );
+                            if choose.clicked()
+                                && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                            {
+                                *path = Some(dir);
+                            }
+                            let w = ui.available_width();
+                            let shown = path.as_ref().map(|p| p.display().to_string());
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                path_box(ui, shown.as_deref(), tr("No folder selected"), w);
+                            });
+                        },
+                    );
+                });
                 if existing {
                     banner(ui, Tone::Info, tr("This folder already holds a workspace; it will be opened as it is."));
                 } else {
@@ -3956,6 +4831,7 @@ fn new_workspace(
             });
             footer(ui, |ui| {
                 trailing(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     let label = if existing { tr("Open") } else { tr("Create") };
                     if ui.add_enabled_ui(path.is_some(), |ui| kit::primary(ui, label)).inner.clicked() {
                         create = true;
@@ -3983,35 +4859,38 @@ fn prompt(app: &mut TernaryWireApp, ctx: &egui::Context, kind: &Prompt, text: &m
         Prompt::Fork(_) => (tr("Fork collection"), icons::GIT_FORK, tr("Fork")),
     };
     let mut ok = false;
-    let modal = Modal::new("prompt", 440.0).title(title).icon(icon).sticky();
+    let modal = Modal::new("prompt", 440.0).title(title).icon(icon).sticky().center();
     let valid = !text.trim().is_empty();
     let out = modal.show(ctx, |ui| {
         body(ui, |ui| {
-            field_label(ui, tr("Name"));
-            let id = egui::Id::unique("prompt-text");
-            let first = !ui.memory(|m| m.has_focus(id));
-            let r = ui.add(input(text).id(id).desired_width(f32::INFINITY));
-            widgets::a11y_name(&r, tr("Name"));
-            r.request_focus();
-            if first && let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id) {
-                // Start with the whole name selected, ready to be typed over.
-                let all = egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(0),
-                    egui::text::CCursor::new(text.chars().count()),
-                );
-                state.cursor.set_char_range(Some(all));
-                state.store(ui.ctx(), id);
-            }
-            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && valid {
-                ok = true;
-            }
+            ui.spacing_mut().item_spacing.y = 8.0;
+            kit::field(ui, tr("Name"), "", |ui| {
+                let id = egui::Id::unique("prompt-text");
+                let first = !ui.memory(|m| m.has_focus(id));
+                let edit = line_edit(ui, text, "", false, false).id(id).desired_width(f32::INFINITY);
+                let r = add_input(ui, edit, false);
+                widgets::a11y_name(&r, tr("Name"));
+                r.request_focus();
+                if first && let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id) {
+                    // Start with the whole name selected, ready to be typed over.
+                    let all = egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(text.chars().count()),
+                    );
+                    state.cursor.set_char_range(Some(all));
+                    state.store(ui.ctx(), id);
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && valid {
+                    ok = true;
+                }
+            });
             if let Prompt::Fork(_) = kind {
-                ui.add_space(2.0);
                 ui.label(kit::hint(ui, tr("A copy that can pull changes from the original and merge back.")));
             }
         });
         footer(ui, |ui| {
             trailing(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 if ui.add_enabled_ui(valid, |ui| kit::primary(ui, action)).inner.clicked() {
                     ok = true;
                 }

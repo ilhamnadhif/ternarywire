@@ -59,6 +59,8 @@ pub enum Step {
     /// `package.Service/Method`.
     GrpcMethod(String),
     GrpcInvoke(bool),
+    /// Opens the gRPC method picker of the active tab.
+    GrpcPicker(bool),
     /// New unsaved request from a "New …" template, by protocol name (`MCP`).
     NewProto(String),
     /// Replaces the request of the active (unsaved) tab, as `RequestKind` JSON.
@@ -75,12 +77,31 @@ pub enum Step {
     OpenFlow(String),
     /// Runs the flow in the active tab.
     RunFlow(bool),
+    /// Selects the block with this name in the active flow tab ("" clears
+    /// the selection).
+    FlowSelect(String),
+    /// Flow tab action: `validate` (lists the problems, no toast),
+    /// `add-block` (opens the Add block menu), `fit`.
+    FlowAction(String),
+    /// Sets options of the active runner tab: `mode` (`functional`,
+    /// `performance`), `iterations`, `delay_ms`, `data_file` (relative to the
+    /// workspace), `vus`, `duration_s`, `ramp_s`, `only` (request names).
+    RunnerOptions(serde_json::Value),
+    /// Selects the result `<request name>#<iteration>` in the active runner tab.
+    RunnerSelect(String),
     /// Forks the collection with this name (as "<name> (fork)").
     Fork(String),
     /// Opens the pull (true) or merge (false) dialog of the fork with this name.
     ForkSync((String, bool)),
     /// Opens the first spec in `specs/` whose file name contains the text.
     OpenSpec(String),
+    /// Spec tab: syncs the spec into the collection with this name, opens the
+    /// Sync popover and makes an unsaved edit (see `SpecTab::automation`).
+    SpecSync(String),
+    /// Variables table: opens the menu of the row with this variable name.
+    EnvRowMenu(String),
+    /// Opens the menu of the title bar's environment selector.
+    EnvMenu(bool),
     /// Sets a GraphQL body (scratch tabs).
     GraphqlQuery(String),
     Expand(String),
@@ -98,6 +119,19 @@ pub enum Step {
     /// `generate_tests`, `add_generated_tests`, `set_var:<json path>`,
     /// `add_test:<json path>`.
     RespPanel(String),
+    /// Merges this JSON into the draft of the open Settings dialog (it then
+    /// shows unsaved changes), e.g. `{"proxy": {"custom_enabled": true}}`.
+    SettingsDraft(serde_json::Value),
+    /// Adds (or replaces) an external secrets provider, as
+    /// `ternarywire_secrets::ProviderConfig` JSON:
+    /// `{"id": "corp-vault", "name": "corp-vault", "kind": "hashicorp_vault", "address": "…"}`.
+    VaultProvider(serde_json::Value),
+    /// Closes every tab (the start page shows).
+    CloseAllTabs(bool),
+    /// Opens the newest History entry whose URL contains the text, as a tab.
+    OpenHistory(String),
+    /// Collapses a folder of the tree: `Collection/Folder`.
+    Collapse(String),
     Quit(bool),
 }
 
@@ -275,9 +309,12 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                 "history" => SidebarTab::History,
                 "apis" => SidebarTab::Apis,
                 "flows" => SidebarTab::Flows,
+                "servers" => SidebarTab::Servers,
                 _ => SidebarTab::Collections,
             }
         }
+        // `settings:proxy`, `vault:providers`, `update`… (see `dialogs::open_named`).
+        Step::Dialog(d) if crate::dialogs::open_named(app, &d) => {}
         Step::Dialog(d) => {
             app.dialog = Some(match d.as_str() {
                 "settings" => crate::dialogs::Dialog::settings(&app.settings),
@@ -383,6 +420,13 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                 crate::spec_tab::open_spec(app, p);
             }
         }
+        Step::SpecSync(name) => {
+            if let Some(TabKind::Spec(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
+                t.auto = Some(format!("spec_sync:{name}"));
+            }
+        }
+        Step::EnvRowMenu(name) => crate::env_tab::automation_row_menu(&app.ctx, name),
+        Step::EnvMenu(_) => crate::env_tab::automation_selector_menu(&app.ctx),
         Step::NewProto(name) => {
             if let Some((_, n, kind)) =
                 crate::app::protocol_templates().into_iter().find(|(_, n, _)| n.eq_ignore_ascii_case(&name))
@@ -409,7 +453,16 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
             Some(TabKind::Ai(t)) => t.auto = Some(a),
             Some(TabKind::Webhook(t)) => t.auto = Some(a),
             Some(TabKind::Capture(t)) if a == "select" => t.select_latest(),
+            // Local servers: `start`, `stop`, `settings`, `select:<n>`, mock
+            // `routes`/`logs`/`hit:<METHOD> <path> [body]`, capture `cert`.
+            Some(TabKind::Capture(t)) => t.auto = Some(a),
+            Some(TabKind::Mock(t)) => t.auto = Some(a),
             Some(TabKind::Spec(t)) if a == "preview" => t.show_preview(),
+            Some(TabKind::Spec(t)) => t.auto = Some(a),
+            Some(TabKind::Container(t)) => t.automation(&a),
+            Some(TabKind::WebSocket(t)) => t.auto = Some(a),
+            Some(TabKind::Mqtt(t)) => t.auto = Some(a),
+            Some(TabKind::Grpc(t)) => t.auto = Some(a),
             _ => {}
         },
         Step::NewCapture(port) => {
@@ -421,6 +474,27 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
             let found = ternarywire_flows::storage::list(app.ws.root()).0.into_iter().find(|f| f.flow.name == name);
             if let Some(f) = found {
                 crate::flow_tab::open_flow(app, f.path);
+            }
+        }
+        Step::FlowSelect(name) => {
+            if let Some(TabKind::Flow(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
+                t.select_block(&name);
+            }
+        }
+        Step::FlowAction(a) => {
+            if let Some(TabKind::Flow(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
+                t.auto = Some(a);
+            }
+        }
+        Step::RunnerOptions(v) => {
+            let root = app.ws.root().to_path_buf();
+            if let Some(TabKind::Runner(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
+                t.set_options(&v, &root);
+            }
+        }
+        Step::RunnerSelect(which) => {
+            if let Some(TabKind::Runner(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
+                t.select_result(&which);
             }
         }
         Step::RunFlow(_) => {
@@ -472,6 +546,11 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
         Step::GrpcInvoke(_) => {
             if let Some(TabKind::Grpc(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
                 t.auto_invoke = true;
+            }
+        }
+        Step::GrpcPicker(_) => {
+            if let Some(TabKind::Grpc(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
+                t.auto = Some("picker".into());
             }
         }
         Step::Expand(name) => {
@@ -546,6 +625,54 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
         Step::RespPanel(a) => {
             if let Some(TabKind::Request(t)) = app.tabs.get_mut(app.active).map(|t| &mut t.kind) {
                 t.automation(&a);
+            }
+        }
+        Step::SettingsDraft(patch) => crate::dialogs::merge_settings_draft(app, &patch),
+        Step::VaultProvider(v) => {
+            app.attach_external_secrets(true);
+            match (serde_json::from_value::<ternarywire_secrets::ProviderConfig>(v), app.ws.external.clone()) {
+                (Ok(config), Some(ext)) => {
+                    if let Err(e) = ext.upsert_provider(config) {
+                        eprintln!("automation: vault_provider: {}", e.message);
+                    }
+                }
+                (Err(e), _) => eprintln!("automation: vault_provider: {e}"),
+                (_, None) => eprintln!("automation: vault_provider: external secrets are unavailable"),
+            }
+        }
+        Step::CloseAllTabs(_) => {
+            while !app.tabs.is_empty() {
+                app.close_tab(app.tabs.len() - 1);
+            }
+        }
+        Step::OpenHistory(text) => {
+            let id = app
+                .ws
+                .history
+                .iter()
+                .find(|h| h.request.url.contains(&text) || h.resolved_url.contains(&text))
+                .map(|h| h.id.clone());
+            if let Some(id) = id {
+                app.open_history(&id);
+            }
+        }
+        Step::Collapse(path) => {
+            let (coll, folder) = path.split_once('/').unwrap_or((&path, ""));
+            if let Some(c) = find_collection(app, coll) {
+                if folder.is_empty() {
+                    app.sidebar.expanded.remove(&c);
+                } else if let Some(col) = app.ws.data.collection(&c) {
+                    fn find(items: &[ternarywire_core::model::Item], name: &str) -> Option<String> {
+                        items.iter().find_map(|i| match i {
+                            ternarywire_core::model::Item::Folder(f) if f.name == name => Some(f.id.clone()),
+                            ternarywire_core::model::Item::Folder(f) => find(&f.items, name),
+                            _ => None,
+                        })
+                    }
+                    if let Some(id) = find(&col.items, folder) {
+                        app.sidebar.expanded.remove(&id);
+                    }
+                }
             }
         }
         Step::Quit(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),

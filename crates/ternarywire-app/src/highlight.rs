@@ -101,12 +101,11 @@ pub struct JsonColors {
     pub number: Color32,
     /// `true`, `false`, `null`.
     pub keyword: Color32,
-    pub punct: Color32,
 }
 
 pub fn json_colors(dark: bool) -> JsonColors {
     let p = palette(dark);
-    JsonColors { key: p.key, string: p.string, number: p.number, keyword: p.keyword, punct: p.punct }
+    JsonColors { key: p.key, string: p.string, number: p.number, keyword: p.keyword }
 }
 
 /// Background of search matches.
@@ -540,13 +539,17 @@ pub fn highlight(key: HlKey<'_>) -> LayoutJob {
             si += 1;
         }
         let mut color = pal.color(points[pi].1);
+        let mut background = Color32::TRANSPARENT;
         if let Some((vs, ve, ok)) = var_ranges.get(vi)
             && *vs <= s
             && e <= *ve
         {
+            // `{{variables}}` read as chips: their color on a soft fill.
             color = if *ok { var_ok } else { var_bad };
+            let tp = crate::theme::palette(key.dark);
+            background = if *ok { tp.var_ok_bg } else { tp.var_bad_bg };
         }
-        let mut fmt = TextFormat { font_id: font.clone(), color, ..Default::default() };
+        let mut fmt = TextFormat { font_id: font.clone(), color, background, ..Default::default() };
         if let Some((ss, se)) = search_ranges.get(si)
             && *ss <= s
             && e <= *se

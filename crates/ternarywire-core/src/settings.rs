@@ -180,8 +180,10 @@ pub enum Language {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseLayout {
-    #[default]
     Below,
+    /// Request on the left, response on the right (the default since the
+    /// redesign; narrow windows still stack them).
+    #[default]
     Side,
 }
 
@@ -204,7 +206,7 @@ impl Default for UiSettings {
             language: Language::En,
             font_size: 13.0,
             editor_font_size: 12.5,
-            layout: ResponseLayout::Below,
+            layout: ResponseLayout::Side,
             sidebar_visible: true,
             wrap_response: false,
         }

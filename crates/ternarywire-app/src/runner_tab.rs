@@ -1,11 +1,21 @@
 //! Collection Runner tab (FR-U1..U7): functional runs with data files and
 //! custom order, and performance runs with virtual users.
+//!
+//! The tab has a 46 px title row (collection, Functional | Performance), the
+//! setup panel on the left (run order, options, a footer with Run) and the
+//! results on the right (a toolbar with the run state and Export, number
+//! cards, then the results table or the load test chart and tables).
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui,
+    UiBuilder, pos2, vec2,
+};
 
 use ternarywire_core::model::Id;
 use ternarywire_http::CancellationToken;
@@ -14,13 +24,23 @@ use ternarywire_runner::perf::{PerfOptions, PerfReport, PerfSample};
 use ternarywire_runner::{RequestResult, RunEvent, RunOptions, RunSummary};
 
 use crate::app::{Msg, TernaryWireApp};
+use crate::flow_tab::num_input;
 use crate::i18n::{tr, trf};
-use crate::request_tab::{banner, elide, fmt_ms, stat_cards};
+use crate::kit::{Tone, size};
+use crate::request_tab::{elide, fmt_ms};
 use crate::state::WsState;
+use crate::theme::{RADIUS, RADIUS_SM};
 use crate::{icons, kit, theme, widgets};
 
 /// Results kept in memory for display; everything is also spooled to disk.
 const KEEP_RESULTS: usize = 2000;
+/// Default width of the setup panel.
+const SETUP_W: f32 = 336.0;
+/// Rows of the run order.
+const ORDER_ROW: f32 = 24.0;
+/// Rows and header of the result tables.
+const TABLE_ROW: f32 = 34.0;
+const TABLE_HEAD: f32 = 30.0;
 
 pub enum PerfMsg {
     Sample(PerfSample),
@@ -40,12 +60,15 @@ enum Filter {
     Failed,
 }
 
+/// A request in the run order: (id, name, badge, selected, folder path).
+type PlanItem = (Id, String, String, bool, String);
+
 pub struct RunnerTab {
     pub collection: Id,
     folder: Option<Id>,
     mode: Mode,
-    /// (request id, name, badge, selected) in run order.
-    plan: Vec<(Id, String, String, bool)>,
+    /// The requests in run order.
+    plan: Vec<PlanItem>,
     /// [`WsState::collections_revision`] the plan was made at.
     plan_revision: u64,
     iterations: usize,
@@ -53,12 +76,16 @@ pub struct RunnerTab {
     data_path: Option<PathBuf>,
     data: Vec<DataRow>,
     data_error: Option<String>,
+    /// The first rows of the data file are shown.
+    preview_data: bool,
     persist_vars: bool,
     save_cookies: bool,
     bail: bool,
     fail_rate: f32,
     cancel: Option<CancellationToken>,
     started: Option<Instant>,
+    /// Wall clock time the run started (`09:52`).
+    started_at: String,
     expected: usize,
     results: std::collections::VecDeque<RequestResult>,
     dropped: usize,
@@ -67,12 +94,18 @@ pub struct RunnerTab {
     spool: Option<tempfile::NamedTempFile>,
     filter: Filter,
     selected: Option<usize>,
+    /// Scroll the results table to the selected row on the next frame.
+    scroll_to_selected: bool,
     /// Run order row being dragged by its handle.
     drag: Option<usize>,
-    /// Width of the setup column.
+    /// Width of the setup panel.
     panel_w: f32,
     /// Narrow windows show the setup or the results, not both.
     show_results: bool,
+    /// A message for the toast area (export results).
+    note: Option<(String, bool)>,
+    /// Name of the collection (exports).
+    collection_name: String,
     // Performance mode.
     vus: usize,
     duration_s: u64,
@@ -95,12 +128,14 @@ impl RunnerTab {
             data_path: None,
             data: Vec::new(),
             data_error: None,
+            preview_data: false,
             persist_vars: true,
             save_cookies: true,
             bail: false,
             fail_rate: 0.0,
             cancel: None,
             started: None,
+            started_at: String::new(),
             expected: 0,
             results: Default::default(),
             dropped: 0,
@@ -109,9 +144,12 @@ impl RunnerTab {
             spool: None,
             filter: Filter::All,
             selected: None,
+            scroll_to_selected: false,
             drag: None,
-            panel_w: 340.0,
+            panel_w: SETUP_W,
             show_results: false,
+            note: None,
+            collection_name: String::new(),
             vus: 10,
             duration_s: 30,
             ramp_s: 0,
@@ -132,10 +170,9 @@ impl RunnerTab {
         }
         self.plan_revision = ws.collections_revision();
         let fresh = plan_of(ws, &self.collection, self.folder.as_ref());
-        let chosen: std::collections::HashMap<&Id, (usize, bool)> =
-            self.plan.iter().enumerate().map(|(i, p)| (&p.0, (i, p.3))).collect();
+        let chosen: HashMap<&Id, (usize, bool)> = self.plan.iter().enumerate().map(|(i, p)| (&p.0, (i, p.3))).collect();
         // Requests already planned keep their place; new ones come last.
-        let mut next: Vec<(usize, (Id, String, String, bool))> = fresh
+        let mut next: Vec<(usize, PlanItem)> = fresh
             .into_iter()
             .map(|mut p| match chosen.get(&p.0) {
                 Some(&(i, on)) => {
@@ -214,6 +251,74 @@ impl RunnerTab {
         self.perf_report = None;
         self.spool = tempfile::NamedTempFile::new().ok();
     }
+
+    /// The samples of the load test: the report's, or the live ones.
+    fn samples(&self) -> &[PerfSample] {
+        match &self.perf_report {
+            Some(r) if !r.timeline.is_empty() => &r.timeline,
+            _ => &self.perf_samples,
+        }
+    }
+
+    /// Sets options from an automation step (see `automation::Step::RunnerOptions`).
+    pub fn set_options(&mut self, v: &serde_json::Value, root: &Path) {
+        let num = |k: &str| v.get(k).and_then(serde_json::Value::as_u64);
+        match v.get("mode").and_then(serde_json::Value::as_str) {
+            Some("performance") => self.mode = Mode::Performance,
+            Some("functional") => self.mode = Mode::Functional,
+            _ => {}
+        }
+        if let Some(f) = v.get("data_file").and_then(serde_json::Value::as_str) {
+            let path = root.join(f);
+            match ternarywire_runner::data::load(&path) {
+                Ok(rows) => {
+                    self.iterations = rows.len().max(1);
+                    self.data = rows;
+                    self.data_error = None;
+                }
+                Err(e) => self.data_error = Some(e.to_string()),
+            }
+            self.data_path = Some(path);
+        }
+        if let Some(n) = num("iterations") {
+            self.iterations = n.max(1) as usize;
+        }
+        if let Some(n) = num("delay_ms") {
+            self.delay_ms = n;
+        }
+        if let Some(n) = num("vus") {
+            self.vus = n.clamp(1, 1000) as usize;
+        }
+        if let Some(n) = num("duration_s") {
+            self.duration_s = n.max(1);
+        }
+        if let Some(n) = num("ramp_s") {
+            self.ramp_s = n;
+        }
+        if let Some(only) = v.get("only").and_then(serde_json::Value::as_array) {
+            let names: Vec<&str> = only.iter().filter_map(serde_json::Value::as_str).collect();
+            for p in &mut self.plan {
+                p.3 = names.contains(&p.1.as_str());
+            }
+        }
+    }
+
+    /// Selects the result `<request name>#<iteration>` (1-based; the first
+    /// one of that name without `#`).
+    pub fn select_result(&mut self, which: &str) {
+        let (name, it) = match which.rsplit_once('#') {
+            Some((n, i)) => (n, i.parse::<usize>().ok()),
+            None => (which, None),
+        };
+        self.selected = self.results.iter().position(|r| r.name == name && it.is_none_or(|i| r.iteration + 1 == i));
+        self.scroll_to_selected = true;
+        self.show_results = true;
+    }
+
+    /// Method badge of a planned request (per-request rows of a load test).
+    fn badge_of(&self, request_id: &str) -> Option<&str> {
+        self.plan.iter().find(|p| p.0 == request_id).map(|p| p.2.as_str())
+    }
 }
 
 fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
@@ -238,6 +343,7 @@ fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
     let cancel = CancellationToken::new();
     tab.cancel = Some(cancel.clone());
     tab.started = Some(Instant::now());
+    tab.started_at = chrono::Local::now().format("%H:%M").to_string();
     let tx = app.tx.clone();
     let ctx = app.ctx.clone();
     let collection_id = tab.collection.clone();
@@ -321,7 +427,9 @@ fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut RunnerTab) {
     }
 }
 
-fn export(tab: &RunnerTab, format: &str) -> Result<(), String> {
+/// Writes every result of the functional run as `format` (json, junit,
+/// html) to a file the user picks. `Ok(None)`: the dialog was cancelled.
+fn export(tab: &RunnerTab, format: &str) -> Result<Option<PathBuf>, String> {
     let (Some(spool), Some(summary)) = (&tab.spool, &tab.summary) else { return Err("nothing to export".into()) };
     let ext = match format {
         "junit" => "xml",
@@ -329,7 +437,7 @@ fn export(tab: &RunnerTab, format: &str) -> Result<(), String> {
         _ => "json",
     };
     let Some(path) = rfd::FileDialog::new().set_file_name(format!("ternarywire-run.{ext}")).save_file() else {
-        return Ok(());
+        return Ok(None);
     };
     let mut reporter: Box<dyn ternarywire_runner::report::Reporter> = match format {
         "junit" => Box::new(ternarywire_runner::report::JunitReporter::new(&path, &summary.collection)),
@@ -342,30 +450,46 @@ fn export(tab: &RunnerTab, format: &str) -> Result<(), String> {
             reporter.on_event(&RunEvent::RequestFinished(Box::new(r)));
         }
     }
-    reporter.finish(summary).map_err(|e| e.to_string())
+    reporter.finish(summary).map_err(|e| e.to_string())?;
+    Ok(Some(path))
 }
 
 /// The requests of `collection` (or one folder of it) in run order, all
 /// selected.
-fn plan_of(ws: &WsState, collection: &Id, folder: Option<&Id>) -> Vec<(Id, String, String, bool)> {
+fn plan_of(ws: &WsState, collection: &Id, folder: Option<&Id>) -> Vec<PlanItem> {
     let Some(c) = ws.data.collection(collection) else { return Vec::new() };
     let opts = RunOptions { folder: folder.cloned(), ..Default::default() };
     // Every protocol runs: HTTP, gRPC, AI, MCP, and WebSocket, Socket.IO and
     // MQTT as sessions with a stop condition.
     ternarywire_runner::runner::plan(c, &opts)
-        .map(|list| list.into_iter().map(|(r, _)| (r.id.clone(), r.name.clone(), r.request.badge(), true)).collect())
+        .map(|list| {
+            list.into_iter()
+                .map(|(r, path)| (r.id.clone(), r.name.clone(), r.request.badge(), true, path.join(" / ")))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut RunnerTab) {
     tab.refresh_plan(&app.ws);
+    if let Some((text, error)) = tab.note.take() {
+        app.toast(text, error);
+    }
+    ui.spacing_mut().item_spacing.y = 0.0;
     let p = theme::pal(ui);
     let name = app.ws.data.collection(&tab.collection).map(|c| c.name.clone()).unwrap_or_default();
-    view_title(ui, tab, &name, p.accent);
-    ui.add_space(12.0);
+    title_row(ui, tab, &name);
+    tab.collection_name = name;
     let mut run = false;
-    let avail = ui.available_rect_before_wrap();
-    if avail.width() < 820.0 {
+    let body = ui.available_rect_before_wrap();
+    let area = |ui: &mut Ui, rect: Rect, salt: &str, add: &mut dyn FnMut(&mut Ui)| {
+        ui.scope_builder(UiBuilder::new().max_rect(rect).id_salt(salt).layout(Layout::top_down(Align::Min)), |ui| {
+            ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui);
+        });
+    };
+    if body.width() < 820.0 {
         // Narrow: one pane at a time, switched with a segmented control.
         let has_results = !tab.results.is_empty() || tab.summary.is_some() || tab.perf_report.is_some();
         let results_label = if has_results && tab.mode == Mode::Functional {
@@ -373,45 +497,35 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Runner
         } else {
             tr("Results").to_string()
         };
-        kit::segmented(ui, &mut tab.show_results, &[(false, tr("Setup")), (true, results_label.as_str())]);
-        ui.add_space(10.0);
+        kit::bar(ui, size::TOOLBAR, true, |ui| {
+            kit::segmented_sm(ui, &mut tab.show_results, &[(false, tr("Setup")), (true, results_label.as_str())]);
+        });
         let rest = ui.available_rect_before_wrap();
         if tab.show_results {
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| match tab.mode {
-                Mode::Functional => functional_results(ui, tab),
-                Mode::Performance => perf_results(ui, tab),
-            });
+            area(ui, rest, "runner-results", &mut |ui| results(ui, tab));
         } else {
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| setup_panel(ui, tab, &mut run));
+            area(ui, rest, "runner-setup", &mut |ui| setup_panel(ui, tab, &mut run));
         }
-        ui.advance_cursor_after_rect(rest);
-        if app.pending_runner_start == Some(tab_id) {
-            app.pending_runner_start = None;
-            run = true;
+    } else {
+        // Setup on the left (resizable by its edge), results on the right.
+        let max_w = (body.width() * 0.5).max(290.0);
+        let panel_w = tab.panel_w.clamp(290.0, max_w);
+        let left = Rect::from_min_size(body.min, vec2(panel_w, body.height()));
+        let right = Rect::from_min_max(pos2(left.right() + 1.0, body.top()), body.max);
+        area(ui, left, "runner-setup", &mut |ui| setup_panel(ui, tab, &mut run));
+        ui.painter().vline(left.right() + 0.5, body.y_range(), Stroke::new(1.0, p.border));
+        area(ui, right, "runner-results", &mut |ui| results(ui, tab));
+        let handle = Rect::from_center_size(pos2(left.right() + 0.5, body.center().y), vec2(7.0, body.height()));
+        let h = ui.interact(handle, ui.scope_id().with(("runner-split", tab_id)), Sense::click_and_drag());
+        if h.hovered() || h.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
-        if run {
-            tab.show_results = true;
-            start(app, tab_id, tab);
+        if h.dragged() {
+            tab.panel_w = (panel_w + h.drag_delta().x).clamp(290.0, max_w);
         }
-        return;
-    }
-    // Setup column on the left (resizable by its edge), results on the right.
-    let max_w = (avail.width() * 0.5).max(290.0);
-    let panel_w = tab.panel_w.clamp(290.0, max_w);
-    let left = Rect::from_min_size(avail.min, vec2(panel_w, avail.height()));
-    let right = Rect::from_min_max(pos2(left.right() + 16.0, avail.top()), avail.max);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(left), |ui| setup_panel(ui, tab, &mut run));
-    let handle = Rect::from_min_max(pos2(left.right() + 4.0, avail.top()), pos2(left.right() + 12.0, avail.bottom()));
-    let h = ui.interact(handle, egui::Id::unique(("runner-split", tab_id)), Sense::drag());
-    if h.hovered() || h.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        ui.painter().vline(handle.center().x, avail.y_range(), Stroke::new(2.0, p.accent));
-    }
-    if h.dragged() {
-        tab.panel_w = (panel_w + h.drag_delta().x).clamp(290.0, max_w);
-    }
-    if h.double_clicked() {
-        tab.panel_w = 340.0;
+        if h.double_clicked() {
+            tab.panel_w = SETUP_W;
+        }
     }
     if app.pending_runner_start == Some(tab_id) {
         app.pending_runner_start = None;
@@ -421,97 +535,132 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Runner
         tab.show_results = true;
         start(app, tab_id, tab);
     }
-    ui.scope_builder(egui::UiBuilder::new().max_rect(right), |ui| match tab.mode {
+    ui.advance_cursor_after_rect(body);
+}
+
+fn results(ui: &mut Ui, tab: &mut RunnerTab) {
+    match tab.mode {
         Mode::Functional => functional_results(ui, tab),
         Mode::Performance => perf_results(ui, tab),
-    });
-    ui.advance_cursor_after_rect(avail);
+    }
 }
 
-/// Title row with the mode switch.
-fn view_title(ui: &mut Ui, tab: &mut RunnerTab, collection: &str, color: Color32) {
-    let running = tab.is_running();
-    crate::request_tab::view_header(ui, icons::PLAY_CIRCLE, color, tr("Collection Runner"), collection, |ui| {
-        ui.add_enabled_ui(!running, |ui| {
-            kit::segmented(
-                ui,
-                &mut tab.mode,
-                &[(Mode::Functional, tr("Functional")), (Mode::Performance, tr("Performance"))],
-            );
-        });
-    });
-}
-
-/// The setup card: run order, options and the Run button.
-fn setup_panel(ui: &mut Ui, tab: &mut RunnerTab, run: &mut bool) {
+/// The 46 px title row: the runner's tile and name, the collection, and the
+/// mode switch.
+fn title_row(ui: &mut Ui, tab: &mut RunnerTab, collection: &str) {
     let p = theme::pal(ui);
-    let footer_h = 58.0;
-    kit::card(ui).inner_margin(egui::Margin::ZERO).show(ui, |ui| {
-        let h = ui.available_height();
-        ui.set_min_height(h);
-        ui.set_width(ui.available_width());
-        egui::ScrollArea::vertical().id_salt("runner-cfg").auto_shrink([false, false]).max_height(h - footer_h).show(
-            ui,
-            |ui| {
-                egui::Frame::new().inner_margin(egui::Margin::same(14)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    run_order(ui, tab);
-                    ui.add_space(16.0);
-                    match tab.mode {
-                        Mode::Functional => functional_options(ui, tab),
-                        Mode::Performance => perf_options(ui, tab),
-                    }
-                });
-            },
-        );
-        // Footer with the main action.
-        let top = ui.cursor().top();
-        let r = ui.max_rect();
-        ui.painter().hline(r.left()..=r.right(), top, Stroke::new(1.0, p.border));
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let selected = tab.plan.iter().filter(|p| p.3).count();
-                let summary = match tab.mode {
-                    Mode::Functional if tab.iterations <= 1 => trf("{} requests", &[&selected]),
-                    Mode::Functional => trf("{} requests × {} iterations", &[&selected, &tab.iterations]),
-                    Mode::Performance => trf("{} users · {} s", &[&tab.vus, &tab.duration_s]),
-                };
-                ui.add(egui::Label::new(RichText::new(summary).small().color(p.text_muted)).truncate());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if tab.is_running() {
-                        if kit::button_ex(ui, kit::Kind::Danger, Some(icons::STOP), tr("Stop"), false).clicked() {
-                            tab.cancel_all();
-                        }
-                    } else {
-                        ui.add_enabled_ui(selected > 0, |ui| {
-                            let label = match tab.mode {
-                                Mode::Functional => tr("Run"),
-                                Mode::Performance => tr("Start load test"),
-                            };
-                            if kit::primary_icon(ui, icons::PLAY, label).clicked() {
-                                *run = true;
-                            }
-                        })
-                        .response
-                        .on_disabled_hover_text(tr("Select at least one request to run"));
-                    }
-                });
+    let running = tab.is_running();
+    kit::bar(ui, size::VIEW_TITLE, true, |ui| {
+        ui.add_space(2.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_enabled_ui(!running, |ui| {
+                kit::segmented_ex(
+                    ui,
+                    &mut tab.mode,
+                    &[
+                        (Mode::Functional, Some(icons::LIST_CHECKS), tr("Functional")),
+                        (Mode::Performance, Some(icons::GAUGE), tr("Performance")),
+                    ],
+                    true,
+                );
+            });
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let (tile, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+                ui.painter().rect_filled(tile, CornerRadius::same(8), p.accent_soft);
+                ui.painter().text(
+                    tile.center(),
+                    Align2::CENTER_CENTER,
+                    icons::PLAY_CIRCLE,
+                    theme::icon_font(16.0),
+                    p.accent_text,
+                );
+                ui.label(RichText::new(tr("Collection Runner")).font(theme::semibold(14.0)).color(p.text));
+                ui.label(RichText::new("·").color(p.text_faint));
+                ui.add(egui::Label::new(RichText::new(collection).color(p.text_muted)).truncate());
             });
         });
     });
 }
 
-/// The requests to run, in order: drag handle, checkbox, method, name.
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+
+/// The setup panel: run order and options (scrolling), and a footer with
+/// the summary and Run.
+fn setup_panel(ui: &mut Ui, tab: &mut RunnerTab, run: &mut bool) {
+    let p = theme::pal(ui);
+    let rect = ui.max_rect();
+    let foot = Rect::from_min_max(pos2(rect.left(), rect.bottom() - size::ACTION_ROW), rect.max);
+    let scroll = Rect::from_min_max(rect.min, pos2(rect.right(), foot.top()));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(scroll).layout(Layout::top_down(Align::Min)));
+    c.set_clip_rect(scroll.intersect(ui.clip_rect()));
+    egui::ScrollArea::vertical().id_salt("runner-cfg").auto_shrink([false; 2]).show(&mut c, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        run_order(ui, tab);
+        ui.add_space(4.0);
+        let y = ui.cursor().top();
+        ui.painter().hline(ui.max_rect().x_range(), y + 0.5, Stroke::new(1.0, p.border));
+        ui.add_space(1.0);
+        match tab.mode {
+            Mode::Functional => functional_options(ui, tab),
+            Mode::Performance => perf_options(ui, tab),
+        }
+    });
+
+    // Footer with the main action.
+    ui.painter().rect_filled(foot, CornerRadius { sw: theme::RADIUS_LG - 1, ..Default::default() }, p.well);
+    ui.painter().hline(foot.x_range(), foot.top() + 0.5, Stroke::new(1.0, p.border));
+    let mut f = ui.new_child(
+        UiBuilder::new().max_rect(foot.shrink2(vec2(size::PAD, 0.0))).layout(Layout::right_to_left(Align::Center)),
+    );
+    let selected = tab.plan.iter().filter(|p| p.3).count();
+    if tab.is_running() {
+        let o = kit::ButtonOpts { icon: Some(icons::STOP), ..Default::default() };
+        if kit::button(&mut f, kit::Kind::Danger, kit::Size::Md, tr("Stop"), o).clicked() {
+            tab.cancel_all();
+        }
+    } else {
+        f.add_enabled_ui(selected > 0, |ui| {
+            let label = match tab.mode {
+                Mode::Functional => tr("Run"),
+                Mode::Performance => tr("Start load test"),
+            };
+            if kit::primary_icon(ui, icons::PLAY, label).clicked() {
+                *run = true;
+            }
+        })
+        .response
+        .on_disabled_hover_text(tr("Select at least one request to run"));
+    }
+    let summary = match tab.mode {
+        Mode::Functional if tab.iterations <= 1 => trf("{} requests", &[&selected]),
+        Mode::Functional => trf("{} requests × {} iterations", &[&selected, &tab.iterations]),
+        Mode::Performance => trf("{} users · {} s", &[&tab.vus, &tab.duration_s]),
+    };
+    f.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.add(egui::Label::new(kit::hint(ui, &summary)).truncate());
+    });
+}
+
+/// The requests to run, in order: drag handle, checkbox, method, name and
+/// folder.
 fn run_order(ui: &mut Ui, tab: &mut RunnerTab) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
     let selected = tab.plan.iter().filter(|p| p.3).count();
-    ui.horizontal(|ui| {
-        ui.set_height(26.0);
+    kit::toolbar(ui, |ui| {
         ui.label(kit::section_title(tr("Run order")));
-        kit::pill(ui, &format!("{selected}/{}", tab.plan.len()), if selected == 0 { p.err } else { p.text_muted });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        kit::tone_pill(
+            ui,
+            &format!("{selected}/{}", tab.plan.len()),
+            if selected == 0 { Tone::Err } else { Tone::Neutral },
+        );
+        ui.label(RichText::new(icons::INFO).font(theme::icon_font(14.0)).color(p.text_faint))
+            .on_hover_text(tr("Drag the handles to change the order; right-click a request for more."));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if kit::ghost(ui, None, tr("None")).on_hover_text(tr("Deselect all")).clicked() {
                 tab.plan.iter_mut().for_each(|p| p.3 = false);
@@ -521,102 +670,102 @@ fn run_order(ui: &mut Ui, tab: &mut RunnerTab) {
             }
         });
     });
-    ui.add_space(4.0);
     if tab.plan.is_empty() {
-        banner(ui, icons::INFO, p.text_muted, tr("This collection has no requests to run."));
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
+            kit::banner(ui, Tone::Info, icons::INFO, tr("This collection has no requests to run."));
+        });
         return;
     }
-    const ROW: f32 = 30.0;
     let list_top = ui.cursor().top();
     let width = ui.available_width();
     let n = tab.plan.len();
     let mut moved: Option<(usize, usize)> = None;
     let mut toggle_only: Option<usize> = None;
     let drop_at = tab.drag.and_then(|_| {
-        ui.ctx().pointer_interact_pos().map(|pos| (((pos.y - list_top) / ROW).round().max(0.0) as usize).min(n))
+        ui.ctx().pointer_interact_pos().map(|pos| (((pos.y - list_top) / ORDER_ROW).round().max(0.0) as usize).min(n))
     });
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        for i in 0..n {
-            let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
-            let dragging = tab.drag == Some(i);
-            let hovered = ui.rect_contains_pointer(rect);
-            if dragging {
-                ui.painter().rect_filled(rect, CornerRadius::same(6), p.accent_soft);
-            } else if hovered {
-                ui.painter().rect_filled(rect, CornerRadius::same(6), p.hover);
-            }
-            let (_, name, badge, on) = &mut tab.plan[i];
-            // Drag handle.
-            let handle = Rect::from_min_size(rect.min, vec2(20.0, ROW));
-            let h = ui.interact(handle, ui.make_persistent_id(("drag", i)), Sense::drag());
-            widgets::a11y_name(&h, &trf("Move {}", &[&name]));
-            if h.hovered() || h.dragged() {
-                ui.ctx().set_cursor_icon(if h.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
-            }
-            let handle_color = if h.hovered() || dragging { p.text_muted } else { p.text_faint };
-            ui.painter().text(
-                handle.center(),
-                Align2::CENTER_CENTER,
-                icons::DOTS_SIX_VERTICAL,
-                theme::icon_font(14.0),
-                handle_color,
-            );
-            if h.drag_started() {
-                tab.drag = Some(i);
-            }
-            if h.drag_stopped()
-                && let Some(to) = drop_at
-            {
-                moved = Some((i, to));
-            }
-            // Checkbox.
-            let c = Rect::from_center_size(pos2(rect.left() + 32.0, rect.center().y), vec2(18.0, ROW - 6.0));
-            let r = ui.put(c, egui::Checkbox::without_text(on));
-            widgets::a11y_name(&r, name);
-            // Method and name.
-            let badge_rect = Rect::from_min_size(pos2(rect.left() + 46.0, rect.top()), vec2(46.0, ROW));
-            let badge_text = widgets::method_badge(badge, dark);
-            let g = egui::WidgetText::from(badge_text).into_galley(
-                ui,
-                Some(egui::TextWrapMode::Extend),
-                46.0,
-                egui::TextStyle::Body,
-            );
-            ui.painter().galley(pos2(badge_rect.left(), rect.center().y - g.size().y / 2.0), g, p.text);
-            let color = if *on { p.text } else { p.text_muted };
-            let g = elide(ui, name, egui::FontId::proportional(13.0), color, rect.right() - badge_rect.right() - 8.0);
-            ui.painter().galley(pos2(badge_rect.right(), rect.center().y - g.size().y / 2.0), g, color);
-            if resp.clicked() {
-                *on = !*on;
-            }
-            resp.context_menu(|ui| {
-                if ui.button(kit::with_icon(icons::ARROW_UP, tr("Move up"))).clicked() && i > 0 {
-                    moved = Some((i, i - 1));
-                    ui.close();
-                }
-                if ui.button(kit::with_icon(icons::ARROW_DOWN, tr("Move down"))).clicked() && i + 1 < n {
-                    moved = Some((i, i + 2));
-                    ui.close();
-                }
-                if ui.button(kit::with_icon(icons::CHECK_SQUARE, tr("Run only this"))).clicked() {
-                    toggle_only = Some(i);
-                    ui.close();
-                }
-            });
+    for i in 0..n {
+        let (full, resp) = ui.allocate_exact_size(vec2(width, ORDER_ROW), Sense::click());
+        let rect = full.shrink2(vec2(6.0, 0.0));
+        let dragging = tab.drag == Some(i);
+        let hovered = ui.rect_contains_pointer(rect);
+        if dragging {
+            ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_SM), p.accent_soft);
+        } else if hovered {
+            ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_SM), p.hover);
         }
-    });
+        let (_, name, badge, on, folder) = &mut tab.plan[i];
+        let cy = rect.center().y;
+        // Drag handle.
+        let handle = Rect::from_min_size(rect.min, vec2(24.0, ORDER_ROW));
+        let h = ui.interact(handle, ui.make_persistent_id(("drag", i)), Sense::drag());
+        widgets::a11y_name(&h, &trf("Move {}", &[&name]));
+        if h.hovered() || h.dragged() {
+            ui.ctx().set_cursor_icon(if h.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        }
+        let handle_color = if h.hovered() || dragging { p.text_muted } else { p.text_faint };
+        ui.painter().text(
+            pos2(rect.left() + 6.0 + 6.5, cy),
+            Align2::CENTER_CENTER,
+            icons::DOTS_SIX_VERTICAL,
+            theme::icon_font(13.0),
+            handle_color,
+        );
+        if h.drag_started() {
+            tab.drag = Some(i);
+        }
+        if h.drag_stopped()
+            && let Some(to) = drop_at
+        {
+            moved = Some((i, to));
+        }
+        // Checkbox.
+        let mut x = rect.left() + 6.0 + 13.0 + 8.0;
+        let check = Rect::from_min_size(pos2(x, cy - 7.5), vec2(15.0, 15.0));
+        kit::check(&mut ui.new_child(UiBuilder::new().max_rect(check)), on, name);
+        x += 15.0 + 8.0;
+        // Method, name and folder.
+        let g = ui.painter().layout_no_wrap(
+            widgets::method_short(badge).to_string(),
+            theme::semibold(10.5),
+            theme::method_color(badge, dark),
+        );
+        ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
+        x += 34.0 + 8.0;
+        let mut right = rect.right() - 12.0;
+        if !folder.is_empty() {
+            let g = elide(ui, folder, FontId::proportional(11.0), p.text_faint, 90.0);
+            right -= g.size().x;
+            ui.painter().galley(pos2(right, cy - g.size().y / 2.0), g, p.text_faint);
+            right -= 8.0;
+        }
+        let color = if *on { p.text } else { p.text_faint };
+        let g = elide(ui, name, FontId::proportional(13.0), color, (right - x).max(20.0));
+        ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, color);
+        let resp = resp.on_hover_text(tr("Right-click: Move up · Move down · Run only this"));
+        if resp.clicked() {
+            *on = !*on;
+        }
+        resp.context_menu(|ui| {
+            if kit::menu_item(ui, Some(icons::ARROW_UP), tr("Move up"), None).clicked() && i > 0 {
+                moved = Some((i, i - 1));
+            }
+            if kit::menu_item(ui, Some(icons::ARROW_DOWN), tr("Move down"), None).clicked() && i + 1 < n {
+                moved = Some((i, i + 2));
+            }
+            if kit::menu_item(ui, Some(icons::CHECK_SQUARE), tr("Run only this"), None).clicked() {
+                toggle_only = Some(i);
+            }
+        });
+    }
     // Where the dragged row would land.
     if let (Some(from), Some(to)) = (tab.drag, drop_at)
         && to != from
         && to != from + 1
     {
-        let y = list_top + to as f32 * ROW;
-        ui.painter().hline(
-            (ui.min_rect().left() + 4.0)..=(ui.min_rect().left() + width - 4.0),
-            y,
-            Stroke::new(2.0, p.accent),
-        );
+        let y = list_top + to as f32 * ORDER_ROW;
+        let left = ui.min_rect().left();
+        ui.painter().hline((left + 10.0)..=(left + width - 10.0), y, Stroke::new(2.0, p.accent));
     }
     if moved.is_some() || !ui.input(|i| i.pointer.any_down()) {
         tab.drag = None;
@@ -631,198 +780,437 @@ fn run_order(ui: &mut Ui, tab: &mut RunnerTab) {
             p.3 = j == i;
         }
     }
-    ui.add_space(4.0);
-    ui.label(kit::hint(ui, tr("Drag the handles to change the order; right-click a request for more.")));
 }
 
-/// A compact option row for the narrow setup panel: label (and help) on the
-/// left, a control of `control_w` on the right.
-fn opt_row(ui: &mut Ui, label: &str, help: &str, control_w: f32, add: impl FnOnce(&mut Ui)) {
+/// An option row (`.frow` of the setup panel): a hairline above (except the
+/// first), label and help on the left, the control (`control_w` wide) on the
+/// right, both centered on the row, 7 px above and below.
+fn frow(ui: &mut Ui, first: bool, label: &str, help: &str, control_w: f32, add: impl FnOnce(&mut Ui)) {
     let p = theme::pal(ui);
-    ui.horizontal_top(|ui| {
-        let label_w = (ui.available_width() - control_w - 12.0).max(80.0);
-        ui.allocate_ui_with_layout(vec2(label_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.set_width(label_w);
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.add_space(3.0);
-            ui.label(RichText::new(label).font(theme::medium(13.0)).color(p.text));
-            if !help.is_empty() {
-                ui.label(RichText::new(help).small().color(p.text_muted));
-            }
-        });
-        ui.allocate_ui_with_layout(
-            vec2(ui.available_width(), 26.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            add,
-        );
-    });
-    ui.add_space(10.0);
+    if !first {
+        let y = ui.cursor().top();
+        ui.painter().hline(ui.max_rect().x_range(), y + 0.5, Stroke::new(1.0, p.border));
+    }
+    ui.add_space(7.0);
+    let w = ui.available_width();
+    let label_w = (w - control_w - 14.0).max(80.0);
+    let lay = |text: &str, font: FontId, color: Color32, line: f32| {
+        let mut job = LayoutJob::default();
+        job.append(text, 0.0, TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) });
+        job.wrap.max_width = label_w;
+        ui.painter().layout_job(job)
+    };
+    let lg = lay(label, theme::medium(13.0), p.text, 19.0);
+    let hg = (!help.is_empty()).then(|| lay(help, FontId::proportional(12.0), p.text_muted, 17.0));
+    let text_h = lg.size().y + hg.as_ref().map_or(0.0, |g| 1.0 + g.size().y);
+    let h = text_h.max(26.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let top = rect.top() + (h - text_h) / 2.0;
+    let lh = lg.size().y;
+    ui.painter().galley(pos2(rect.left(), top), lg, p.text);
+    if let Some(g) = hg {
+        ui.painter().galley(pos2(rect.left(), top + lh + 1.0), g, p.text_muted);
+    }
+    let control = Rect::from_min_max(pos2(rect.left() + label_w + 14.0, rect.top()), rect.max);
+    add(&mut ui.new_child(UiBuilder::new().max_rect(control).layout(Layout::right_to_left(Align::Center))));
+    ui.add_space(7.0);
 }
 
-fn number(
+/// A number input with a unit after it (`12`, `0 ms`).
+fn num_unit<T: egui::emath::Numeric>(
     ui: &mut Ui,
     name: &str,
-    value: &mut impl egui::emath::Numeric,
+    value: &mut T,
     range: std::ops::RangeInclusive<f64>,
-    suffix: &str,
+    width: f32,
+    unit: &str,
 ) {
-    let r = ui.add(egui::DragValue::new(value).range(range).speed(0.2).suffix(suffix).update_while_editing(false));
-    widgets::a11y_name(&r, name);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        num_input(ui, ("runner-num", name), name, value, range, width);
+        if !unit.is_empty() {
+            ui.label(RichText::new(unit).size(12.0).color(theme::pal(ui).text_faint));
+        }
+    });
+}
+
+/// Options inside the setup panel: a 30 px heading, then rows with 12 px
+/// side padding.
+fn options_block(ui: &mut Ui, title: &str, head_h: f32, add: impl FnOnce(&mut Ui)) {
+    kit::bar(ui, head_h, false, |ui| {
+        ui.label(kit::section_title(title));
+    });
+    egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 8 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add(ui);
+    });
 }
 
 fn functional_options(ui: &mut Ui, tab: &mut RunnerTab) {
     let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.set_height(22.0);
-        ui.label(kit::section_title(tr("Options")));
-    });
-    ui.add_space(8.0);
-    opt_row(ui, tr("Iterations"), tr("How many times to run the requests."), 90.0, |ui| {
-        number(ui, tr("Iterations"), &mut tab.iterations, 1.0..=1_000_000.0, "");
-    });
-    opt_row(ui, tr("Delay"), tr("Pause between requests."), 90.0, |ui| {
-        number(ui, tr("Delay"), &mut tab.delay_ms, 0.0..=600_000.0, " ms");
-    });
-    let mut pick = false;
-    opt_row(ui, tr("Data file"), tr("CSV or JSON; one iteration per row."), 110.0, |ui| {
-        let label = if tab.data_path.is_some() { tr("Change…") } else { tr("Select file") };
-        pick = kit::button_ex(ui, kit::Kind::Secondary, Some(icons::UPLOAD_SIMPLE), label, true).clicked();
-    });
-    if pick && let Some(path) = rfd::FileDialog::new().add_filter("CSV or JSON", &["csv", "json"]).pick_file() {
-        match ternarywire_runner::data::load(&path) {
-            Ok(rows) => {
-                tab.iterations = rows.len().max(1);
-                tab.data = rows;
-                tab.data_error = None;
-            }
-            Err(e) => tab.data_error = Some(e.to_string()),
-        }
-        tab.data_path = Some(path);
-    }
-    if let Some(path) = tab.data_path.clone() {
-        let mut clear = false;
-        egui::Frame::new()
-            .fill(p.chrome)
-            .stroke(Stroke::new(1.0, p.border))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::FILE_TEXT).font(theme::icon_font(15.0)).color(p.text_muted));
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                        ui.add(egui::Label::new(RichText::new(file).font(theme::medium(12.5))).truncate())
-                            .on_hover_text(path.display().to_string());
-                        ui.label(RichText::new(trf("{} rows", &[&tab.data.len()])).small().color(p.text_muted));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        clear = widgets::small_icon_button(ui, icons::X, tr("Remove data file")).clicked();
-                    });
+    options_block(ui, tr("Options"), 30.0, |ui| {
+        // Iterations and delay side by side.
+        ui.add_space(7.0);
+        let half = ((ui.available_width() - 12.0) / 2.0).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.allocate_ui_with_layout(vec2(half, 0.0), Layout::top_down(Align::Min), |ui| {
+                kit::field(ui, tr("Iterations"), tr("Times to run the requests."), |ui| {
+                    num_unit(ui, tr("Iterations"), &mut tab.iterations, 1.0..=1_000_000.0, 80.0, "");
                 });
             });
-        if clear {
-            tab.data_path = None;
-            tab.data.clear();
-            tab.data_error = None;
+            ui.allocate_ui_with_layout(vec2(half, 0.0), Layout::top_down(Align::Min), |ui| {
+                kit::field(ui, tr("Delay"), tr("Pause between requests."), |ui| {
+                    num_unit(ui, tr("Delay"), &mut tab.delay_ms, 0.0..=600_000.0, 80.0, "ms");
+                });
+            });
+        });
+        ui.add_space(7.0);
+        let mut pick = false;
+        let label = if tab.data_path.is_some() { tr("Change…") } else { tr("Select file") };
+        // A small button: padding 8, a 13 px icon, a 5 px gap and the label.
+        let button_w =
+            ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.0), p.text).size().x + 16.0 + 13.0 + 5.0;
+        frow(ui, false, tr("Data file"), tr("CSV or JSON; one iteration per row."), button_w, |ui| {
+            let o = kit::ButtonOpts { icon: Some(icons::FILE_ARROW_UP), ..Default::default() };
+            pick = kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, label, o).clicked();
+        });
+        if pick && let Some(path) = rfd::FileDialog::new().add_filter("CSV or JSON", &["csv", "json"]).pick_file() {
+            match ternarywire_runner::data::load(&path) {
+                Ok(rows) => {
+                    tab.iterations = rows.len().max(1);
+                    tab.data = rows;
+                    tab.data_error = None;
+                }
+                Err(e) => tab.data_error = Some(e.to_string()),
+            }
+            tab.data_path = Some(path);
         }
-        ui.add_space(6.0);
-    }
-    if let Some(e) = &tab.data_error {
-        banner(ui, icons::WARNING_CIRCLE, p.err, e);
-        ui.add_space(6.0);
-    }
-    if !tab.data.is_empty() {
-        let id = ui.make_persistent_id("data-preview");
-        if crate::request_tab::disclosure(ui, id, tr("Preview data"), Some(tab.data.len().min(10)), false) {
-            let keys: Vec<String> = tab.data.first().map(|r| r.keys().cloned().collect()).unwrap_or_default();
-            if !keys.is_empty() {
-                let rows: Vec<Vec<String>> = tab
-                    .data
-                    .iter()
-                    .take(10)
-                    .map(|r| {
-                        keys.iter()
-                            .map(|k| r.get(k).map(ternarywire_core::variables::value_to_string).unwrap_or_default())
-                            .collect()
-                    })
-                    .collect();
-                let cols: Vec<&str> = keys.iter().map(String::as_str).collect();
-                let widths = vec![1.0 / cols.len() as f32; cols.len()];
-                crate::request_tab::read_table(ui, "data-preview-table", &cols, &widths, &rows);
+        if let Some(path) = tab.data_path.clone() {
+            if file_chip(ui, tab, &path) {
+                tab.data_path = None;
+                tab.data.clear();
+                tab.data_error = None;
+                tab.preview_data = false;
+            }
+            ui.add_space(2.0);
+            if tab.preview_data && !tab.data.is_empty() {
+                ui.add_space(8.0);
+                let keys: Vec<String> = tab.data.first().map(|r| r.keys().cloned().collect()).unwrap_or_default();
+                if !keys.is_empty() {
+                    let rows: Vec<Vec<String>> = tab
+                        .data
+                        .iter()
+                        .take(10)
+                        .map(|r| {
+                            keys.iter()
+                                .map(|k| r.get(k).map(ternarywire_core::variables::value_to_string).unwrap_or_default())
+                                .collect()
+                        })
+                        .collect();
+                    let cols: Vec<&str> = keys.iter().map(String::as_str).collect();
+                    let widths = vec![1.0 / cols.len() as f32; cols.len()];
+                    crate::request_tab::read_table(ui, "data-preview-table", &cols, &widths, &rows);
+                }
+                ui.add_space(8.0);
             }
         }
-        ui.add_space(8.0);
-    }
-    opt_row(ui, tr("Keep variable values"), tr("Write variables changed by scripts back after the run."), 40.0, |ui| {
-        crate::auth_ui::switch(ui, &mut tab.persist_vars, tr("Keep variable values after the run"));
-    });
-    opt_row(ui, tr("Save cookies"), tr("Keep cookies set during the run in the cookie jar."), 40.0, |ui| {
-        crate::auth_ui::switch(ui, &mut tab.save_cookies, tr("Save cookies after the run"));
-    });
-    opt_row(ui, tr("Stop at the first failure"), tr("Stop when a request or a test fails."), 40.0, |ui| {
-        crate::auth_ui::switch(ui, &mut tab.bail, tr("Stop at the first failure"));
-    });
-    opt_row(
-        ui,
-        tr("Simulate network failures"),
-        tr("This fraction of requests fails with a simulated network error instead of being sent"),
-        130.0,
-        |ui| {
+        if let Some(e) = &tab.data_error {
+            ui.add_space(4.0);
+            kit::banner(ui, Tone::Err, icons::WARNING_CIRCLE, e);
+            ui.add_space(4.0);
+        }
+        frow(ui, false, tr("Keep variable values"), tr("Keep what scripts set, after the run."), 30.0, |ui| {
+            kit::switch(ui, &mut tab.persist_vars, tr("Keep variable values after the run"));
+        });
+        frow(ui, false, tr("Save cookies"), tr("Off runs against a copy of the cookie jar."), 30.0, |ui| {
+            kit::switch(ui, &mut tab.save_cookies, tr("Save cookies after the run"));
+        });
+        frow(ui, false, tr("Stop at the first failure"), "", 30.0, |ui| {
+            kit::switch(ui, &mut tab.bail, tr("Stop at the first failure"));
+        });
+        frow(ui, false, tr("Simulate network failures"), tr("Requests that fail on purpose."), 118.0, |ui| {
             let mut pct = (tab.fail_rate * 100.0).round();
-            let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").show_value(true).step_by(5.0));
-            widgets::a11y_name(&r, tr("Simulate network failures"));
-            if r.changed() {
+            ui.add_sized(
+                [26.0, 18.0],
+                egui::Label::new(RichText::new(format!("{pct:.0}%")).font(theme::mono(12.0)).color(p.text_muted)),
+            );
+            if pct_slider(ui, &mut pct, tr("Simulate network failures")).changed() {
                 tab.fail_rate = pct / 100.0;
             }
+        });
+    });
+}
+
+/// The data file as a chip: icon, name, rows, Preview data and remove.
+/// Returns true when removed.
+fn file_chip(ui: &mut Ui, tab: &mut RunnerTab, path: &Path) -> bool {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(8), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    let inner = Rect::from_min_max(pos2(rect.left() + 10.0, rect.top()), pos2(rect.right() - 4.0, rect.bottom()));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::right_to_left(Align::Center)));
+    c.spacing_mut().item_spacing.x = 8.0;
+    let remove = kit::icon_button_sm(&mut c, icons::X, tr("Remove data file")).clicked();
+    let o = kit::ButtonOpts { icon: Some(icons::TABLE), on: tab.preview_data, ..Default::default() };
+    if kit::button(&mut c, kit::Kind::Ghost, kit::Size::Sm, tr("Preview data"), o)
+        .on_hover_text(tr("Show the first 10 rows"))
+        .clicked()
+    {
+        tab.preview_data = !tab.preview_data;
+    }
+    c.label(RichText::new(trf("{} rows", &[&tab.data.len()])).size(11.0).color(p.text_faint));
+    c.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.label(RichText::new(icons::FILE_TEXT).font(theme::icon_font(15.0)).color(p.text_muted));
+        let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        ui.add(egui::Label::new(RichText::new(file).font(theme::medium(13.0)).color(p.text)).truncate())
+            .on_hover_text(path.display().to_string());
+    });
+    remove
+}
+
+/// A percentage slider (84 px track, 5 % steps); ←/→ step it when focused.
+fn pct_slider(ui: &mut Ui, pct: &mut f32, name: &str) -> Response {
+    let p = theme::pal(ui);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(84.0, 18.0), Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    let value = *pct as f64;
+    resp.widget_info(|| egui::WidgetInfo::slider(enabled, value, name));
+    let before = *pct;
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let t = ((pos.x - rect.left() - 5.0) / (rect.width() - 10.0)).clamp(0.0, 1.0);
+        *pct = (t * 20.0).round() * 5.0;
+    }
+    if resp.has_focus() {
+        let step = ui.input(|i| {
+            (i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowUp)) as i32
+                - (i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowDown)) as i32
+        });
+        *pct = (*pct + step as f32 * 5.0).clamp(0.0, 100.0);
+    }
+    if *pct != before {
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
+        painter.rect_filled(track, CornerRadius::same(2), p.subtle);
+        let cx = rect.left() + 5.0 + (*pct / 100.0) * (rect.width() - 10.0);
+        if *pct > 0.0 {
+            let fill = Rect::from_min_max(track.min, pos2(cx, track.bottom()));
+            painter.rect_filled(fill, CornerRadius::same(2), p.accent);
+        }
+        let knob = pos2(cx, rect.center().y);
+        painter.circle_filled(knob + vec2(0.0, 1.0), 7.0, Color32::from_black_alpha(40));
+        painter.circle(knob, 7.0, p.on_accent, Stroke::new(1.0, p.border_strong));
+        if resp.has_focus() {
+            painter.circle_stroke(knob, 9.0, Stroke::new(1.5, p.accent));
+        }
+    }
+    resp
+}
+
+fn perf_options(ui: &mut Ui, tab: &mut RunnerTab) {
+    options_block(ui, tr("Load profile"), 36.0, |ui| {
+        frow(ui, true, tr("Virtual users"), tr("Users running at the same time (1–1000)."), 64.0, |ui| {
+            num_unit(ui, tr("Virtual users"), &mut tab.vus, 1.0..=1000.0, 64.0, "");
+        });
+        frow(ui, false, tr("Duration"), "", 78.0, |ui| {
+            ui.label(RichText::new("s").size(12.0).color(theme::pal(ui).text_faint));
+            num_input(ui, ("runner-num", "duration"), tr("Duration"), &mut tab.duration_s, 1.0..=3600.0, 64.0);
+        });
+        frow(ui, false, tr("Ramp-up"), tr("Time to reach all users."), 78.0, |ui| {
+            ui.label(RichText::new("s").size(12.0).color(theme::pal(ui).text_faint));
+            num_input(ui, ("runner-num", "ramp"), tr("Ramp-up"), &mut tab.ramp_s, 0.0..=3600.0, 64.0);
+        });
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(kit::hint(
+                ui,
+                tr("Each virtual user loops over the selected requests with its own copy of the variables."),
+            ))
+            .wrap(),
+        );
+        ui.add_space(4.0);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Results: shared pieces
+// ---------------------------------------------------------------------------
+
+/// Number cards in one row of `cols` equal columns (fewer when they would be
+/// narrower than 118 px: six cards become two rows of three), 10 apart. The
+/// value stays on one line; labels and hints wrap, and the cards of a row
+/// share the height of the tallest.
+fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, String)]) {
+    if cards.is_empty() {
+        return;
+    }
+    let p = theme::pal(ui);
+    let gap = 10.0;
+    let w = ui.available_width();
+    let mut cols = cols.clamp(1, cards.len());
+    while cols > 1 && (w - gap * (cols - 1) as f32) / cols as f32 <= 118.0 {
+        cols = if cols.is_multiple_of(2) { cols / 2 } else { cols - 1 };
+    }
+    let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor();
+    let text_w = (cw - 30.0).max(20.0);
+    let measure = ui.painter().clone();
+    let lay = |text: &str, font: FontId, color: Color32, line: f32, one_line: bool| {
+        let mut job = LayoutJob::default();
+        job.append(text, 0.0, TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) });
+        job.wrap = if one_line { egui::text::TextWrapping::truncate_at_width(text_w) } else { job.wrap };
+        job.wrap.max_width = text_w;
+        measure.layout_job(job)
+    };
+    for (r, chunk) in cards.chunks(cols).enumerate() {
+        if r > 0 {
+            ui.add_space(gap);
+        }
+        let laid: Vec<_> = chunk
+            .iter()
+            .map(|(label, value, color, sub)| {
+                (
+                    lay(label, FontId::proportional(11.5), p.text_muted, 17.0, false),
+                    lay(value, theme::semibold(22.0), color.unwrap_or(p.text), 31.0, true),
+                    lay(if sub.is_empty() { " " } else { sub }, FontId::proportional(11.5), p.text_faint, 17.0, false),
+                )
+            })
+            .collect();
+        let h = laid.iter().map(|(l, v, s)| l.size().y + 2.0 + v.size().y + s.size().y).fold(0.0, f32::max) + 26.0;
+        let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        for (i, (l, v, s)) in laid.into_iter().enumerate() {
+            let card = Rect::from_min_size(pos2(row.left() + i as f32 * (cw + gap), row.top()), vec2(cw, h));
+            let painter = ui.painter();
+            painter.rect(
+                card,
+                CornerRadius::same(theme::RADIUS_CARD),
+                p.surface,
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
+            );
+            let x = card.left() + 15.0;
+            let mut y = card.top() + 13.0;
+            let (lh, vh) = (l.size().y, v.size().y);
+            painter.galley(pos2(x, y), l, p.text_muted);
+            y += lh + 2.0;
+            painter.galley(pos2(x, y), v, p.text);
+            y += vh;
+            painter.galley(pos2(x, y), s, p.text_faint);
+        }
+    }
+}
+
+/// A banner whose first sentence is bold and the rest muted.
+fn result_banner(ui: &mut Ui, tone: Tone, icon: &str, bold: &str, rest: &str) {
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(tone);
+    egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 9)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(fg));
+                let mut job = LayoutJob::default();
+                let strong = if matches!(tone, Tone::Ok | Tone::Err | Tone::Warn) { fg } else { p.text };
+                job.append(bold, 0.0, TextFormat::simple(theme::semibold(12.5), strong));
+                if !rest.is_empty() {
+                    job.append(" ", 0.0, TextFormat::simple(FontId::proportional(12.5), p.text));
+                    job.append(rest, 0.0, TextFormat::simple(FontId::proportional(12.5), p.text_muted));
+                }
+                job.wrap.max_width = ui.available_width();
+                ui.add(egui::Label::new(job).wrap());
+            });
         },
     );
 }
 
-fn perf_options(ui: &mut Ui, tab: &mut RunnerTab) {
-    ui.horizontal(|ui| {
-        ui.set_height(22.0);
-        ui.label(kit::section_title(tr("Load profile")));
-    });
-    ui.add_space(8.0);
-    opt_row(ui, tr("Virtual users"), tr("Users sending requests at the same time."), 90.0, |ui| {
-        number(ui, tr("Virtual users"), &mut tab.vus, 1.0..=1000.0, "");
-    });
-    opt_row(ui, tr("Duration"), tr("How long the test runs."), 90.0, |ui| {
-        number(ui, tr("Duration"), &mut tab.duration_s, 1.0..=3600.0, " s");
-    });
-    opt_row(ui, tr("Ramp-up"), tr("Time to reach all virtual users."), 90.0, |ui| {
-        number(ui, tr("Ramp-up"), &mut tab.ramp_s, 0.0..=3600.0, " s");
-    });
-    ui.label(kit::hint(
-        ui,
-        tr("Each virtual user loops over the selected requests with its own copy of the variables."),
-    ));
-}
-
-/// A thin progress bar with a label on the left and one on the right.
-fn progress(ui: &mut Ui, frac: f32, left: &str, right: &str) {
+/// The `.bar` progress line (6 px).
+fn progress_bar(ui: &mut Ui, frac: f32) {
     let p = theme::pal(ui);
-    ui.horizontal(|ui| {
-        ui.add(egui::Spinner::new().size(13.0).color(p.accent));
-        let small = egui::FontId::proportional(crate::request_tab::small_size(ui));
-        let right_w = ui.painter().layout_no_wrap(right.to_string(), small, p.text_muted).size().x;
-        let left_w = (ui.available_width() - right_w - 12.0).max(40.0);
-        ui.allocate_ui_with_layout(vec2(left_w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(RichText::new(left).font(theme::medium(13.0))).truncate());
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(right).small().color(p.text_muted));
-        });
-    });
-    ui.add_space(4.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(3), p.subtle);
     let w = (rect.width() * frac.clamp(0.0, 1.0)).max(6.0);
     ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(w, rect.height())), CornerRadius::same(3), p.accent);
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    ui.ctx().request_repaint_after(Duration::from_millis(100));
 }
+
+/// A pill painted at `left_center` (cells of painted tables).
+fn paint_pill(ui: &Ui, left_center: egui::Pos2, text: &str, tone: Tone) {
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(tone);
+    let g = ui.painter().layout_no_wrap(text.to_string(), theme::medium(11.5), fg);
+    let r = Rect::from_min_size(pos2(left_center.x, left_center.y - 10.0), vec2(g.size().x + 14.0, 20.0));
+    ui.painter().rect_filled(r, CornerRadius::same(10), bg);
+    ui.painter().galley(pos2(r.left() + 7.0, r.center().y - g.size().y / 2.0), g, fg);
+}
+
+/// The frame of a painted table (`.tbl-wrap`): its header row on `well`,
+/// the column titles (x, right-aligned) and the outline.
+fn table_head(ui: &mut Ui, cols: &[(f32, bool, &str)]) -> Rect {
+    let p = theme::pal(ui);
+    let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), TABLE_HEAD), Sense::hover());
+    ui.painter().rect_filled(head, CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 }, p.well);
+    ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
+    for (x, right, label) in cols {
+        let align = if *right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
+        ui.painter().text(pos2(*x, head.center().y), align, *label, theme::medium(11.5), p.text_muted);
+    }
+    head
+}
+
+/// `1234567` → `1,234,567`.
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The Export ▾ button with its menu: `(format, icon, label, detail)`.
+fn export_menu(
+    ui: &mut Ui,
+    title: &str,
+    width: f32,
+    items: &[(&'static str, &str, &str, &str)],
+) -> Option<&'static str> {
+    let o = kit::ButtonOpts { icon: Some(icons::EXPORT), caret: true, ..Default::default() };
+    let r = kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Export"), o);
+    let mut chosen = None;
+    egui::Popup::menu(&r).width(width).align(egui::RectAlign::BOTTOM_END).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        kit::menu_header(ui, title);
+        for (format, icon, label, detail) in items {
+            let item = kit::MenuItem { icon: Some(icon), label, detail: Some(detail), ..Default::default() };
+            if kit::menu_item_ex(ui, item).clicked() {
+                chosen = Some(*format);
+            }
+        }
+    });
+    chosen
+}
+
+fn export_note(result: Result<Option<PathBuf>, String>) -> Option<(String, bool)> {
+    match result {
+        Ok(Some(path)) => Some((trf("Exported to {}. {}", &[&path.display(), &""]).trim_end().to_string(), false)),
+        Ok(None) => None,
+        Err(e) => Some((trf("Export failed: {}", &[&e]), true)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Results: functional
+// ---------------------------------------------------------------------------
 
 fn functional_results(ui: &mut Ui, tab: &mut RunnerTab) {
     let p = theme::pal(ui);
@@ -839,7 +1227,79 @@ fn functional_results(ui: &mut Ui, tab: &mut RunnerTab) {
     }
     let s = tab.summary.clone().unwrap_or_else(|| tab.live.clone());
     let failed = s.tests_failed + s.script_errors;
-    // Summary cards.
+
+    // Toolbar: run state, Export.
+    let mut export_as = None;
+    kit::toolbar(ui, |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if tab.summary.is_some() {
+                export_as = export_menu(
+                    ui,
+                    tr("Export every result"),
+                    220.0,
+                    &[
+                        ("json", icons::BRACKETS_CURLY, "JSON", ".json"),
+                        ("junit", icons::CODE, "JUnit XML", ".xml"),
+                        ("html", icons::FILE_TEXT, tr("HTML report"), ".html"),
+                    ],
+                );
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let elapsed = match (&tab.summary, tab.started) {
+                    (Some(sum), _) => fmt_ms(sum.total_time_ms),
+                    (None, Some(t)) => fmt_ms(t.elapsed().as_secs_f64() * 1000.0),
+                    _ => String::new(),
+                };
+                if tab.is_running() {
+                    kit::pill_ex(
+                        ui,
+                        tr("Running"),
+                        Tone::Accent,
+                        kit::PillOpts { dot: true, live: true, ..Default::default() },
+                    );
+                    ui.label(kit::hint(ui, &format!("{} / {} · {elapsed}", tab.live.executed, tab.expected)));
+                } else if let Some(sum) = &tab.summary {
+                    if sum.cancelled || sum.bailed {
+                        kit::pill_ex(
+                            ui,
+                            tr("Stopped"),
+                            Tone::Warn,
+                            kit::PillOpts { icon: Some(icons::STOP), ..Default::default() },
+                        );
+                    } else {
+                        kit::pill_ex(
+                            ui,
+                            tr("Finished"),
+                            Tone::Neutral,
+                            kit::PillOpts { icon: Some(icons::CHECK), ..Default::default() },
+                        );
+                    }
+                    let iterations = if sum.iterations == 1 {
+                        tr("1 iteration").to_string()
+                    } else {
+                        trf("{} iterations", &[&sum.iterations])
+                    };
+                    let mut hint = format!("{iterations} · {elapsed}");
+                    if !tab.started_at.is_empty() {
+                        hint.push_str(&format!(" · {}", trf("started {}", &[&tab.started_at])));
+                    }
+                    ui.add(egui::Label::new(kit::hint(ui, &hint)).truncate());
+                }
+            });
+        });
+    });
+    if let Some(f) = export_as {
+        tab.note = export_note(export(tab, f));
+    }
+
+    // Body: padding 4 12 16, 12 px between parts.
+    let body = ui.available_rect_before_wrap();
+    let content =
+        Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 4.0), pos2(body.right() - 12.0, body.bottom() - 16.0));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
+    c.spacing_mut().item_spacing.y = 12.0;
+    let ui = &mut c;
+
     let skipped = s.skipped + s.tests_skipped;
     let req_hint = if skipped > 0 { trf("{} skipped", &[&skipped]) } else { tr("requests").to_string() };
     let duration = match (&tab.summary, tab.started) {
@@ -848,9 +1308,9 @@ fn functional_results(ui: &mut Ui, tab: &mut RunnerTab) {
         _ => "–".into(),
     };
     let avg = tab.summary.as_ref().map(|sum| fmt_ms(sum.response_time_avg_ms())).unwrap_or_else(|| "–".into());
-    stat_cards(
+    stat_grid(
         ui,
-        130.0,
+        6,
         &[
             (tr("Requests"), s.executed.to_string(), None, req_hint),
             (tr("Passed"), s.tests_passed.to_string(), (s.tests_passed > 0).then_some(p.ok), tr("tests").into()),
@@ -865,87 +1325,62 @@ fn functional_results(ui: &mut Ui, tab: &mut RunnerTab) {
             (tr("Avg response"), avg, None, tr("per request").into()),
         ],
     );
-    ui.add_space(12.0);
     if tab.is_running() {
-        let done = tab.live.executed;
-        let frac = if tab.expected > 0 { done as f32 / tab.expected as f32 } else { 0.0 };
-        let elapsed = tab.started.map(|t| fmt_ms(t.elapsed().as_secs_f64() * 1000.0)).unwrap_or_default();
-        progress(ui, frac, &trf("Running… {} of {}", &[&done, &tab.expected]), &elapsed);
+        let frac = if tab.expected > 0 { tab.live.executed as f32 / tab.expected as f32 } else { 0.0 };
+        progress_bar(ui, frac);
     } else if let Some(sum) = &tab.summary {
+        let failures = failed + sum.requests_failed;
+        let first = tab.results.iter().find(|r| r.failed()).map(failure_detail).unwrap_or_default();
         if sum.cancelled {
-            banner(ui, icons::STOP, p.warn, tr("Run cancelled"));
+            result_banner(ui, Tone::Warn, icons::STOP, tr("Run cancelled"), "");
         } else if sum.bailed {
-            banner(ui, icons::WARNING, p.warn, tr("Stopped at the first failure"));
-        } else if failed + sum.requests_failed == 0 && sum.tests_passed == 0 {
-            banner(ui, icons::CHECK_CIRCLE, p.ok, &trf("{} requests sent, no tests ran.", &[&sum.executed]));
-        } else if failed + sum.requests_failed == 0 {
-            banner(
+            result_banner(ui, Tone::Warn, icons::WARNING, tr("Stopped at the first failure"), &first);
+        } else if failures == 0 && sum.tests_passed == 0 {
+            result_banner(
                 ui,
+                Tone::Ok,
                 icons::CHECK_CIRCLE,
-                p.ok,
-                &trf("All {} tests passed in {} requests.", &[&sum.tests_passed, &sum.executed]),
+                &trf("{} requests sent, no tests ran.", &[&sum.executed]),
+                "",
             );
+        } else if failures == 0 {
+            let text = trf("All {} tests passed in {} requests.", &[&sum.tests_passed, &sum.executed]);
+            result_banner(ui, Tone::Ok, icons::CHECK_CIRCLE, &text, "");
         } else {
-            banner(
-                ui,
-                icons::X_CIRCLE,
-                p.err,
-                &trf("{} failures in {} requests.", &[&(failed + sum.requests_failed), &sum.executed]),
-            );
+            let head = if failures == 1 {
+                trf("1 failure in {} requests.", &[&sum.executed])
+            } else {
+                trf("{} failures in {} requests.", &[&failures, &sum.executed])
+            };
+            result_banner(ui, Tone::Err, icons::WARNING_CIRCLE, &head, &first);
         }
     }
-    ui.add_space(12.0);
+
+    // Filter, then the table and the details of the selected result.
     let n_failed = tab.results.iter().filter(|r| r.failed()).count();
     let n_all = tab.results.len();
-    ui.horizontal(|ui| {
-        ui.set_height(28.0);
+    crate::flow_tab::row(ui, 26.0, |ui| {
         let all = format!("{} {n_all}", tr("All"));
         let passed = format!("{} {}", tr("Passed"), n_all - n_failed);
         let failed = format!("{} {n_failed}", tr("Failed"));
-        kit::segmented(
+        kit::segmented_sm(
             ui,
             &mut tab.filter,
             &[(Filter::All, all.as_str()), (Filter::Passed, passed.as_str()), (Filter::Failed, failed.as_str())],
         );
         if tab.dropped > 0 {
-            ui.label(
-                widgets::muted(
-                    ui,
-                    trf(
-                        "showing the latest {}; export for all {} results",
-                        &[&KEEP_RESULTS, &(tab.dropped + tab.results.len())],
-                    ),
-                )
-                .small(),
-            );
+            ui.label(kit::hint(
+                ui,
+                &trf(
+                    "showing the latest {}; export for all {} results",
+                    &[&KEEP_RESULTS, &(tab.dropped + tab.results.len())],
+                ),
+            ));
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if tab.summary.is_some() {
-                let r = kit::button_ex(
-                    ui,
-                    kit::Kind::Secondary,
-                    Some(icons::EXPORT),
-                    &format!("{}  {}", tr("Export"), icons::CARET_DOWN),
-                    true,
-                );
-                egui::Popup::menu(&r).show(|ui| {
-                    for (f, icon, label) in [
-                        ("json", icons::BRACKETS_CURLY, "JSON"),
-                        ("junit", icons::CODE, "JUnit XML"),
-                        ("html", icons::GLOBE, tr("HTML report")),
-                    ] {
-                        if ui.button(kit::with_icon(icon, label)).clicked() {
-                            if let Err(e) = export(tab, f) {
-                                tracing::error!("export failed: {e}");
-                            }
-                            ui.close();
-                        }
-                    }
-                });
-            }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(kit::hint(ui, tr("Click a row for details")));
         });
     });
-    ui.add_space(8.0);
     let filtered: Vec<usize> = tab
         .results
         .iter()
@@ -967,97 +1402,125 @@ fn functional_results(ui: &mut Ui, tab: &mut RunnerTab) {
         });
         if down && pos + 1 < filtered.len() {
             tab.selected = Some(filtered[pos + 1]);
+            tab.scroll_to_selected = true;
         } else if up && pos > 0 {
             tab.selected = Some(filtered[pos - 1]);
+            tab.scroll_to_selected = true;
         } else if esc {
             tab.selected = None;
         }
     }
-    results_table(ui, tab, &filtered, dark);
-    if let Some(r) = tab.selected.and_then(|i| tab.results.get(i)).cloned() {
-        ui.add_space(10.0);
-        if result_detail(ui, &r, dark) {
+    let rows_h = TABLE_HEAD + filtered.len().max(1) as f32 * TABLE_ROW + 2.0;
+    let left = ui.available_height();
+    let selected = tab.selected.and_then(|i| tab.results.get(i)).cloned();
+    let table_h = if selected.is_some() {
+        rows_h.min((left * 0.5).max(TABLE_HEAD + 3.0 * TABLE_ROW))
+    } else {
+        rows_h.min(left.max(TABLE_HEAD + 2.0 * TABLE_ROW))
+    };
+    results_table(ui, tab, &filtered, table_h, dark);
+    if let Some(r) = selected {
+        let h = ui.available_height().max(160.0);
+        if result_detail(ui, &r, dark, h) {
             tab.selected = None;
         }
     }
 }
 
-/// The results as a table: iteration, method, request, tests, status, time.
-fn results_table(ui: &mut Ui, tab: &mut RunnerTab, filtered: &[usize], dark: bool) {
-    let p = theme::pal(ui);
-    const HEAD: f32 = 28.0;
-    const ROW: f32 = 32.0;
-    let width = ui.available_width();
-    let height = if tab.selected.is_some() { (ui.available_height() * 0.45).max(140.0) } else { ui.available_height() };
-    let (tests_w, status_w, time_w) = (84.0, 104.0, 76.0);
-    let head = ui.allocate_exact_size(vec2(width, HEAD), Sense::hover()).0;
-    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.chrome);
-    let right = head.right();
-    let cols = [
-        (head.left() + 10.0, Align2::LEFT_CENTER, tr("Request")),
-        (right - time_w - status_w - tests_w + tests_w / 2.0, Align2::CENTER_CENTER, tr("Tests")),
-        (right - time_w - status_w + 10.0, Align2::LEFT_CENTER, tr("Status")),
-        (right - 12.0, Align2::RIGHT_CENTER, tr("Time")),
-    ];
-    for (x, align, label) in cols {
-        ui.painter().text(pos2(x, head.center().y), align, label, theme::medium(11.5), p.text_muted);
+/// What went wrong with a failed result, for the result banner.
+fn failure_detail(r: &RequestResult) -> String {
+    let it = r.iteration + 1;
+    match (&r.error, r.status) {
+        (Some(e), _) => trf("{} (iteration {}) failed: {}", &[&r.name, &it, &crate::dialogs::ellipsize(e, 80)]),
+        (None, Some(code)) if code >= 400 => trf("{} (iteration {}) answered {}.", &[&r.name, &it, &code]),
+        _ => trf("{} (iteration {}) failed.", &[&r.name, &it]),
     }
-    let top = head.top();
+}
+
+/// The results as a table: iteration, method, folder / request, tests,
+/// status, time. Only the rows in view are laid out.
+fn results_table(ui: &mut Ui, tab: &mut RunnerTab, filtered: &[usize], height: f32, dark: bool) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        results_table_rows(ui, tab, filtered, height, dark);
+    });
+    if filtered.is_empty() {
+        ui.label(kit::hint(
+            ui,
+            if tab.is_running() { tr("Waiting for results…") } else { tr("No results match this filter.") },
+        ));
+    }
+}
+
+fn results_table_rows(ui: &mut Ui, tab: &mut RunnerTab, filtered: &[usize], height: f32, dark: bool) {
+    let p = theme::pal(ui);
+    let width = ui.available_width();
+    let (tests_w, status_w, time_w) = (84.0, 92.0, 78.0);
+    let left = ui.cursor().left();
+    let right = left + width;
+    let head = table_head(
+        ui,
+        &[
+            (left + 12.0, false, tr("Request")),
+            (right - time_w - status_w - tests_w + 12.0, false, tr("Tests")),
+            (right - time_w - status_w + 12.0, false, tr("Status")),
+            (right - 12.0, true, tr("Time")),
+        ],
+    );
     let mut clicked = None;
-    let body_h = (height - HEAD).max(ROW * 2.0);
-    let area = egui::ScrollArea::vertical().id_salt("run-results").auto_shrink([false, true]).max_height(body_h);
-    let scroll = kit::show_rows(area, ui, ROW, filtered.len(), |ui, range| {
+    let body_h = (height - TABLE_HEAD).max(TABLE_ROW);
+    let mut area = egui::ScrollArea::vertical().id_salt("run-results").auto_shrink([false, true]).max_height(body_h);
+    if std::mem::take(&mut tab.scroll_to_selected)
+        && let Some(pos) = filtered.iter().position(|&i| Some(i) == tab.selected)
+    {
+        // The selected row in the middle of the table.
+        area = area.vertical_scroll_offset((pos as f32 * TABLE_ROW - (body_h - TABLE_ROW) / 2.0).max(0.0));
+    }
+    let scroll = kit::show_rows(area, ui, TABLE_ROW, filtered.len(), |ui, range| {
         for &i in &filtered[range] {
             let r = &tab.results[i];
-            let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(width, TABLE_ROW), Sense::click());
             let painter = ui.painter();
-            painter.hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
             if tab.selected == Some(i) {
-                painter.rect_filled(rect.shrink2(vec2(1.0, 0.5)), 0.0, p.accent_soft);
+                painter.rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, p.accent_soft);
             } else if resp.hovered() {
-                painter.rect_filled(rect.shrink2(vec2(1.0, 0.5)), 0.0, p.faint_row());
+                painter.rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, p.well);
+            }
+            if filtered.first() != Some(&i) {
+                painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
             }
             let cy = rect.center().y;
-            // Iteration and method.
+            // Iteration, method, folders / name.
+            let mut x = rect.left() + 12.0;
             painter.text(
-                pos2(rect.left() + 10.0, cy),
+                pos2(x, cy),
                 Align2::LEFT_CENTER,
                 format!("#{}", r.iteration + 1),
-                egui::FontId::proportional(11.5),
+                theme::mono(11.0),
                 p.text_faint,
             );
-            let badge = egui::WidgetText::from(widgets::method_badge(&r.method, dark)).into_galley(
-                ui,
-                Some(egui::TextWrapMode::Extend),
-                50.0,
-                egui::TextStyle::Body,
+            x += 22.0 + 8.0;
+            let badge = painter.layout_no_wrap(
+                widgets::method_short(&r.method).to_string(),
+                theme::semibold(10.5),
+                theme::method_color(&r.method, dark),
             );
-            ui.painter().galley(pos2(rect.left() + 40.0, cy - badge.size().y / 2.0), badge, p.text);
-            // Path and name.
+            painter.galley(pos2(x, cy - badge.size().y / 2.0), badge, p.text);
+            x += 34.0 + 8.0;
             // The folders give way first, so the name stays readable.
-            let name_x = rect.left() + 92.0;
-            let name_w = (right - time_w - status_w - tests_w - name_x - 8.0).max(40.0);
-            let line = |text: &str, font: egui::FontId, color, width: f32| {
-                let mut job =
-                    egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat::simple(font, color));
-                job.wrap = egui::text::TextWrapping::truncate_at_width(width);
-                ui.painter().layout_job(job)
-            };
-            let name = line(&r.name, theme::medium(13.0), p.text, name_w);
-            let sep = line(" / ", egui::FontId::proportional(13.0), p.text_faint, f32::INFINITY);
-            let sep_w = sep.size().x;
-            let room = name_w - name.size().x - sep_w;
-            let mut x = name_x;
-            if !r.path.is_empty() && room >= 32.0 {
-                let folders = line(&r.path.join(" / "), egui::FontId::proportional(13.0), p.text_muted, room);
+            let name_w = (right - time_w - status_w - tests_w - x - 8.0).max(40.0);
+            let name = elide(ui, &r.name, theme::medium(12.5), p.text, name_w);
+            let room = name_w - name.size().x - 8.0;
+            if !r.path.is_empty() && room >= 40.0 {
+                let folders =
+                    elide(ui, &format!("{} /", r.path.join(" / ")), FontId::proportional(12.5), p.text_muted, room);
                 let w = folders.size().x;
                 ui.painter().galley(pos2(x, cy - folders.size().y / 2.0), folders, p.text_muted);
-                ui.painter().galley(pos2(x + w, cy - sep.size().y / 2.0), sep, p.text_faint);
-                x += w + sep_w;
+                x += w + 8.0;
             }
             ui.painter().galley(pos2(x, cy - name.size().y / 2.0), name, p.text);
             // Tests.
-            let tests_c = right - time_w - status_w - tests_w / 2.0;
+            let tests_x = right - time_w - status_w - tests_w + 12.0;
             if !r.tests.is_empty() {
                 let failed = r.tests_failed();
                 let passed = r.tests.iter().filter(|t| t.passed && !t.skipped).count();
@@ -1066,33 +1529,31 @@ fn results_table(ui: &mut Ui, tab: &mut RunnerTab, filtered: &[usize], dark: boo
                 } else {
                     (format!("{} {passed}", icons::CHECK), p.ok)
                 };
-                let g = ui.painter().layout_no_wrap(text, theme::medium(12.0), color);
-                ui.painter().galley(pos2(tests_c - g.size().x / 2.0, cy - g.size().y / 2.0), g, color);
+                ui.painter().text(pos2(tests_x, cy), Align2::LEFT_CENTER, text, theme::medium(12.5), color);
             } else {
                 ui.painter().text(
-                    pos2(tests_c, cy),
-                    Align2::CENTER_CENTER,
+                    pos2(tests_x, cy),
+                    Align2::LEFT_CENTER,
                     "–",
-                    egui::FontId::proportional(12.0),
+                    FontId::proportional(12.5),
                     p.text_faint,
                 );
             }
             // Status.
-            let status_x = right - time_w - status_w + 10.0;
-            let (label, color) = match (r.status, &r.error) {
-                (_, Some(_)) => (tr("Error").to_string(), p.err),
-                (Some(code), None) => (code.to_string(), theme::status_color(code, dark)),
-                _ => (tr("Skipped").to_string(), p.text_muted),
+            let status_x = right - time_w - status_w + 12.0;
+            let (label, tone) = match (r.status, &r.error) {
+                (_, Some(_)) => (tr("Error").to_string(), Tone::Err),
+                (Some(code), None) => (code.to_string(), theme::status_tone(code)),
+                _ => (tr("Skipped").to_string(), Tone::Neutral),
             };
-            let pill_w = ui.painter().layout_no_wrap(label.clone(), theme::medium(11.0), color).size().x + 14.0;
-            crate::request_tab::paint_pill(ui, pos2(status_x + pill_w, cy), &label, color);
+            paint_pill(ui, pos2(status_x, cy), &label, tone);
             // Time.
             ui.painter().text(
                 pos2(right - 12.0, cy),
                 Align2::RIGHT_CENTER,
                 fmt_ms(r.response_time_ms),
-                theme::mono(12.0),
-                p.text_muted,
+                theme::mono(12.5),
+                p.text,
             );
             widgets::a11y_button(&resp, &format!("{} {}", r.method, r.name));
             if resp.clicked() {
@@ -1101,105 +1562,186 @@ fn results_table(ui: &mut Ui, tab: &mut RunnerTab, filtered: &[usize], dark: boo
         }
     });
     let bottom = scroll.inner_rect.bottom().max(head.bottom());
-    let table = Rect::from_min_max(pos2(head.left(), top), pos2(head.right(), bottom));
-    ui.painter().rect_stroke(table, CornerRadius::same(8), Stroke::new(1.0, p.border), StrokeKind::Inside);
-    if filtered.is_empty() {
-        ui.add_space(10.0);
-        ui.label(widgets::muted(
-            ui,
-            if tab.is_running() { tr("Waiting for results…") } else { tr("No results match this filter.") },
-        ));
-    }
+    let table = Rect::from_min_max(head.min, pos2(head.right(), bottom));
+    ui.painter().rect_stroke(
+        table,
+        CornerRadius::same(theme::RADIUS_CARD),
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
     if let Some(i) = clicked {
         tab.selected = if tab.selected == Some(i) { None } else { Some(i) };
     }
 }
 
-/// Details of one result. Returns true when closed.
-fn result_detail(ui: &mut Ui, r: &RequestResult, dark: bool) -> bool {
+/// Details of one result in a card: a 44 px header (method, name,
+/// iteration, status, time, size, close), then the URL, the tests, the
+/// headers and the body. Returns true when closed.
+fn result_detail(ui: &mut Ui, r: &RequestResult, dark: bool, height: f32) -> bool {
     let p = theme::pal(ui);
     let mut close = false;
-    kit::card(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+    let frame = egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(theme::RADIUS_CARD));
+    frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
+        ui.set_max_height(height - 2.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        kit::bar_ex(ui, 44.0, 0.0, true, |ui| {
+            ui.add_space(14.0);
             ui.label(widgets::method_badge(&r.method, dark));
-            ui.label(RichText::new(&r.name).font(theme::semibold(14.0)));
+            ui.label(RichText::new(&r.name).font(theme::semibold(13.0)).color(p.text));
+            ui.label(RichText::new(trf("iteration {}", &[&(r.iteration + 1)])).size(11.0).color(p.text_faint));
             match (r.status, &r.error) {
                 (_, Some(_)) => {
-                    kit::pill(ui, tr("Error"), p.err);
+                    kit::pill_ex(ui, tr("Error"), Tone::Err, kit::PillOpts { large: true, ..Default::default() });
                 }
                 (Some(code), None) => {
                     kit::status_pill(ui, code, &r.status_text);
                 }
                 _ => {
-                    kit::pill(ui, tr("Skipped"), p.text_muted);
+                    kit::pill_ex(ui, tr("Skipped"), Tone::Neutral, kit::PillOpts { large: true, ..Default::default() });
                 }
             }
+            ui.spacing_mut().item_spacing.x = 4.0;
             kit::metric(ui, icons::TIMER, &fmt_ms(r.response_time_ms));
-            kit::metric(ui, icons::DOWNLOAD_SIMPLE, &ternarywire_core::util::human_bytes(r.response_size));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                close = kit::icon_button(ui, icons::X, tr("Close details")).clicked();
+            kit::metric(ui, icons::ARROW_LINE_DOWN, &ternarywire_core::util::human_bytes(r.response_size));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(10.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                close = kit::icon_button_sm(ui, icons::X, tr("Close details")).clicked();
+                ui.add(
+                    egui::Label::new(RichText::new(tr("↑↓ move · Esc closes")).size(11.0).color(p.text_faint))
+                        .truncate(),
+                );
             });
         });
-        ui.add(egui::Label::new(RichText::new(&r.url).monospace().color(p.text_muted)).selectable(true).truncate());
-        ui.add_space(8.0);
-        egui::ScrollArea::vertical().id_salt("run-detail").auto_shrink([false; 2]).show(ui, |ui| {
-            if let Some(e) = &r.error {
-                banner(ui, icons::WARNING_CIRCLE, p.err, e);
-                ui.add_space(6.0);
-            }
-            for e in &r.script_errors {
-                banner(ui, icons::WARNING_CIRCLE, p.err, &format!("{}: {}", e.location, e.message));
-                ui.add_space(6.0);
-            }
-            if !r.tests.is_empty() {
-                let tests: Vec<&ternarywire_core::script::TestResult> = r.tests.iter().collect();
-                crate::request_tab::test_list(ui, &tests);
-                ui.add_space(10.0);
-            }
-            if !r.response_headers.is_empty() {
-                let id = ui.make_persistent_id("run-headers");
-                if crate::request_tab::disclosure(ui, id, tr("Headers"), Some(r.response_headers.len()), false) {
-                    let rows: Vec<Vec<String>> =
-                        r.response_headers.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect();
-                    crate::request_tab::read_table(
-                        ui,
-                        "run-headers-table",
-                        &[tr("Key"), tr("Value")],
-                        &[0.32, 0.68],
-                        &rows,
-                    );
+        egui::ScrollArea::vertical().id_salt("run-detail").auto_shrink([false, true]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 10.0;
+                egui::Frame::new()
+                    .fill(p.well)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(CornerRadius::same(RADIUS))
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(RichText::new(&r.url).font(theme::mono(12.0)).color(p.text))
+                                .selectable(true)
+                                .truncate(),
+                        );
+                    });
+                if let Some(e) = &r.error {
+                    kit::banner(ui, Tone::Err, icons::WARNING_CIRCLE, e);
                 }
-                ui.add_space(6.0);
-            }
-            if let Some(b) = &r.body_preview {
-                let id = ui.make_persistent_id("run-body");
-                if crate::request_tab::disclosure(ui, id, tr("Body"), None, true) {
-                    egui::Frame::new()
-                        .fill(p.chrome)
-                        .stroke(Stroke::new(1.0, p.border))
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(egui::Margin::same(10))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.add(egui::Label::new(RichText::new(b).monospace().size(11.5)).selectable(true).wrap());
-                        });
+                for e in &r.script_errors {
+                    kit::banner(ui, Tone::Err, icons::WARNING_CIRCLE, &format!("{}: {}", e.location, e.message));
                 }
-            }
+                if !r.tests.is_empty() {
+                    test_rows(ui, &r.tests);
+                }
+                if !r.response_headers.is_empty() {
+                    let id = ui.make_persistent_id("run-headers");
+                    if kit::disclosure(ui, id, tr("Headers"), Some(r.response_headers.len()), false) {
+                        let rows: Vec<Vec<String>> =
+                            r.response_headers.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect();
+                        crate::request_tab::read_table(
+                            ui,
+                            "run-headers-table",
+                            &[tr("Key"), tr("Value")],
+                            &[0.32, 0.68],
+                            &rows,
+                        );
+                    }
+                }
+                if let Some(b) = &r.body_preview {
+                    let id = ui.make_persistent_id("run-body");
+                    if kit::disclosure(ui, id, tr("Body"), None, true) {
+                        let pretty = serde_json::from_str::<serde_json::Value>(b)
+                            .ok()
+                            .map(|v| crate::highlight::pretty_json_value(&v));
+                        let lang =
+                            if pretty.is_some() { crate::highlight::Lang::Json } else { crate::highlight::Lang::Text };
+                        crate::flow_tab::code_view(ui, pretty.as_deref().unwrap_or(b), lang);
+                    }
+                }
+            });
         });
     });
     close
 }
 
+/// The tests of a result as rows of a bordered list: icon, name (and the
+/// assertion message under it), PASS / FAIL / SKIP on the right.
+fn test_rows(ui: &mut Ui, tests: &[ternarywire_core::script::TestResult]) {
+    let p = theme::pal(ui);
+    let w = ui.available_width();
+    let painter = ui.painter().clone();
+    let rows: Vec<_> = tests
+        .iter()
+        .map(|t| {
+            let (icon, tone, word) = if t.skipped {
+                (icons::MINUS, Tone::Neutral, "SKIP")
+            } else if t.passed {
+                (icons::CHECK_CIRCLE, Tone::Ok, "PASS")
+            } else {
+                (icons::X_CIRCLE, Tone::Err, "FAIL")
+            };
+            let pill_w = painter.layout_no_wrap(word.to_string(), theme::medium(11.5), p.text).size().x + 14.0;
+            let text_w = (w - 12.0 - 15.0 - 8.0 - 8.0 - pill_w - 12.0).max(40.0);
+            let name = painter.layout(t.name.clone(), FontId::proportional(13.0), p.text, text_w);
+            let err = t
+                .error
+                .as_ref()
+                .filter(|_| !t.passed && !t.skipped)
+                .map(|e| painter.layout(e.clone(), theme::mono(11.5), p.err, text_w));
+            let h = match &err {
+                Some(e) => (6.0 + name.size().y + e.size().y + 6.0).max(36.0),
+                None => 36.0_f32.max(name.size().y + 12.0),
+            };
+            (icon, tone, word, pill_w, name, err, h)
+        })
+        .collect();
+    let total = rows.iter().map(|r| r.6).sum::<f32>() + 2.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, total), Sense::hover());
+    painter.rect(
+        rect,
+        CornerRadius::same(theme::RADIUS_CARD),
+        p.surface,
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
+    let mut y = rect.top() + 1.0;
+    for (i, (icon, tone, word, pill_w, name, err, h)) in rows.into_iter().enumerate() {
+        if i > 0 {
+            painter.hline(rect.x_range(), y - 0.5, Stroke::new(1.0, p.border));
+        }
+        let (fg, _) = p.tone(tone);
+        // One line: everything centered; with a message: aligned to the top.
+        let line_c = if err.is_some() { y + 6.0 + name.size().y / 2.0 } else { y + h / 2.0 };
+        let x = rect.left() + 12.0;
+        painter.text(pos2(x + 7.5, line_c), Align2::CENTER_CENTER, icon, theme::icon_font(15.0), fg);
+        let tx = x + 15.0 + 8.0;
+        let name_h = name.size().y;
+        painter.galley(pos2(tx, line_c - name_h / 2.0), name, p.text);
+        if let Some(e) = err {
+            painter.galley(pos2(tx, line_c + name_h / 2.0), e, p.err);
+        }
+        paint_pill(ui, pos2(rect.right() - 12.0 - pill_w, line_c), word, tone);
+        y += h;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Results: performance
+// ---------------------------------------------------------------------------
+
 fn perf_results(ui: &mut Ui, tab: &mut RunnerTab) {
     let p = theme::pal(ui);
-    let samples = &tab.perf_samples;
-    if samples.is_empty() && tab.perf_report.is_none() {
-        if tab.is_running() {
-            progress(ui, 0.0, tr("Starting virtual users…"), "");
-            return;
-        }
+    if tab.perf_samples.is_empty() && tab.perf_report.is_none() && !tab.is_running() {
         kit::empty_state(
             ui,
             icons::GAUGE,
@@ -1209,120 +1751,209 @@ fn perf_results(ui: &mut Ui, tab: &mut RunnerTab) {
         );
         return;
     }
-    egui::ScrollArea::vertical().id_salt("perf-results").auto_shrink([false; 2]).show(ui, |ui| {
-        if let Some(e) = tab.perf_report.as_ref().and_then(|r| r.error.as_ref()) {
-            ui.label(RichText::new(trf("The load test could not run: {}", &[e])).color(p.err));
-            ui.add_space(8.0);
-        }
-        if let Some(r) = &tab.perf_report {
-            let err_color = (r.errors > 0).then_some(p.err);
-            stat_cards(
-                ui,
-                140.0,
-                &[
-                    (tr("Requests"), r.total.to_string(), None, trf("{} virtual users", &[&r.virtual_users])),
-                    (
-                        tr("Throughput"),
-                        format!("{:.1}", r.throughput_rps),
-                        Some(p.accent_text),
-                        tr("requests per second").into(),
-                    ),
-                    (
-                        tr("Error rate"),
-                        format!("{:.2}%", r.error_rate * 100.0),
-                        err_color,
-                        trf("{} errors", &[&r.errors]),
-                    ),
-                    (tr("Avg latency"), fmt_ms(r.latency.avg_ms), None, trf("min {}", &[&fmt_ms(r.latency.min_ms)])),
-                ],
-            );
-            if r.cancelled {
-                ui.add_space(10.0);
-                banner(
+    // Toolbar: run state, Export.
+    let mut export_as = None;
+    kit::toolbar(ui, |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if tab.perf_report.is_some() {
+                export_as = export_menu(
                     ui,
-                    icons::STOP,
-                    p.warn,
-                    tr("The test was stopped before the end; numbers cover the time it ran."),
+                    tr("Export load test"),
+                    250.0,
+                    &[
+                        ("html", icons::FILE_TEXT, tr("HTML report"), tr("chart + tables")),
+                        ("csv", icons::TABLE, tr("CSV per second"), ".csv"),
+                        ("json", icons::BRACKETS_CURLY, tr("JSON samples"), ".json"),
+                    ],
                 );
             }
-        } else if let Some(s) = samples.last() {
-            let frac = s.second as f32 / tab.duration_s.max(1) as f32;
-            progress(
-                ui,
-                frac,
-                &trf(
-                    "{} req/s · {} users · avg {}",
-                    &[&format!("{:.1}", s.rps), &s.active_vus, &fmt_ms(s.avg_latency_ms)],
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let (vus, secs) = match &tab.perf_report {
+                    Some(r) => (r.virtual_users, (r.duration_ms / 1000.0).round() as u64),
+                    None => (tab.vus, tab.duration_s),
+                };
+                let mut hint = format!("{secs} s · {}", trf("{} virtual users", &[&vus]));
+                if tab.ramp_s > 0 {
+                    hint.push_str(&format!(" · {}", trf("{} s ramp-up", &[&tab.ramp_s])));
+                }
+                if tab.is_running() {
+                    kit::pill_ex(
+                        ui,
+                        tr("Running"),
+                        Tone::Accent,
+                        kit::PillOpts { dot: true, live: true, ..Default::default() },
+                    );
+                    let at = tab.perf_samples.last().map(|s| s.second.min(tab.duration_s)).unwrap_or(0);
+                    hint = format!("{at} / {} s · {}", tab.duration_s, trf("{} virtual users", &[&tab.vus]));
+                } else if tab.perf_report.as_ref().is_some_and(|r| r.cancelled) {
+                    kit::pill_ex(
+                        ui,
+                        tr("Stopped"),
+                        Tone::Warn,
+                        kit::PillOpts { icon: Some(icons::STOP), ..Default::default() },
+                    );
+                } else {
+                    kit::pill_ex(
+                        ui,
+                        tr("Finished"),
+                        Tone::Neutral,
+                        kit::PillOpts { icon: Some(icons::CHECK), ..Default::default() },
+                    );
+                }
+                ui.add(egui::Label::new(kit::hint(ui, &hint)).truncate());
+            });
+        });
+    });
+    if let Some(f) = export_as {
+        let collection = tab.collection_name.clone();
+        tab.note = export_note(export_perf(tab, &collection, f));
+    }
+
+    kit::pane_body(ui, "perf-results", |ui| {
+        ui.spacing_mut().item_spacing.y = 12.0;
+        ui.add_space(4.0);
+        if let Some(e) = tab.perf_report.as_ref().and_then(|r| r.error.as_ref()) {
+            kit::banner(ui, Tone::Err, icons::WARNING_CIRCLE, &trf("The load test could not run: {}", &[e]));
+        }
+        let stats = PerfStats::of(tab);
+        stat_grid(
+            ui,
+            4,
+            &[
+                (tr("Requests"), thousands(stats.total), None, trf("{} virtual users", &[&stats.users])),
+                (tr("Throughput"), rate(stats.rps), Some(p.accent_text), tr("requests per second").into()),
+                (
+                    tr("Error rate"),
+                    percent(stats.error_rate),
+                    (stats.errors > 0).then_some(p.err),
+                    trf("{} errors", &[&thousands(stats.errors)]),
                 ),
-                &format!("{} / {} s", s.second.min(tab.duration_s), tab.duration_s),
+                (
+                    tr("Avg latency"),
+                    fmt_ms(stats.avg_ms),
+                    None,
+                    stats.min_ms.map(|m| trf("min {}", &[&fmt_ms(m)])).unwrap_or_default(),
+                ),
+            ],
+        );
+        if tab.is_running() {
+            let at = tab.perf_samples.last().map(|s| s.second).unwrap_or(0);
+            progress_bar(ui, at as f32 / tab.duration_s.max(1) as f32);
+        } else if tab.perf_report.as_ref().is_some_and(|r| r.cancelled) {
+            kit::banner(
+                ui,
+                Tone::Warn,
+                icons::STOP,
+                tr("The test was stopped before the end; numbers cover the time it ran."),
             );
         }
-        ui.add_space(16.0);
-        ui.horizontal_top(|ui| {
-            let total = ui.available_width();
-            let side = tab.perf_report.is_some() && total > 760.0;
-            let chart_w = if side { total * 0.62 } else { total };
-            ui.allocate_ui_with_layout(vec2(chart_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.set_width(chart_w);
-                crate::request_tab::detail_heading(ui, icons::CHART_BAR, tr("Throughput and latency"));
-                kit::card(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    timeline_chart(ui, &tab.perf_samples);
+        kit::card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 8.0;
+            crate::flow_tab::row(ui, 18.0, |ui| {
+                ui.label(kit::section_title(tr("Throughput and latency")));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (color, label) in [(p.info, tr("Average latency")), (p.accent, tr("Requests per second"))] {
+                        ui.label(RichText::new(label).size(12.0).color(p.text_muted));
+                        kit::dot(ui, color, 4.0);
+                        ui.add_space(4.0);
+                    }
                 });
             });
-            if side && let Some(r) = &tab.perf_report {
-                ui.add_space(12.0);
-                let w = ui.available_width();
-                ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_width(w);
-                    crate::request_tab::detail_heading(ui, icons::TIMER, tr("Latency percentiles"));
-                    kit::card(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        percentiles(ui, &r.latency);
-                    });
-                });
-            }
+            timeline_chart(ui, tab.samples());
         });
         if let Some(r) = &tab.perf_report {
-            if ui.available_width() <= 760.0 {
-                ui.add_space(16.0);
-                crate::request_tab::detail_heading(ui, icons::TIMER, tr("Latency percentiles"));
-                kit::card(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+            let total = ui.available_width();
+            let percentiles_card = |ui: &mut Ui| {
+                kit::card(ui).show(ui, |ui| {
                     ui.set_width(ui.available_width());
+                    ui.label(kit::section_title(tr("Latency percentiles")));
+                    ui.add_space(12.0 - 6.0);
                     percentiles(ui, &r.latency);
                 });
+            };
+            if total >= 500.0 {
+                let gap = 12.0;
+                let lw = ((total - gap) * 0.34).floor();
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    ui.allocate_ui_with_layout(vec2(lw, 0.0), Layout::top_down(Align::Min), |ui| {
+                        ui.set_width(lw);
+                        percentiles_card(ui);
+                    });
+                    let rw = ui.available_width();
+                    ui.allocate_ui_with_layout(vec2(rw, 0.0), Layout::top_down(Align::Min), |ui| {
+                        ui.set_width(rw);
+                        per_request(ui, tab, r);
+                    });
+                });
+            } else {
+                percentiles_card(ui);
+                per_request(ui, tab, r);
             }
-            ui.add_space(16.0);
-            crate::request_tab::detail_heading(ui, icons::LIST, tr("Per request"));
-            let rows: Vec<Vec<String>> = r
-                .per_request
-                .iter()
-                .map(|q| {
-                    vec![
-                        q.name.clone(),
-                        q.total.to_string(),
-                        q.errors.to_string(),
-                        fmt_ms(q.latency.avg_ms),
-                        fmt_ms(q.latency.p95_ms),
-                        fmt_ms(q.latency.max_ms),
-                    ]
-                })
-                .collect();
-            crate::request_tab::read_table(
-                ui,
-                "perf-per-request",
-                &[tr("Request"), tr("Total"), tr("Errors"), tr("Avg"), "p95", tr("Max")],
-                &[0.35, 0.13, 0.13, 0.13, 0.13, 0.13],
-                &rows,
-            );
         }
     });
 }
 
-/// Latency percentiles as horizontal bars.
+/// The numbers of the cards of a load test: from the report, or from the
+/// samples while it runs.
+struct PerfStats {
+    total: u64,
+    users: usize,
+    rps: f64,
+    errors: u64,
+    error_rate: f64,
+    avg_ms: f64,
+    min_ms: Option<f64>,
+}
+
+impl PerfStats {
+    fn of(tab: &RunnerTab) -> Self {
+        if let Some(r) = &tab.perf_report {
+            return PerfStats {
+                total: r.total,
+                users: r.virtual_users,
+                rps: r.throughput_rps,
+                errors: r.errors,
+                error_rate: r.error_rate,
+                avg_ms: r.latency.avg_ms,
+                min_ms: Some(r.latency.min_ms),
+            };
+        }
+        let s = &tab.perf_samples;
+        let total: u64 = s.iter().map(|x| x.requests).sum();
+        let errors: u64 = s.iter().map(|x| x.errors).sum();
+        let weighted: f64 = s.iter().map(|x| x.avg_latency_ms * x.requests as f64).sum();
+        PerfStats {
+            total,
+            users: s.last().map(|x| x.active_vus).unwrap_or(tab.vus),
+            rps: s.last().map(|x| x.rps).unwrap_or(0.0),
+            errors,
+            error_rate: if total > 0 { errors as f64 / total as f64 } else { 0.0 },
+            avg_ms: if total > 0 { weighted / total as f64 } else { 0.0 },
+            min_ms: None,
+        }
+    }
+}
+
+/// Requests per second: whole numbers from 100 up.
+fn rate(rps: f64) -> String {
+    if rps >= 100.0 { format!("{rps:.0}") } else { format!("{rps:.1}") }
+}
+
+/// A fraction as a percentage with one decimal (two below 0.1 %).
+fn percent(f: f64) -> String {
+    let v = f * 100.0;
+    if v > 0.0 && v < 0.1 { format!("{v:.2}%") } else { format!("{v:.1}%") }
+}
+
+/// Latency percentiles as horizontal bars (p50 green, p90/p95 blue, p99
+/// amber, max red).
 fn percentiles(ui: &mut Ui, l: &ternarywire_runner::perf::LatencyStats) {
     let p = theme::pal(ui);
     let max = l.max_ms.max(0.001);
+    ui.spacing_mut().item_spacing.y = 10.0;
     for (label, v, color) in [
         ("p50", l.p50_ms, p.ok),
         ("p90", l.p90_ms, p.info),
@@ -1330,133 +1961,536 @@ fn percentiles(ui: &mut Ui, l: &ternarywire_runner::perf::LatencyStats) {
         ("p99", l.p99_ms, p.warn),
         (tr("Max"), l.max_ms, p.err),
     ] {
-        ui.horizontal(|ui| {
-            ui.set_height(24.0);
-            ui.add_sized(
-                [36.0, 24.0],
-                egui::Label::new(RichText::new(label).font(theme::medium(12.0)).color(p.text_muted)),
-            );
-            let bar_w = (ui.available_width() - 74.0).max(40.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(bar_w, 24.0), Sense::hover());
-            let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 8.0));
-            ui.painter().rect_filled(track, CornerRadius::same(4), p.subtle);
-            let w = (track.width() * (v / max) as f32).max(3.0);
-            ui.painter().rect_filled(
-                Rect::from_min_size(track.min, vec2(w, track.height())),
-                CornerRadius::same(4),
-                color,
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(fmt_ms(v)).font(theme::mono(12.0)));
-            });
-        });
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
+        let painter = ui.painter();
+        let cy = rect.center().y;
+        painter.text(pos2(rect.left(), cy), Align2::LEFT_CENTER, label, theme::medium(12.0), p.text_muted);
+        let track = Rect::from_min_max(pos2(rect.left() + 44.0, cy - 4.0), pos2(rect.right() - 72.0, cy + 4.0));
+        painter.rect_filled(track, CornerRadius::same(4), p.subtle);
+        let w = (track.width() * ((v / max) as f32).max(0.04)).min(track.width());
+        painter.rect_filled(Rect::from_min_size(track.min, vec2(w, track.height())), CornerRadius::same(4), color);
+        painter.text(pos2(rect.right(), cy), Align2::RIGHT_CENTER, fmt_ms(v), theme::mono(12.0), p.text);
     }
 }
 
-/// Requests per second (filled line) and average latency per second, with
-/// grid lines, axis labels and a legend.
+/// The per-request numbers of a load test as a table.
+fn per_request(ui: &mut Ui, tab: &RunnerTab, r: &PerfReport) {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        ui.label(kit::section_title(tr("Per request")));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let width = ui.available_width();
+        let left = ui.cursor().left();
+        let right = left + width;
+        // Right edges of the number columns (Max, p95, Avg, Errors, Total).
+        let edges = {
+            let mut x = right - 8.0;
+            let mut e = Vec::new();
+            for w in [66.0, 60.0, 60.0, 52.0, 60.0] {
+                e.push(x);
+                x -= w;
+            }
+            e
+        };
+        let name_end = edges[4] - 60.0 + 8.0;
+        let head = table_head(
+            ui,
+            &[
+                (left + 8.0, false, tr("Request")),
+                (edges[4], true, tr("Total")),
+                (edges[3], true, tr("Errors")),
+                (edges[2], true, tr("Avg")),
+                (edges[1], true, "p95"),
+                (edges[0], true, tr("Max")),
+            ],
+        );
+        for (i, q) in r.per_request.iter().enumerate() {
+            let (rect, _) = ui.allocate_exact_size(vec2(width, TABLE_ROW), Sense::hover());
+            let painter = ui.painter();
+            if i > 0 {
+                painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
+            }
+            let cy = rect.center().y;
+            let mut x = rect.left() + 8.0;
+            if let Some(badge) = tab.badge_of(&q.request_id) {
+                let g = painter.layout_no_wrap(
+                    widgets::method_short(badge).to_string(),
+                    theme::semibold(10.5),
+                    theme::method_color(badge, dark),
+                );
+                painter.galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
+                x += 34.0 + 8.0;
+            }
+            let g = elide(ui, &q.name, FontId::proportional(12.0), p.text, (name_end - x - 8.0).max(20.0));
+            ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g, p.text);
+            let cells = [
+                (thousands(q.total), p.text),
+                (thousands(q.errors), if q.errors > 0 { p.err } else { p.text }),
+                (fmt_ms(q.latency.avg_ms), p.text),
+                (fmt_ms(q.latency.p95_ms), p.text),
+                (fmt_ms(q.latency.max_ms), p.text),
+            ];
+            for (j, (text, color)) in cells.iter().enumerate() {
+                ui.painter().text(pos2(edges[4 - j], cy), Align2::RIGHT_CENTER, text, theme::mono(12.0), *color);
+            }
+        }
+        let bottom = ui.cursor().top();
+        let table = Rect::from_min_max(head.min, pos2(head.right(), bottom.max(head.bottom())));
+        ui.painter().rect_stroke(
+            table,
+            CornerRadius::same(theme::RADIUS_CARD),
+            Stroke::new(1.0, p.border),
+            StrokeKind::Inside,
+        );
+    });
+}
+
+/// A "nice" axis top for four grid steps (1, 2, 2.5, 3, 4, 5, 6 or 8 × 10ⁿ each).
+fn nice_max(v: f64) -> f64 {
+    let raw = (v / 4.0).max(1e-6);
+    let mag = 10f64.powf(raw.log10().floor());
+    let step = [1.0, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+        .iter()
+        .map(|m| m * mag)
+        .find(|s| *s >= raw * 0.999)
+        .unwrap_or(10.0 * mag);
+    step * 4.0
+}
+
+/// Requests per second (filled area and line, left axis) and average
+/// latency (line, right axis) per second, with grid lines, both axes, and a
+/// hover marker with a tooltip.
 fn timeline_chart(ui: &mut Ui, samples: &[PerfSample]) {
     let p = theme::pal(ui);
-    let lat_color = p.info;
-    // Legend.
-    ui.horizontal(|ui| {
-        for (color, label) in [(p.accent, tr("Requests per second")), (lat_color, tr("Average latency"))] {
-            let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-            ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(10.0, 3.0)), CornerRadius::same(1), color);
-            ui.label(RichText::new(label).small().color(p.text_muted));
-            ui.add_space(8.0);
-        }
-    });
-    ui.add_space(6.0);
-    let height = 180.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    let plot = Rect::from_min_max(rect.min + vec2(40.0, 6.0), rect.max - vec2(52.0, 20.0));
-    let painter = ui.painter_at(rect);
-    let max_rps = samples.iter().map(|s| s.rps).fold(1.0, f64::max) * 1.1;
-    let max_lat = samples.iter().map(|s| s.avg_latency_ms).fold(1.0, f64::max) * 1.1;
-    // Grid and axis labels.
-    for k in 0..=3 {
-        let f = k as f32 / 3.0;
-        let y = plot.bottom() - plot.height() * f;
-        painter.hline(plot.x_range(), y, Stroke::new(1.0, if k == 0 { p.border_strong } else { p.border }));
-        painter.text(
-            pos2(plot.left() - 6.0, y),
-            Align2::RIGHT_CENTER,
-            format!("{:.0}", max_rps * f as f64),
-            egui::FontId::proportional(10.5),
-            p.accent_text,
-        );
-        painter.text(
-            pos2(plot.right() + 6.0, y),
-            Align2::LEFT_CENTER,
-            fmt_ms(max_lat * f as f64),
-            egui::FontId::proportional(10.5),
-            lat_color,
-        );
+    let dark = ui.visuals().dark_mode;
+    let w = ui.available_width();
+    let h = (w * 226.0 / 700.0).clamp(180.0, 240.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let plot = Rect::from_min_max(rect.min + vec2(46.0, 14.0), rect.max - vec2(46.0, 30.0));
+    let painter = ui.painter_at(rect.expand(2.0));
+    let max_rps = nice_max(samples.iter().map(|s| s.rps).fold(1.0, f64::max));
+    let max_lat = nice_max(samples.iter().map(|s| s.avg_latency_ms).fold(0.1, f64::max));
+    let small = FontId::proportional(11.0);
+    for k in 0..=4 {
+        let f = k as f64 / 4.0;
+        let y = plot.bottom() - plot.height() * f as f32;
+        painter.hline(plot.x_range(), y, Stroke::new(1.0, p.border));
+        let rps = max_rps * f;
+        let left = if max_rps >= 4.0 { format!("{rps:.0}") } else { format!("{rps:.1}") };
+        painter.text(pos2(plot.left() - 8.0, y), Align2::RIGHT_CENTER, left, small.clone(), p.text_faint);
+        let lat = if k == 0 { "0 ms".to_string() } else { fmt_ms(max_lat * f) };
+        painter.text(pos2(plot.right() + 8.0, y), Align2::LEFT_CENTER, lat, small.clone(), p.text_faint);
     }
     if samples.len() < 2 {
         painter.text(
             plot.center(),
             Align2::CENTER_CENTER,
             tr("Collecting samples…"),
-            egui::FontId::proportional(12.0),
+            FontId::proportional(12.0),
             p.text_muted,
         );
         return;
     }
     let n = (samples.len() - 1) as f32;
     let x_of = |i: usize| plot.left() + plot.width() * i as f32 / n;
-    let rps: Vec<egui::Pos2> = samples
-        .iter()
-        .enumerate()
-        .map(|(i, s)| pos2(x_of(i), plot.bottom() - plot.height() * (s.rps / max_rps) as f32))
-        .collect();
-    let lat: Vec<egui::Pos2> = samples
-        .iter()
-        .enumerate()
-        .map(|(i, s)| pos2(x_of(i), plot.bottom() - plot.height() * (s.avg_latency_ms / max_lat) as f32))
-        .collect();
-    // Soft area under the throughput line.
-    let fill = theme::soft(p.accent, if ui.visuals().dark_mode { 0.16 } else { 0.10 });
-    for w in rps.windows(2) {
-        let quad = vec![w[0], w[1], pos2(w[1].x, plot.bottom()), pos2(w[0].x, plot.bottom())];
-        painter.add(egui::Shape::convex_polygon(quad, fill, Stroke::NONE));
-    }
-    painter.add(egui::Shape::line(rps.clone(), Stroke::new(2.0, p.accent)));
-    painter.add(egui::Shape::line(lat.clone(), Stroke::new(1.5, lat_color)));
-    // Time axis.
-    let last = samples.last().map(|s| s.second).unwrap_or(0);
-    for (i, align) in [(0usize, Align2::LEFT_TOP), (samples.len() - 1, Align2::RIGHT_TOP)] {
-        painter.text(
-            pos2(x_of(i), plot.bottom() + 4.0),
-            align,
-            format!("{} s", if i == 0 { samples[0].second } else { last }),
-            egui::FontId::proportional(10.5),
-            p.text_muted,
-        );
-    }
-    // Hover readout.
-    if let Some(pos) = resp.hover_pos()
-        && plot.x_range().contains(pos.x)
-    {
-        let i = (((pos.x - plot.left()) / plot.width()) * n).round() as usize;
-        if let Some(s) = samples.get(i) {
-            let x = x_of(i);
-            painter.vline(x, plot.y_range(), Stroke::new(1.0, p.border_strong));
-            painter.circle_filled(rps[i], 3.5, p.accent);
-            painter.circle_filled(lat[i], 3.0, lat_color);
-            resp.on_hover_text(format!(
-                "{} s\n{:.1} req/s\n{} {}\n{} {}",
-                s.second,
-                s.rps,
-                fmt_ms(s.avg_latency_ms),
-                tr("avg"),
-                s.active_vus,
-                tr("users")
-            ));
+    let y_rps = |v: f64| plot.bottom() - plot.height() * (v / max_rps).min(1.0) as f32;
+    let y_lat = |v: f64| plot.bottom() - plot.height() * (v / max_lat).min(1.0) as f32;
+    let rps: Vec<egui::Pos2> = samples.iter().enumerate().map(|(i, s)| pos2(x_of(i), y_rps(s.rps))).collect();
+    let lat: Vec<egui::Pos2> =
+        samples.iter().enumerate().map(|(i, s)| pos2(x_of(i), y_lat(s.avg_latency_ms))).collect();
+    // The area under the throughput line, as one mesh (no seams).
+    let fill = theme::soft(p.accent, if dark { 0.22 } else { 0.16 });
+    let mut mesh = egui::Mesh::default();
+    for (i, q) in rps.iter().enumerate() {
+        mesh.colored_vertex(*q, fill);
+        mesh.colored_vertex(pos2(q.x, plot.bottom()), fill);
+        if i > 0 {
+            let b = (i * 2) as u32;
+            mesh.add_triangle(b - 2, b - 1, b);
+            mesh.add_triangle(b - 1, b + 1, b);
         }
     }
-    let _ = Color32::TRANSPARENT;
+    painter.add(mesh);
+    painter.add(egui::Shape::line(rps.clone(), Stroke::new(2.0, p.accent)));
+    painter.add(egui::Shape::line(lat.clone(), Stroke::new(2.0, p.info)));
+    // Time axis.
+    let last = samples.len() - 1;
+    let y = rect.bottom() - 6.0;
+    painter.text(
+        pos2(plot.left(), y),
+        Align2::LEFT_BOTTOM,
+        format!("{} s", samples[0].second),
+        small.clone(),
+        p.text_faint,
+    );
+    painter.text(
+        pos2(plot.right(), y),
+        Align2::RIGHT_BOTTOM,
+        format!("{} s", samples[last].second),
+        small,
+        p.text_faint,
+    );
+    // Hover: a dashed line at the second under the pointer, its points and
+    // a tooltip with the numbers.
+    if let Some(pos) = resp.hover_pos()
+        && (plot.left() - 4.0..=plot.right() + 4.0).contains(&pos.x)
+    {
+        let i = (((pos.x - plot.left()) / plot.width()) * n).round().clamp(0.0, n) as usize;
+        let s = &samples[i];
+        let x = x_of(i);
+        painter.extend(egui::Shape::dashed_line(
+            &[pos2(x, plot.top()), pos2(x, plot.bottom())],
+            Stroke::new(1.0, p.text_faint),
+            3.0,
+            3.0,
+        ));
+        for (q, c) in [(rps[i], p.accent), (lat[i], p.info)] {
+            painter.circle(q, 4.0, c, Stroke::new(2.0, p.surface));
+        }
+        let lines = [
+            format!("{:.0} req/s", s.rps),
+            format!("{} {}", fmt_ms(s.avg_latency_ms), tr("avg")),
+            format!("{} {}", s.active_vus, tr("users")),
+        ];
+        let tw = lines
+            .iter()
+            .map(|l| ui.painter().layout_no_wrap(l.clone(), FontId::proportional(11.5), p.text).size().x)
+            .fold(0.0, f32::max)
+            + 32.0;
+        let size = vec2(tw.max(110.0), 74.0);
+        let mut tx = x + 12.0;
+        if tx + size.x > rect.right() {
+            tx = x - 12.0 - size.x;
+        }
+        let tip = Rect::from_min_size(pos2(tx, plot.top() + 6.0), size);
+        let tp = ui
+            .painter()
+            .clone()
+            .with_layer_id(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("perf-tip")));
+        tp.rect(tip, CornerRadius::same(RADIUS), p.surface, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
+        tp.text(
+            pos2(tip.left() + 10.0, tip.top() + 9.0),
+            Align2::LEFT_TOP,
+            format!("{} s", s.second),
+            theme::semibold(11.5),
+            p.text,
+        );
+        for (k, (c, text)) in
+            [(Some(p.accent), &lines[0]), (Some(p.info), &lines[1]), (None, &lines[2])].iter().enumerate()
+        {
+            let cy = tip.top() + 32.0 + k as f32 * 16.0;
+            if let Some(c) = c {
+                tp.circle_filled(pos2(tip.left() + 13.0, cy), 3.5, *c);
+                tp.text(
+                    pos2(tip.left() + 22.0, cy),
+                    Align2::LEFT_CENTER,
+                    text.as_str(),
+                    FontId::proportional(11.5),
+                    p.text,
+                );
+            } else {
+                tp.text(
+                    pos2(tip.left() + 10.0, cy),
+                    Align2::LEFT_CENTER,
+                    text.as_str(),
+                    FontId::proportional(11.0),
+                    p.text_muted,
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Load test export
+// ---------------------------------------------------------------------------
+
+/// What an exported load test says about how it ran.
+struct PerfMeta<'a> {
+    collection: &'a str,
+    ramp_up_s: u64,
+    /// Method badge by request id.
+    methods: HashMap<String, String>,
+}
+
+/// Writes the load test as `format` (html, csv, json) to a file the user
+/// picks. `Ok(None)`: the dialog was cancelled.
+fn export_perf(tab: &RunnerTab, collection: &str, format: &str) -> Result<Option<PathBuf>, String> {
+    let Some(report) = &tab.perf_report else { return Err("nothing to export".into()) };
+    let meta = PerfMeta {
+        collection,
+        ramp_up_s: tab.ramp_s,
+        methods: tab.plan.iter().map(|p| (p.0.clone(), p.2.clone())).collect(),
+    };
+    let samples = tab.samples();
+    let Some(path) = rfd::FileDialog::new().set_file_name(format!("ternarywire-load-test.{format}")).save_file() else {
+        return Ok(None);
+    };
+    let text = match format {
+        "csv" => perf_csv(&meta, report, samples),
+        "html" => perf_html(&meta, report, samples, theme::palette(false)),
+        _ => perf_json(&meta, report, samples),
+    };
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(Some(path))
+}
+
+fn perf_json(meta: &PerfMeta, r: &PerfReport, samples: &[PerfSample]) -> String {
+    let per_request: Vec<serde_json::Value> = r
+        .per_request
+        .iter()
+        .map(|q| {
+            serde_json::json!({
+                "request_id": q.request_id,
+                "name": q.name,
+                "method": meta.methods.get(&q.request_id),
+                "total": q.total,
+                "errors": q.errors,
+                "latency_ms": q.latency,
+            })
+        })
+        .collect();
+    let v = serde_json::json!({
+        "collection": meta.collection,
+        "summary": {
+            "virtual_users": r.virtual_users,
+            "ramp_up_s": meta.ramp_up_s,
+            "duration_ms": r.duration_ms,
+            "requests": r.total,
+            "errors": r.errors,
+            "error_rate": r.error_rate,
+            "tests_failed": r.tests_failed,
+            "throughput_rps": r.throughput_rps,
+            "latency_ms": r.latency,
+            "cancelled": r.cancelled,
+            "error": r.error,
+        },
+        "samples": samples,
+        "per_request": per_request,
+    });
+    serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+/// A CSV field, quoted when it holds a comma, a quote or a line break.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+}
+
+/// Three tables, each under a title line and separated by a blank line:
+/// the summary, the per-second samples and the per-request numbers.
+fn perf_csv(meta: &PerfMeta, r: &PerfReport, samples: &[PerfSample]) -> String {
+    let l = &r.latency;
+    let mut out = String::from("Summary\nmetric,value\n");
+    let rows: Vec<(&str, String)> = vec![
+        ("collection", meta.collection.to_string()),
+        ("virtual_users", r.virtual_users.to_string()),
+        ("ramp_up_s", meta.ramp_up_s.to_string()),
+        ("duration_ms", format!("{:.0}", r.duration_ms)),
+        ("requests", r.total.to_string()),
+        ("errors", r.errors.to_string()),
+        ("error_rate", format!("{:.6}", r.error_rate)),
+        ("tests_failed", r.tests_failed.to_string()),
+        ("throughput_rps", format!("{:.3}", r.throughput_rps)),
+        ("latency_min_ms", format!("{:.3}", l.min_ms)),
+        ("latency_avg_ms", format!("{:.3}", l.avg_ms)),
+        ("latency_p50_ms", format!("{:.3}", l.p50_ms)),
+        ("latency_p90_ms", format!("{:.3}", l.p90_ms)),
+        ("latency_p95_ms", format!("{:.3}", l.p95_ms)),
+        ("latency_p99_ms", format!("{:.3}", l.p99_ms)),
+        ("latency_max_ms", format!("{:.3}", l.max_ms)),
+        ("cancelled", r.cancelled.to_string()),
+    ];
+    for (k, v) in rows {
+        out.push_str(&format!("{k},{}\n", csv_field(&v)));
+    }
+    out.push_str("\nPer second\nsecond,requests,requests_per_second,avg_latency_ms,errors,active_users\n");
+    for s in samples {
+        out.push_str(&format!(
+            "{},{},{:.3},{:.3},{},{}\n",
+            s.second, s.requests, s.rps, s.avg_latency_ms, s.errors, s.active_vus
+        ));
+    }
+    out.push_str("\nPer request\nrequest,method,total,errors,avg_ms,p50_ms,p90_ms,p95_ms,p99_ms,max_ms\n");
+    for q in &r.per_request {
+        let m = meta.methods.get(&q.request_id).map(String::as_str).unwrap_or("");
+        let l = &q.latency;
+        out.push_str(&format!(
+            "{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}\n",
+            csv_field(&q.name),
+            csv_field(m),
+            q.total,
+            q.errors,
+            l.avg_ms,
+            l.p50_ms,
+            l.p90_ms,
+            l.p95_ms,
+            l.p99_ms,
+            l.max_ms
+        ));
+    }
+    out
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn css(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
+/// A self-contained report: the numbers, the chart as SVG, the
+/// percentiles, the per-request table and the per-second samples.
+fn perf_html(meta: &PerfMeta, r: &PerfReport, samples: &[PerfSample], p: theme::Palette) -> String {
+    let (w, h, l, rt, t, b) = (720.0_f64, 240.0_f64, 52.0, 52.0, 14.0, 30.0);
+    let (pw, ph) = (w - l - rt, h - t - b);
+    let max_rps = nice_max(samples.iter().map(|s| s.rps).fold(1.0, f64::max));
+    let max_lat = nice_max(samples.iter().map(|s| s.avg_latency_ms).fold(0.1, f64::max));
+    let n = samples.len().saturating_sub(1).max(1) as f64;
+    let x = |i: usize| l + pw * i as f64 / n;
+    let mut svg = format!(r#"<svg viewBox="0 0 {w} {h}" width="100%" role="img" aria-label="Throughput and latency">"#);
+    for k in 0..=4 {
+        let f = k as f64 / 4.0;
+        let y = t + ph - ph * f;
+        svg.push_str(&format!(
+            r#"<line x1="{l}" x2="{}" y1="{y}" y2="{y}" stroke="{}"/><text x="{}" y="{}" text-anchor="end" class="ax">{:.0}</text><text x="{}" y="{}" class="ax">{}</text>"#,
+            w - rt,
+            css(p.border),
+            l - 8.0,
+            y + 4.0,
+            max_rps * f,
+            w - rt + 8.0,
+            y + 4.0,
+            html_escape(&fmt_ms(max_lat * f))
+        ));
+    }
+    if samples.len() >= 2 {
+        let pts = |f: &dyn Fn(&PerfSample) -> f64, max: f64| {
+            samples
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{:.1},{:.1}", x(i), t + ph - ph * (f(s) / max).min(1.0)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let rps = pts(&|s| s.rps, max_rps);
+        let lat = pts(&|s| s.avg_latency_ms, max_lat);
+        svg.push_str(&format!(
+            r#"<polygon points="{:.1},{:.1} {rps} {:.1},{:.1}" fill="{}" fill-opacity=".16"/><polyline points="{rps}" fill="none" stroke="{}" stroke-width="2"/><polyline points="{lat}" fill="none" stroke="{}" stroke-width="2"/>"#,
+            x(0),
+            t + ph,
+            x(samples.len() - 1),
+            t + ph,
+            css(p.accent),
+            css(p.accent),
+            css(p.info)
+        ));
+        svg.push_str(&format!(
+            r#"<text x="{l}" y="{}" class="ax">{} s</text><text x="{}" y="{}" text-anchor="end" class="ax">{} s</text>"#,
+            h - 8.0,
+            samples[0].second,
+            w - rt,
+            h - 8.0,
+            samples[samples.len() - 1].second
+        ));
+    }
+    svg.push_str("</svg>");
+    let lat = &r.latency;
+    let stat = |label: &str, value: String, sub: String| {
+        format!(
+            r#"<div class="stat"><div class="l">{}</div><div class="v">{}</div><div class="s">{}</div></div>"#,
+            html_escape(label),
+            html_escape(&value),
+            html_escape(&sub)
+        )
+    };
+    let stats = [
+        stat(tr("Requests"), thousands(r.total), trf("{} virtual users", &[&r.virtual_users])),
+        stat(tr("Throughput"), rate(r.throughput_rps), tr("requests per second").into()),
+        stat(tr("Error rate"), percent(r.error_rate), trf("{} errors", &[&thousands(r.errors)])),
+        stat(tr("Avg latency"), fmt_ms(lat.avg_ms), trf("min {}", &[&fmt_ms(lat.min_ms)])),
+    ]
+    .join("");
+    let pct_rows: String =
+        [("p50", lat.p50_ms), ("p90", lat.p90_ms), ("p95", lat.p95_ms), ("p99", lat.p99_ms), (tr("Max"), lat.max_ms)]
+            .iter()
+            .map(|(k, v)| {
+                format!("<tr><td>{}</td><td class=\"n\">{}</td></tr>", html_escape(k), html_escape(&fmt_ms(*v)))
+            })
+            .collect();
+    let req_rows: String = r
+        .per_request
+        .iter()
+        .map(|q| {
+            format!(
+                "<tr><td>{} {}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td></tr>",
+                html_escape(meta.methods.get(&q.request_id).map(String::as_str).unwrap_or("")),
+                html_escape(&q.name),
+                thousands(q.total),
+                thousands(q.errors),
+                html_escape(&fmt_ms(q.latency.avg_ms)),
+                html_escape(&fmt_ms(q.latency.p95_ms)),
+                html_escape(&fmt_ms(q.latency.max_ms))
+            )
+        })
+        .collect();
+    let sample_rows: String = samples
+        .iter()
+        .map(|s| {
+            format!(
+                "<tr><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{:.1}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td></tr>",
+                s.second,
+                s.requests,
+                s.rps,
+                html_escape(&fmt_ms(s.avg_latency_ms)),
+                s.errors,
+                s.active_vus
+            )
+        })
+        .collect();
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>{title}</title><style>
+body{{font:13px/1.45 system-ui,sans-serif;color:{text};background:{well};margin:0;padding:24px}}
+h1{{font-size:18px;margin:0 0 4px}} h2{{font-size:13px;margin:24px 0 8px}} .sub{{color:{muted}}}
+.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}}
+.stat,.card{{background:{surface};border:1px solid {border};border-radius:9px;padding:12px 14px}}
+.stat .l,.stat .s{{font-size:11.5px;color:{muted}}} .stat .v{{font-size:22px;font-weight:600}}
+.card{{margin-top:12px}} .ax{{font-size:11px;fill:{faint}}}
+table{{border-collapse:collapse;width:100%;background:{surface};border:1px solid {border}}}
+th,td{{padding:6px 10px;border-bottom:1px solid {border};text-align:left}} th{{background:{well};color:{muted};font-weight:500}}
+.n{{text-align:right;font-variant-numeric:tabular-nums}}
+</style></head><body>
+<h1>{title}</h1><div class="sub">{collection} · {users} · {secs} s · {ramp} s ramp-up</div>
+<div class="grid">{stats}</div>
+<div class="card"><b>{chart_title}</b>{svg}</div>
+<h2>{pct_title}</h2><table><tbody>{pct_rows}</tbody></table>
+<h2>{req_title}</h2><table><thead><tr><th>{req}</th><th class="n">{total}</th><th class="n">{errors}</th><th class="n">{avg}</th><th class="n">p95</th><th class="n">{max}</th></tr></thead><tbody>{req_rows}</tbody></table>
+<h2>{sec_title}</h2><table><thead><tr><th class="n">s</th><th class="n">{total}</th><th class="n">req/s</th><th class="n">{avg}</th><th class="n">{errors}</th><th class="n">{users_h}</th></tr></thead><tbody>{sample_rows}</tbody></table>
+</body></html>"#,
+        title = html_escape(tr("Load test")),
+        text = css(p.text),
+        well = css(p.well),
+        muted = css(p.text_muted),
+        faint = css(p.text_faint),
+        surface = css(p.surface),
+        border = css(p.border),
+        collection = html_escape(meta.collection),
+        users = html_escape(&trf("{} virtual users", &[&r.virtual_users])),
+        secs = (r.duration_ms / 1000.0).round(),
+        ramp = meta.ramp_up_s,
+        chart_title = html_escape(tr("Throughput and latency")),
+        pct_title = html_escape(tr("Latency percentiles")),
+        req_title = html_escape(tr("Per request")),
+        sec_title = html_escape(tr("Per second")),
+        req = html_escape(tr("Request")),
+        total = html_escape(tr("Total")),
+        errors = html_escape(tr("Errors")),
+        avg = html_escape(tr("Avg")),
+        max = html_escape(tr("Max")),
+        users_h = html_escape(tr("users")),
+    )
 }
 
 #[cfg(test)]
@@ -1521,5 +2555,94 @@ mod tests {
         tab.selected = Some(0);
         tab.on_event(result("next2".into()));
         assert_eq!(tab.selected, None);
+    }
+
+    fn report() -> (PerfReport, Vec<PerfSample>) {
+        use ternarywire_runner::perf::{LatencyStats, RequestStats};
+        let samples: Vec<PerfSample> = (1..=3)
+            .map(|s| PerfSample {
+                second: s,
+                requests: 100 * s,
+                rps: 100.0 * s as f64,
+                avg_latency_ms: 10.0 + s as f64,
+                errors: s - 1,
+                active_vus: 5,
+            })
+            .collect();
+        let latency = LatencyStats {
+            min_ms: 2.0,
+            max_ms: 90.0,
+            avg_ms: 12.0,
+            p50_ms: 10.0,
+            p90_ms: 20.0,
+            p95_ms: 30.0,
+            p99_ms: 60.0,
+        };
+        let report = PerfReport {
+            virtual_users: 5,
+            duration_ms: 3000.0,
+            total: 600,
+            errors: 3,
+            error_rate: 0.005,
+            throughput_rps: 200.0,
+            latency: latency.clone(),
+            per_request: vec![RequestStats {
+                request_id: "r1".into(),
+                name: "List, \"all\" books".into(),
+                total: 600,
+                errors: 3,
+                latency,
+            }],
+            timeline: samples.clone(),
+            ..Default::default()
+        };
+        (report, samples)
+    }
+
+    /// The load test export writes the summary, the per-second samples and
+    /// the per-request rows in every format.
+    #[test]
+    fn perf_export_has_summary_samples_and_requests() {
+        let (r, samples) = report();
+        let meta = PerfMeta {
+            collection: "Bookstore",
+            ramp_up_s: 2,
+            methods: [("r1".to_string(), "GET".to_string())].into_iter().collect(),
+        };
+        let json: serde_json::Value = serde_json::from_str(&perf_json(&meta, &r, &samples)).unwrap();
+        assert_eq!(json["summary"]["requests"], 600);
+        assert_eq!(json["summary"]["ramp_up_s"], 2);
+        assert_eq!(json["samples"].as_array().unwrap().len(), 3);
+        assert_eq!(json["samples"][2]["rps"], 300.0);
+        assert_eq!(json["per_request"][0]["method"], "GET");
+        assert_eq!(json["per_request"][0]["latency_ms"]["p95_ms"], 30.0);
+
+        let csv = perf_csv(&meta, &r, &samples);
+        let sections: Vec<&str> = csv.split("\n\n").collect();
+        assert_eq!(sections.len(), 3, "{csv}");
+        assert!(sections[0].starts_with("Summary\nmetric,value\n") && sections[0].contains("requests,600"));
+        assert_eq!(sections[1].lines().count(), 2 + 3);
+        assert!(sections[1].contains("\n3,300,300.000,13.000,2,5"), "{}", sections[1]);
+        assert!(sections[2].contains("\"List, \"\"all\"\" books\",GET,600,3,"), "{}", sections[2]);
+
+        let html = perf_html(&meta, &r, &samples, theme::palette(false));
+        assert!(html.contains("<svg") && html.contains("<polyline"));
+        assert!(html.contains("List, &quot;all&quot; books"));
+        assert_eq!(html.matches("<tr><td class=\"n\">").count(), 3, "a row per second");
+    }
+
+    #[test]
+    fn numbers_read_well() {
+        assert_eq!(thousands(18342), "18,342");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000_000), "1,000,000");
+        assert_eq!(nice_max(650.0), 800.0);
+        assert_eq!(nice_max(57.0), 80.0);
+        assert_eq!(nice_max(1.0), 1.0);
+        assert_eq!(nice_max(1030.0), 1200.0);
+        assert_eq!(rate(611.4), "611");
+        assert_eq!(rate(12.34), "12.3");
+        assert_eq!(percent(0.00398), "0.4%");
+        assert_eq!(percent(0.0004), "0.04%");
     }
 }

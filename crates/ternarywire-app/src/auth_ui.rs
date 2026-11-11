@@ -1,17 +1,22 @@
 //! Auth editor shared by requests, folders and collections. Forms are built
 //! from `ternarywire_auth::fields`, so every scheme gets an editor for free.
+//!
+//! Layout (the redesign's `http-auth`): a toolbar row with "Auth type" and
+//! its drop-down (plus the token state for OAuth 2.0), then the form: the
+//! token card, the fields in a two-column grid, switches as full rows and
+//! the advanced fields in a collapsed "Advanced (n)".
 
-use egui::{Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align, Align2, CornerRadius, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use ternarywire_auth::{FieldKind, FieldSpec};
 use ternarywire_core::auth::{Auth, AuthType};
 use ternarywire_core::tokens::OAuth2Token;
 
 use crate::i18n::{tr, trf};
-use crate::request_tab::{banner, elide, form_divider, form_row};
+use crate::icons;
+use crate::kit::{self, ButtonOpts, Kind, PillOpts, Size, Tone};
 use crate::theme;
 use crate::widgets::{self, VarCtx};
-use crate::{icons, kit};
 
 pub struct AuthUiCtx<'a> {
     /// Collection level: `Inherit` is not offered.
@@ -29,6 +34,14 @@ pub enum AuthAction {
     None,
     GetToken,
     ClearToken,
+}
+
+/// What [`auth_form`] did.
+pub struct AuthOut {
+    pub changed: bool,
+    pub action: AuthAction,
+    /// "Open collection auth" was pressed on the inherited auth.
+    pub open_parent: bool,
 }
 
 /// What the signers in ternarywire-auth use when a parameter is missing (as in
@@ -55,7 +68,7 @@ fn bool_value(auth: &Auth, f: &FieldSpec) -> bool {
     auth.get_bool(f.key, missing_value(auth.kind, f) == "true")
 }
 
-/// One sentence about each auth type, shown under the type picker.
+/// One sentence about each auth type, shown above its form.
 fn describe(kind: AuthType) -> &'static str {
     match kind {
         AuthType::Inherit => tr("Use the auth of the parent folder or collection."),
@@ -76,86 +89,18 @@ fn describe(kind: AuthType) -> &'static str {
 }
 
 /// A field-like button that opens a menu (`Popup::menu` on the response).
+#[allow(dead_code)] // Shared with the other views.
 pub(crate) fn select_button(ui: &mut Ui, icon: Option<&str>, text: &str, width: f32) -> egui::Response {
-    let p = theme::pal(ui);
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
-    let enabled = ui.is_enabled();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, enabled, text));
-    if ui.is_rect_visible(rect) {
-        let hovered = resp.hovered();
-        let stroke = if hovered { p.border_strong } else { p.border };
-        let painter = ui.painter();
-        painter.rect(rect, CornerRadius::same(theme::RADIUS), p.surface, Stroke::new(1.0, stroke), StrokeKind::Inside);
-        if resp.has_focus() {
-            painter.rect_stroke(
-                rect,
-                CornerRadius::same(theme::RADIUS),
-                Stroke::new(1.5, p.accent),
-                StrokeKind::Inside,
-            );
-        }
-        let mut x = rect.left() + 10.0;
-        if let Some(icon) = icon {
-            painter.text(
-                pos2(x + 7.0, rect.center().y),
-                Align2::CENTER_CENTER,
-                icon,
-                theme::icon_font(15.0),
-                p.text_muted,
-            );
-            x += 22.0;
-        }
-        let g = elide(ui, text, theme::medium(13.0), p.text, rect.right() - x - 28.0);
-        ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, p.text);
-        ui.painter().text(
-            pos2(rect.right() - 14.0, rect.center().y),
-            Align2::CENTER_CENTER,
-            icons::CARET_DOWN,
-            theme::icon_font(13.0),
-            p.text_muted,
-        );
-    }
-    resp
-}
-
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+    kit::select_box(ui, icon, text, width, false)
 }
 
 /// An on/off switch. Returns a response that is `changed()` when toggled.
 pub(crate) fn switch(ui: &mut Ui, on: &mut bool, name: &str) -> egui::Response {
-    let p = theme::pal(ui);
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(34.0, 20.0), Sense::click());
-    if resp.clicked() {
-        *on = !*on;
-        resp.mark_changed();
-    }
-    let enabled = ui.is_enabled();
-    let value = *on;
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, enabled, value, name));
-    if ui.is_rect_visible(rect) {
-        let t = ui.ctx().animate_bool_responsive(resp.id, *on);
-        let off = if resp.hovered() { p.text_faint } else { p.border_strong };
-        let fill = mix(off, p.accent, t);
-        let fill = if enabled { fill } else { fill.gamma_multiply(0.45) };
-        ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
-        let x = egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), t);
-        ui.painter().circle_filled(pos2(x, rect.center().y), 7.0, Color32::WHITE);
-        if resp.has_focus() {
-            ui.painter().rect_stroke(
-                rect.expand(2.0),
-                CornerRadius::same(12),
-                Stroke::new(1.5, p.accent),
-                StrokeKind::Outside,
-            );
-        }
-    }
-    resp
+    kit::switch(ui, on, name)
 }
 
 /// A masked single-line input with a show/hide eye inside it. `framed`
-/// false draws no frame (table cells).
+/// false draws no frame (table cells); framed it is 26 high (`.input.sm`).
 pub(crate) fn secret_input(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -171,21 +116,32 @@ pub(crate) fn secret_input(
     let mut edit = egui::TextEdit::singleline(text)
         .id(id)
         .password(!reveal)
-        .hint_text(hint)
+        .hint_text(RichText::new(hint).color(p.text_faint))
         .desired_width(width)
-        .font(egui::TextStyle::Monospace);
+        .font(theme::mono(12.0));
     if framed {
-        edit = edit.margin(egui::Margin { left: 8, right: 30, top: 5, bottom: 5 });
+        edit = edit
+            .margin(egui::Margin { left: 8, right: 30, top: 0, bottom: 0 })
+            .min_size(vec2(0.0, 26.0))
+            .align(Align2::LEFT_CENTER);
     } else {
         let h = ui.available_height().clamp(20.0, 34.0);
         edit = edit
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin { left: 6, right: 28, top: 2, bottom: 2 })
+            // egui ignores `margin` when a frame is given: it goes in the frame.
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 6, right: 28, top: 2, bottom: 2 }))
             .min_size(vec2(0.0, h))
             .align(Align2::LEFT_CENTER);
     }
-    let r = ui.add(edit);
-    let eye = Rect::from_center_size(pos2(r.rect.right() - 15.0, r.rect.center().y), vec2(22.0, 22.0));
+    let r = ui.scope(|ui| {
+        let radius = CornerRadius::same(theme::RADIUS_SM);
+        let w = &mut ui.visuals_mut().widgets;
+        for v in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+            v.corner_radius = radius;
+        }
+        ui.add(edit)
+    });
+    let r = r.inner;
+    let eye = Rect::from_center_size(pos2(r.rect.right() - 13.0, r.rect.center().y), vec2(22.0, 22.0));
     let e = ui.interact(eye, id.with("eye"), Sense::click());
     let label = if reveal { tr("Hide value") } else { tr("Show value") };
     widgets::a11y_button(&e, label);
@@ -197,7 +153,7 @@ pub(crate) fn secret_input(
         eye.center(),
         Align2::CENTER_CENTER,
         if reveal { icons::EYE_SLASH } else { icons::EYE },
-        theme::icon_font(14.0),
+        theme::icon_font(13.0),
         color,
     );
     if e.on_hover_text(label).clicked() {
@@ -207,155 +163,329 @@ pub(crate) fn secret_input(
     r
 }
 
-fn field_ui(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, vars: &VarCtx) -> bool {
+/// A 26 px framed input with `{{variable}}` chips (`.input.sm.mono`).
+fn var_input(ui: &mut Ui, id: &str, text: &mut String, vars: &VarCtx, width: f32) -> egui::Response {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(theme::RADIUS_SM), p.surface);
+    let mut cell = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)));
+    let r = widgets::var_cell(&mut cell, id, text, vars, "", rect.width());
+    if r.has_focus() {
+        kit::focus_ring(ui, rect, theme::RADIUS_SM);
+    } else {
+        let c = if ui.rect_contains_pointer(rect) { p.text_faint } else { p.border_strong };
+        ui.painter().rect_stroke(rect, CornerRadius::same(theme::RADIUS_SM), Stroke::new(1.0, c), StrokeKind::Inside);
+    }
+    r
+}
+
+/// The control of one field, `width` wide.
+fn field_control(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, vars: &VarCtx, width: f32) -> bool {
     let mut changed = false;
-    form_row(ui, tr(f.label), tr(f.help), |ui| {
-        let width = ui.available_width().min(560.0);
-        match f.kind {
-            FieldKind::Text => {
-                let mut v = value_text(auth, f);
-                if widgets::var_line(ui, f.key, &mut v, vars, "", width).changed() {
-                    auth.set(f.key, v);
-                    changed = true;
-                }
+    match f.kind {
+        FieldKind::Text => {
+            let mut v = value_text(auth, f);
+            let r = var_input(ui, f.key, &mut v, vars, width);
+            widgets::a11y_name(&r, tr(f.label));
+            if r.changed() {
+                auth.set(f.key, v);
+                changed = true;
             }
-            FieldKind::Secret => {
-                let mut v = value_text(auth, f);
-                let is_ref = ternarywire_core::variables::is_pure_reference(&v);
-                let r = if is_ref {
-                    widgets::var_line(ui, f.key, &mut v, vars, "", width)
-                } else {
-                    secret_input(ui, f.key, &mut v, width, true, "")
-                };
-                if r.changed() {
-                    auth.set(f.key, v);
-                    changed = true;
-                }
+        }
+        FieldKind::Secret => {
+            let mut v = value_text(auth, f);
+            let is_ref = ternarywire_core::variables::is_pure_reference(&v);
+            let r = if is_ref {
+                var_input(ui, f.key, &mut v, vars, width)
+            } else {
+                secret_input(ui, f.key, &mut v, width, true, "")
+            };
+            widgets::a11y_name(&r, tr(f.label));
+            if r.changed() {
+                auth.set(f.key, v);
+                changed = true;
             }
-            FieldKind::Multiline => {
-                let mut v = value_text(auth, f);
+        }
+        FieldKind::Multiline => {
+            let mut v = value_text(auth, f);
+            let lang = if f.key.to_lowercase().contains("key") {
+                crate::highlight::Lang::Text
+            } else {
+                crate::highlight::Lang::Json
+            };
+            ui.scope(|ui| {
                 ui.set_width(width);
-                let lang = if f.key.to_lowercase().contains("key") {
-                    crate::highlight::Lang::Text
-                } else {
-                    crate::highlight::Lang::Json
-                };
-                if widgets::code_editor(ui, f.key, &mut v, lang, Some(vars), 3, false).changed() {
-                    auth.set(f.key, v);
+                kit::well(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if widgets::code_editor_gutter(ui, f.key, &mut v, lang, Some(vars), 3, false, None).changed() {
+                        auth.set(f.key, v);
+                        changed = true;
+                    }
+                });
+            });
+        }
+        FieldKind::Bool => {
+            let mut b = bool_value(auth, f);
+            if switch(ui, &mut b, tr(f.label)).changed() {
+                auth.set(f.key, b);
+                changed = true;
+            }
+        }
+        FieldKind::Select(options) => {
+            let current = value_text(auth, f);
+            // A few short options are a segmented control (on a track as
+            // wide as the field), others a drop-down.
+            let labels: Vec<&str> = options.iter().map(|(v, l)| option_label(f.key, v, l)).collect();
+            let short = options.len() <= 3 && labels.iter().all(|l| l.chars().count() <= 12);
+            if short {
+                let indexed: Vec<(usize, &str)> = labels.iter().enumerate().map(|(i, l)| (i, *l)).collect();
+                let mut sel = options.iter().position(|(v, _)| *v == current).unwrap_or(0);
+                let p = theme::pal(ui);
+                let track = Rect::from_min_size(ui.cursor().min, vec2(width, 26.0));
+                ui.painter().rect_filled(track, CornerRadius::same(8), p.subtle);
+                let r = ui.scope(|ui| kit::segmented_sm(ui, &mut sel, &indexed));
+                widgets::a11y_name(&r.response, tr(f.label));
+                if r.inner {
+                    auth.set(f.key, options[sel].0.to_string());
                     changed = true;
                 }
-            }
-            FieldKind::Bool => {
-                let mut b = bool_value(auth, f);
-                ui.add_space(4.0);
-                if switch(ui, &mut b, tr(f.label)).changed() {
-                    auth.set(f.key, b);
-                    changed = true;
-                }
-            }
-            FieldKind::Select(options) => {
-                let current = value_text(auth, f);
+            } else {
                 let label = options
                     .iter()
                     .find(|(v, _)| *v == current)
-                    .map(|(_, l)| *l)
+                    .map(|(_, l)| tr(l))
                     .unwrap_or(current.as_str())
                     .to_string();
-                let w = width.min(280.0);
-                let r = select_button(ui, None, &label, w);
-                egui::Popup::menu(&r).width(w).show(|ui| {
+                let r = kit::select_box(ui, None, &label, width, true);
+                widgets::a11y_name(&r, tr(f.label));
+                egui::Popup::menu(&r).width(width.max(200.0)).show(|ui| {
                     for (v, l) in options.iter() {
-                        let mark = if current == *v { icons::CHECK } else { "    " };
-                        if ui.button(format!("{mark}  {l}")).clicked() {
+                        let item = kit::MenuItem { checked: Some(current == *v), label: tr(l), ..Default::default() };
+                        if kit::menu_item_ex(ui, item).clicked() {
                             auth.set(f.key, v.to_string());
                             changed = true;
-                            ui.close();
                         }
                     }
                 });
             }
         }
-    });
+    }
     changed
 }
 
-/// The auth type picker with a sentence about the chosen type.
-fn type_picker(ui: &mut Ui, auth: &mut Auth, is_root: bool, width: f32) -> bool {
+/// The label of an option in a segmented control: short forms of the long
+/// names the drop-downs use.
+fn option_label(key: &str, value: &str, label: &'static str) -> &'static str {
+    match (key, value) {
+        ("addTokenTo", "header") => tr("Header"),
+        ("addTokenTo", "queryParams") => tr("URL"),
+        _ => tr(label),
+    }
+}
+
+/// The order of the OAuth 2.0 fields: the authorization server first, then
+/// the token as sent. Credentials of one grant show only with that grant
+/// (or when they are set).
+fn oauth2_fields<'a>(auth: &Auth, fields: Vec<&'a FieldSpec>) -> Vec<&'a FieldSpec> {
+    const ORDER: &[&str] = &[
+        "grant_type",
+        "addTokenTo",
+        "authUrl",
+        "accessTokenUrl",
+        "clientId",
+        "clientSecret",
+        "scope",
+        "redirect_uri",
+        "challengeAlgorithm",
+        "username",
+        "password",
+        "accessToken",
+        "headerPrefix",
+        "tokenName",
+    ];
+    let grant = auth.get_string("grant_type");
+    let shown = |f: &FieldSpec| match f.key {
+        "username" | "password" => grant.starts_with("password") || !auth.get_string(f.key).is_empty(),
+        "challengeAlgorithm" => grant.ends_with("pkce") || auth.params.contains_key(f.key),
+        _ => true,
+    };
+    let rank = |f: &FieldSpec| ORDER.iter().position(|k| *k == f.key).unwrap_or(ORDER.len());
+    let mut out: Vec<&FieldSpec> = fields.into_iter().filter(|f| shown(f)).collect();
+    out.sort_by_key(|f| rank(f));
+    out
+}
+
+/// One field: label above the control, help under it (`.field`).
+fn field_ui(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, vars: &VarCtx, width: f32) -> bool {
+    ui.push_id(f.key, |ui| {
+        if f.kind == FieldKind::Bool {
+            return switch_row(ui, auth, f, width);
+        }
+        kit::field(ui, tr(f.label), "", |ui| {
+            let changed = field_control(ui, auth, f, vars, width);
+            if !f.help.is_empty() {
+                let p = theme::pal(ui);
+                ui.scope(|ui| {
+                    ui.set_max_width(width);
+                    ui.add(egui::Label::new(RichText::new(tr(f.help)).size(11.5).color(p.text_muted)).wrap());
+                });
+            }
+            changed
+        })
+    })
+    .inner
+}
+
+/// An on/off field as a full row: label and help on the left, the switch
+/// on the right.
+fn switch_row(ui: &mut Ui, auth: &mut Auth, f: &FieldSpec, width: f32) -> bool {
     let p = theme::pal(ui);
     let mut changed = false;
-    ui.label(RichText::new(tr("Auth type")).font(theme::medium(12.0)).color(p.text_muted));
-    ui.add_space(2.0);
-    let r = select_button(ui, Some(icons::KEY), tr(auth.kind.label()), width);
-    egui::Popup::menu(&r).width(width).show(|ui| {
-        for t in AuthType::ALL {
-            if is_root && t == AuthType::Inherit {
-                continue;
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_width(width);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let mut b = bool_value(auth, f);
+            if switch(ui, &mut b, tr(f.label)).changed() {
+                auth.set(f.key, b);
+                changed = true;
             }
-            let mark = if auth.kind == t { icons::CHECK } else { "    " };
-            if ui.button(format!("{mark}  {}", tr(t.label()))).on_hover_text(describe(t)).clicked() {
-                if auth.kind != t {
-                    let mut fresh = Auth::new(t);
-                    // Sensible defaults for new configs.
-                    for f in ternarywire_auth::fields(t) {
-                        if !f.default.is_empty() {
-                            match f.kind {
-                                FieldKind::Bool => fresh.set(f.key, f.default == "true"),
-                                _ => fresh.set(f.key, f.default.to_string()),
-                            }
-                        }
-                    }
-                    *auth = fresh;
-                    changed = true;
+            ui.add_space(8.0);
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new(tr(f.label)).font(theme::medium(13.0)).color(p.text));
+                if !f.help.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(tr(f.help)).size(12.0).color(p.text_muted)).wrap());
                 }
-                ui.close();
-            }
-            if t == AuthType::None {
-                ui.separator();
-            }
-        }
-    });
-    ui.add_space(6.0);
-    ui.label(RichText::new(describe(auth.kind)).small().color(p.text_muted));
-    changed
-}
-
-/// Returns (changed, action).
-pub fn auth_editor(ui: &mut Ui, auth: &mut Auth, ctx: AuthUiCtx<'_>) -> (bool, AuthAction) {
-    let mut changed = false;
-    let mut action = AuthAction::None;
-    let width = ui.available_width();
-    if width >= 760.0 {
-        let left_w = 250.0;
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(vec2(left_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.set_width(left_w);
-                changed |= type_picker(ui, auth, ctx.is_root, left_w);
-            });
-            ui.add_space(20.0);
-            let right_w = ui.available_width();
-            ui.allocate_ui_with_layout(vec2(right_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.set_width(right_w);
-                auth_body(ui, auth, &ctx, &mut changed, &mut action);
             });
         });
-    } else {
-        changed |= type_picker(ui, auth, ctx.is_root, width.min(320.0));
-        ui.add_space(14.0);
-        auth_body(ui, auth, &ctx, &mut changed, &mut action);
-    }
-    (changed, action)
+    });
+    changed
 }
 
-fn auth_body(ui: &mut Ui, auth: &mut Auth, ctx: &AuthUiCtx<'_>, changed: &mut bool, action: &mut AuthAction) {
-    let p = theme::pal(ui);
+/// Fields in a two-column grid (12 apart); switches and multi-line fields
+/// take a whole row. One column when narrow.
+fn fields_grid(ui: &mut Ui, auth: &mut Auth, fields: &[&FieldSpec], vars: &VarCtx) -> bool {
+    let mut changed = false;
+    let width = ui.available_width();
+    let two = width >= 420.0 && fields.iter().filter(|f| is_cell(f)).count() > 1;
+    let col = if two { ((width - 12.0) / 2.0).floor() } else { width };
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 12.0;
+        let mut pending: Vec<&FieldSpec> = Vec::new();
+        let flush = |ui: &mut Ui, auth: &mut Auth, pending: &mut Vec<&FieldSpec>| {
+            let mut changed = false;
+            for pair in pending.chunks(if two { 2 } else { 1 }) {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for f in pair {
+                        ui.allocate_ui_with_layout(vec2(col, 0.0), Layout::top_down(Align::Min), |ui| {
+                            ui.set_width(col);
+                            changed |= field_ui(ui, auth, f, vars, col);
+                        });
+                    }
+                });
+            }
+            pending.clear();
+            changed
+        };
+        for f in fields {
+            if is_cell(f) {
+                pending.push(f);
+            } else {
+                changed |= flush(ui, auth, &mut pending);
+                changed |= field_ui(ui, auth, f, vars, width);
+            }
+        }
+        changed |= flush(ui, auth, &mut pending);
+    });
+    changed
+}
+
+/// Fields that sit in a grid cell (the others take a whole row).
+fn is_cell(f: &FieldSpec) -> bool {
+    !matches!(f.kind, FieldKind::Bool | FieldKind::Multiline)
+}
+
+/// "Auth type" and its drop-down, then (OAuth 2.0) the token state on the
+/// right: the content of the auth toolbar. Returns true when the type
+/// changed.
+pub(crate) fn type_bar(ui: &mut Ui, auth: &mut Auth, ctx: &AuthUiCtx<'_>) -> bool {
+    let mut changed = false;
+    ui.label(kit::section_title(tr("Auth type")));
+    let label = tr(auth.kind.label());
+    let tw = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), egui::Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let r = kit::select_box(ui, Some(icons::KEY), label, (8.0 + 14.0 + 6.0 + tw + 26.0).max(190.0), true);
+    widgets::a11y_name(&r, tr("Auth type"));
+    egui::Popup::menu(&r).width(220.0).show(|ui| {
+        for t in AuthType::ALL {
+            if ctx.is_root && t == AuthType::Inherit {
+                continue;
+            }
+            let item = kit::MenuItem { checked: Some(auth.kind == t), label: tr(t.label()), ..Default::default() };
+            if kit::menu_item_ex(ui, item).on_hover_text(describe(t)).clicked() && auth.kind != t {
+                let mut fresh = Auth::new(t);
+                // Sensible defaults for new configs.
+                for f in ternarywire_auth::fields(t) {
+                    if !f.default.is_empty() {
+                        match f.kind {
+                            FieldKind::Bool => fresh.set(f.key, f.default == "true"),
+                            _ => fresh.set(f.key, f.default.to_string()),
+                        }
+                    }
+                }
+                *auth = fresh;
+                changed = true;
+            }
+            if t == AuthType::None {
+                kit::menu_sep(ui);
+            }
+        }
+    });
+    if auth.kind == AuthType::OAuth2 {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| token_pill(ui, ctx));
+    }
+    changed
+}
+
+/// The token state in the auth toolbar: active (with the time left) or expired.
+fn token_pill(ui: &mut Ui, ctx: &AuthUiCtx<'_>) {
+    let dot = PillOpts { dot: true, ..Default::default() };
+    if ctx.fetching {
+        kit::pill_ex(ui, tr("Getting a token…"), Tone::Info, dot);
+        return;
+    }
+    let Some(t) = &ctx.token else { return };
+    let now = chrono::Utc::now().timestamp();
+    match t.expires_at {
+        Some(e) if e <= now => {
+            kit::pill_ex(ui, tr("Token expired"), Tone::Err, dot);
+        }
+        Some(e) => {
+            kit::pill_ex(ui, &trf("Token active · {}", &[&short_duration(e - now)]), Tone::Ok, dot);
+        }
+        None => {
+            kit::pill_ex(ui, tr("Token active"), Tone::Ok, dot);
+        }
+    }
+}
+
+/// The form of the chosen auth type (everything under the toolbar). Lays
+/// its parts out 14 apart.
+pub(crate) fn auth_form(ui: &mut Ui, auth: &mut Auth, ctx: &AuthUiCtx<'_>, can_open_parent: bool) -> AuthOut {
+    let mut out = AuthOut { changed: false, action: AuthAction::None, open_parent: false };
+    ui.spacing_mut().item_spacing.y = 14.0;
     match auth.kind {
         AuthType::Inherit => {
-            inherited_card(ui, ctx.inherited.as_ref());
-            return;
+            out.open_parent = inherited_card(ui, ctx.inherited.as_ref(), can_open_parent);
+            return out;
         }
         AuthType::None => {
-            banner(ui, icons::LOCK_SIMPLE, p.text_muted, tr("This request does not use any authorization."));
-            return;
+            kit::banner(ui, Tone::Neutral, icons::LOCK_SIMPLE, tr("This request does not use any authorization."));
+            return out;
         }
         _ => {}
     }
@@ -366,88 +496,130 @@ fn auth_body(ui: &mut Ui, auth: &mut Auth, ctx: &AuthUiCtx<'_>, changed: &mut bo
                 && !auth.params.contains_key(new)
             {
                 auth.params.insert(new.to_string(), v);
-                *changed = true;
+                out.changed = true;
             }
         }
+    }
+    ui.add(egui::Label::new(kit::hint(ui, describe(auth.kind))).wrap());
+    if auth.kind == AuthType::OAuth2 {
+        token_card(ui, ctx, &mut out.action);
     }
     let fields = ternarywire_auth::fields(auth.kind);
-    let basic: Vec<&FieldSpec> = fields.iter().filter(|f| !f.is_advanced()).collect();
+    let mut basic: Vec<&FieldSpec> = fields.iter().filter(|f| !f.is_advanced()).collect();
+    if auth.kind == AuthType::OAuth2 {
+        basic = oauth2_fields(auth, basic);
+    }
     let advanced: Vec<&FieldSpec> = fields.iter().filter(|f| f.is_advanced()).collect();
     if !basic.is_empty() {
-        kit::card(ui).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            for (i, f) in basic.iter().enumerate() {
-                if i > 0 {
-                    form_divider(ui);
-                }
-                *changed |= field_ui(ui, auth, f, ctx.vars);
-            }
-        });
+        out.changed |= fields_grid(ui, auth, &basic, ctx.vars);
     }
     if !advanced.is_empty() {
-        ui.add_space(12.0);
         let id = ui.make_persistent_id(("auth-adv", auth.kind.as_str()));
-        if crate::request_tab::disclosure(ui, id, tr("Advanced"), Some(advanced.len()), false) {
-            ui.label(kit::hint(ui, tr("Most servers work with the defaults; change these only when told to.")));
-            ui.add_space(4.0);
-            kit::card(ui).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                for (i, f) in advanced.iter().enumerate() {
-                    if i > 0 {
-                        form_divider(ui);
-                    }
-                    *changed |= field_ui(ui, auth, f, ctx.vars);
-                }
-            });
+        if advanced_header(ui, id, advanced.len()) {
+            out.changed |= fields_grid(ui, auth, &advanced, ctx.vars);
         }
     }
-    if auth.kind == AuthType::OAuth2 {
-        ui.add_space(16.0);
-        token_card(ui, ctx, action);
-    }
+    out
 }
 
-/// Where an inherited auth comes from.
-fn inherited_card(ui: &mut Ui, inherited: Option<&(String, AuthType)>) {
+/// "Advanced (n)" disclosure with a note on the right. Returns whether it
+/// is open.
+fn advanced_header(ui: &mut Ui, id: egui::Id, count: usize) -> bool {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    egui::Frame::new()
-        .fill(theme::soft(p.info, if dark { 0.10 } else { 0.06 }))
-        .stroke(Stroke::new(1.0, theme::soft(p.info, if dark { 0.28 } else { 0.22 })))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                crate::request_tab::icon_tile(ui, icons::SHIELD_CHECK, p.info, 32.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    match inherited {
-                        Some((name, kind)) => {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(trf("Inherited from “{}”", &[name])).font(theme::semibold(13.5)),
-                                );
-                                kit::pill(ui, tr(kind.label()), p.info);
-                            });
+    let mut open: bool = ui.data(|d| d.get_temp(id).unwrap_or(false));
+    let row = crate::request_tab::hrow(ui, 22.0, |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let caret = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+        ui.add(
+            egui::Label::new(RichText::new(caret).font(theme::icon_font(12.0)).color(p.text_faint)).selectable(false),
+        );
+        ui.add(egui::Label::new(kit::section_title(tr("Advanced"))).selectable(false));
+        kit::tone_pill(ui, &count.to_string(), Tone::Neutral);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tr("Most servers work with the defaults")).size(11.0).color(p.text_faint),
+                )
+                .selectable(false),
+            );
+        });
+    });
+    let r = ui.interact(row.response.rect, id.with("toggle"), Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tr("Advanced")));
+    r.ctx.accesskit_node_builder(r.id, |n| n.set_expanded(open));
+    if r.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if r.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    open
+}
+
+/// Returns (changed, action).
+pub fn auth_editor(ui: &mut Ui, auth: &mut Auth, ctx: AuthUiCtx<'_>) -> (bool, AuthAction) {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.set_height(kit::size::TOOLBAR);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        changed |= type_bar(ui, auth, &ctx);
+    });
+    let out = ui.vertical(|ui| auth_form(ui, auth, &ctx, false)).inner;
+    (changed || out.changed, out.action)
+}
+
+/// Where an inherited auth comes from. Returns true when "Open collection
+/// auth" was pressed.
+fn inherited_card(ui: &mut Ui, inherited: Option<&(String, AuthType)>, can_open: bool) -> bool {
+    let p = theme::pal(ui);
+    let mut open = false;
+    kit::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            kit::icon_tile(ui, icons::SHIELD_CHECK, p.accent, 34.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                match inherited {
+                    Some((name, kind)) => {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
                             ui.label(
-                                RichText::new(trf("This request uses {} from “{}”.", &[&tr(kind.label()), name]))
-                                    .color(p.text_muted),
+                                RichText::new(trf("Inherited from “{}”", &[name]))
+                                    .font(theme::semibold(13.0))
+                                    .color(p.text),
                             );
-                            ui.label(kit::hint(ui, tr("Change it in the folder or collection settings.")));
-                        }
-                        None => {
-                            ui.label(RichText::new(tr("Nothing to inherit")).font(theme::semibold(13.5)));
-                            ui.label(
-                                RichText::new(tr("No auth is set on any parent; the request is sent without auth."))
-                                    .color(p.text_muted),
-                            );
+                            kit::tone_pill(ui, tr(kind.label()), Tone::Accent);
+                        });
+                        let text = format!(
+                            "{} {}",
+                            trf("This request uses {} from “{}”.", &[&tr(kind.label()), name]),
+                            tr("Change it in the folder or collection settings.")
+                        );
+                        ui.add(egui::Label::new(kit::hint(ui, &text)).wrap());
+                        if can_open {
+                            ui.add_space(4.0);
+                            let opts = ButtonOpts { icon: Some(icons::ARROW_SQUARE_OUT), ..Default::default() };
+                            open =
+                                kit::button(ui, Kind::Secondary, Size::Sm, tr("Open collection auth"), opts).clicked();
                         }
                     }
-                });
+                    None => {
+                        ui.label(RichText::new(tr("Nothing to inherit")).font(theme::semibold(13.0)).color(p.text));
+                        ui.add(
+                            egui::Label::new(kit::hint(
+                                ui,
+                                tr("No auth is set on any parent; the request is sent without auth."),
+                            ))
+                            .wrap(),
+                        );
+                    }
+                }
             });
         });
+    });
+    open
 }
 
 /// Seconds as `45 s`, `12 min`, `3 h`, `2 d`.
@@ -460,102 +632,127 @@ fn short_duration(secs: i64) -> String {
     }
 }
 
-/// The stored OAuth 2.0 token: state, value, expiry and the actions.
+/// The stored OAuth 2.0 token: state, value, expiry, scopes and the actions.
 fn token_card(ui: &mut Ui, ctx: &AuthUiCtx<'_>, action: &mut AuthAction) {
     let p = theme::pal(ui);
-    kit::card(ui).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+    kit::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
-            ui.label(RichText::new(icons::KEY).font(theme::icon_font(15.0)).color(p.text_muted));
-            ui.label(RichText::new(tr("Current token")).font(theme::semibold(13.5)));
-            let now = chrono::Utc::now().timestamp();
-            let expired = ctx.token.as_ref().and_then(|t| t.expires_at).is_some_and(|e| e <= now);
-            if ctx.fetching {
-                kit::pill(ui, tr("Waiting for the authorization server…"), p.info);
-                ui.add(egui::Spinner::new().size(14.0).color(p.info));
-            } else if ctx.token.is_none() {
-                kit::pill(ui, tr("No token"), p.text_muted);
-            } else if expired {
-                kit::pill(ui, &format!("{} {}", icons::WARNING_CIRCLE, tr("Expired")), p.err);
-            } else {
-                kit::pill(ui, &format!("{} {}", icons::CHECK, tr("Active")), p.ok);
-            }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let now = chrono::Utc::now().timestamp();
+        let expired = ctx.token.as_ref().and_then(|t| t.expires_at).is_some_and(|e| e <= now);
+        crate::request_tab::hrow(ui, 20.0, |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.label(kit::section_title(tr("Current token")));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let dot = PillOpts { dot: true, ..Default::default() };
+                if ctx.fetching {
+                    ui.add(egui::Spinner::new().size(14.0).color(p.info));
+                    kit::pill_ex(ui, tr("Waiting for the authorization server…"), Tone::Info, dot);
+                } else if ctx.token.is_none() {
+                    kit::pill_ex(ui, tr("No token"), Tone::Neutral, PillOpts::default());
+                } else if expired {
+                    kit::pill_ex(ui, tr("Expired"), Tone::Err, dot);
+                } else {
+                    kit::pill_ex(ui, tr("Active"), Tone::Ok, dot);
+                }
+            });
         });
-        ui.add_space(6.0);
         match &ctx.token {
             Some(t) => {
                 let kind = if t.token_type.is_empty() { "Bearer" } else { &t.token_type };
-                ui.horizontal(|ui| {
-                    egui::Frame::new()
-                        .fill(p.chrome)
-                        .stroke(Stroke::new(1.0, p.border))
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(egui::Margin::symmetric(10, 6))
-                        .show(ui, |ui| {
-                            ui.set_width((ui.available_width() - 44.0).max(120.0));
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(kind).font(theme::medium(12.0)).color(p.text_muted));
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(crate::dialogs::ellipsize(&t.access_token, 48)).monospace(),
-                                    )
-                                    .truncate(),
-                                );
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(p.well)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(CornerRadius::same(theme::RADIUS))
+                    .inner_margin(egui::Margin { left: 10, right: 4, top: 4, bottom: 4 })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(RichText::new(kind).font(theme::mono(12.0)).color(p.text_faint));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if kit::icon_button_sm(ui, icons::COPY, tr("Copy token")).clicked() {
+                                    ui.ctx().copy_text(t.access_token.clone());
+                                }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&t.access_token).font(theme::mono(12.0)).color(p.text),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
                             });
                         });
-                    if kit::icon_button(ui, icons::COPY, tr("Copy token")).clicked() {
-                        ui.ctx().copy_text(t.access_token.clone());
-                    }
-                });
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
+                    });
+                ui.add_space(10.0);
+                crate::request_tab::hrow(ui, 18.0, |ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    let line = |ui: &mut Ui, icon: &str, text: &str| {
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.label(RichText::new(icon).font(theme::icon_font(13.0)).color(p.text_muted));
+                            ui.label(RichText::new(text).size(12.0).color(p.text_muted))
+                        })
+                        .inner
+                    };
                     if let Some(e) = t.expires_at {
-                        let left = e - chrono::Utc::now().timestamp();
+                        let left = e - now;
                         let text = if left <= 0 {
                             tr("Expired").to_string()
                         } else {
                             trf("Expires in {}", &[&short_duration(left)])
                         };
-                        kit::metric(ui, icons::CLOCK, &text);
+                        line(ui, icons::CLOCK, &text);
                     }
                     if t.refresh_token.is_some() {
-                        kit::metric(ui, icons::ARROWS_CLOCKWISE, tr("Renewed automatically"))
+                        line(ui, icons::ARROWS_CLOCKWISE, tr("Renewed automatically"))
                             .on_hover_text(tr("refresh token available: renewed automatically when it expires"));
                     }
                 });
                 if let Some(s) = t.scope.as_ref().filter(|s| !s.trim().is_empty()) {
-                    ui.add_space(2.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(widgets::muted(ui, tr("Scopes")).small());
+                    ui.add_space(8.0);
+                    crate::request_tab::hrow(ui, 20.0, |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         for scope in s.split_whitespace() {
-                            kit::pill(ui, scope, p.text_muted);
+                            kit::pill_ex(ui, scope, Tone::Neutral, PillOpts { outline: true, ..Default::default() })
+                                .on_hover_text(tr("Scopes"));
                         }
                     });
                 }
             }
             None => {
-                ui.label(kit::hint(
-                    ui,
-                    tr("No token stored. Tokens are kept in the Keychain, never in collection files."),
-                ));
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(kit::hint(
+                        ui,
+                        tr("No token stored. Tokens are kept in the Keychain, never in collection files."),
+                    ))
+                    .wrap(),
+                );
             }
         }
-        ui.add_space(10.0);
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_enabled_ui(!ctx.fetching, |ui| {
-                if kit::secondary(ui, Some(icons::KEY), tr("Get New Access Token")).clicked() {
+                let opts = ButtonOpts { icon: Some(icons::ARROWS_CLOCKWISE), ..Default::default() };
+                if kit::button(ui, Kind::Secondary, Size::Sm, tr("Get new access token"), opts).clicked() {
                     *action = AuthAction::GetToken;
                 }
             });
-            if ctx.token.is_some()
-                && kit::button_ex(ui, kit::Kind::Ghost, Some(icons::TRASH), tr("Clear token"), false).clicked()
-            {
-                *action = AuthAction::ClearToken;
+            if ctx.token.is_some() {
+                let opts = ButtonOpts { icon: Some(icons::TRASH), ..Default::default() };
+                if kit::button(ui, Kind::Ghost, Size::Sm, tr("Clear token"), opts).clicked() {
+                    *action = AuthAction::ClearToken;
+                }
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(tr("Kept in the Keychain")).size(11.0).color(p.text_faint))
+                    .on_hover_text(trf("Token key: {}", &[&ctx.owner_id]));
+            });
         });
-        ui.add_space(4.0);
-        ui.label(RichText::new(trf("Token key: {}", &[&ctx.owner_id])).small().color(p.text_faint));
     });
 }
 

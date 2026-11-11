@@ -15,6 +15,7 @@ use ternarywire_socketio::{
 use crate::app::{Msg, TernaryWireApp};
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
+use crate::kit::Tab;
 use crate::proto_common::{self as pc, Conn, ConnAction, Dir, ItemSlot, Log, RowAction, ScriptState, header, resolver};
 use crate::widgets::{self, KvOptions, VarCtx};
 use crate::{icons, kit, theme};
@@ -51,6 +52,8 @@ pub struct SioTab {
     pub scripts: ScriptState,
     inbox: std::collections::VecDeque<serde_json::Value>,
     since: Option<Instant>,
+    /// Session id of the connection.
+    sid: Option<String>,
     /// Why the last connection failed.
     error: Option<String>,
 }
@@ -71,11 +74,19 @@ impl SioTab {
             ack: false,
             only_listened: false,
             ack_replies: Default::default(),
-            log: Log::with_empty("No events yet", "Connect, then emit an event; events from the server appear here."),
+            log: {
+                let mut log = Log::with_empty(
+                    "No events yet",
+                    "Connect, then emit an event; events from the server appear here.",
+                );
+                log.title = "Events";
+                log
+            },
             auto: None,
             scripts: ScriptState::default(),
             inbox: Default::default(),
             since: None,
+            sid: None,
             error: None,
         }
     }
@@ -103,6 +114,7 @@ impl SioTab {
                 self.since = Some(Instant::now());
                 self.error = None;
                 self.log.system(trf("Connected to {} (sid {})", &[&namespace, &sid]));
+                self.sid = Some(sid);
             }
             SocketIoEvent::Event { name, args, direction, at_ms } => {
                 if direction == Direction::Incoming && self.only_listened && !listened.iter().any(|l| l == &name) {
@@ -134,6 +146,7 @@ impl SioTab {
                 self.connected = false;
                 self.session = None;
                 self.since = None;
+                self.sid = None;
                 self.log.system(trf("Disconnected: {}", &[&reason]));
             }
         }
@@ -146,262 +159,215 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
         return;
     };
     let mut item = original.clone();
+    // The rows of the view are edge to edge.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let collection = tab.slot.collection_id();
     let vars = app.var_ctx(collection.as_deref());
     let state = tab.state();
     let since = tab.since;
     let transport = tab.session.as_ref().and_then(|s| s.transport());
+    let inherited = pc::inherited_auth(app, &tab.slot, &item);
+    let root = app.ws.root().to_path_buf();
     header(ui, app, tab_id, &tab.slot, &mut item, |ui| {
-        pc::conn_status(ui, state, since);
         if let Some(t) = transport {
-            kit::pill(ui, t.label(), theme::pal(ui).text_muted).on_hover_text(tr("Transport in use"));
+            kit::pill_ex(ui, t.label(), kit::Tone::Neutral, kit::PillOpts { outline: true, ..Default::default() })
+                .on_hover_text(tr("Transport in use"));
         }
     });
     let RequestKind::SocketIo(req) = &mut item.request else { return };
     let mut action = None;
-    let clicked = pc::connect_bar(
-        ui,
-        "SIO",
-        126.0,
-        |ui| {
-            let w = (ui.available_width() - 130.0).max(120.0);
-            let r = widgets::var_cell(ui, "sio-url", &mut req.url, &vars, "http://localhost:3000", w);
-            kit::vdivider(ui, 22.0);
-            let ns = pc::bar_field(ui, "sio-ns", &mut req.namespace, tr("/namespace"), ui.available_width());
-            let enter = (r.lost_focus() || ns.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if enter && state != Conn::Live {
-                action = Some(ConnAction::Connect);
-            }
-            r.has_focus() || ns.has_focus()
-        },
-        |ui| pc::connect_button(ui, state),
-    );
-    if clicked.is_some() {
-        action = clicked;
-    }
-    if let (Some(e), Conn::Failed) = (&tab.error, state) {
-        ui.add_space(8.0);
-        let mut retry = false;
-        let mut dismiss = false;
-        pc::error_banner(ui, tr("Could not connect"), e, |ui| {
-            dismiss = kit::icon_button(ui, icons::X, tr("Dismiss")).clicked();
-            retry = kit::secondary(ui, Some(icons::ARROW_CLOCKWISE), tr("Retry")).clicked();
-        });
-        if retry {
-            action = Some(ConnAction::Connect);
-        }
-        if dismiss {
-            tab.error = None;
-        }
-    }
     let connected = state == Conn::Live;
     let can_emit = connected && !tab.event.trim().is_empty();
     let mut emit_now: Option<Emit> = None;
     if can_emit && pc::send_shortcut(ui) {
         emit_now = Some((tab.event.clone(), tab.args.clone(), tab.ack));
     }
-    let listeners = req.listeners.iter().filter(|l| l.enabled).count();
-    let headers = req.headers.iter().filter(|h| h.enabled).count() + req.params.iter().filter(|h| h.enabled).count();
-    let items = vec![
-        (Section::Emit, tr("Emit").to_string()),
-        (Section::Listeners, trf("Events{}", &[&widgets::count_label(listeners)])),
-        (Section::Saved, format!("{}{}", tr("Saved messages"), widgets::count_label(req.messages.len()))),
-        (Section::Headers, format!("{}{}", tr("Headers"), widgets::count_label(headers))),
-        (Section::Settings, tr("Settings").to_string()),
-        (Section::Scripts, pc::scripts_label(&item.scripts)),
-    ];
-    ui.add_space(8.0);
-    pc::section_tabs(ui, "sio-tabs", &mut tab.section, &items);
-    ui.add_space(8.0);
+    match tab.auto.as_deref() {
+        Some("connect") => {
+            if tab.session.is_none() {
+                action = Some(ConnAction::Connect);
+            }
+            tab.auto = None;
+        }
+        Some("emit") if tab.connected => {
+            emit_now = Some((tab.event.clone(), tab.args.clone(), tab.ack));
+            tab.auto = None;
+        }
+        Some(a) if a.starts_with("select:") || a.starts_with("section:") => {
+            if let Some(i) = a.strip_prefix("select:").and_then(|i| i.parse().ok()) {
+                tab.log.selected = Some(i);
+            } else if let Some(s) = a.strip_prefix("section:") {
+                tab.section = match s {
+                    "events" => Section::Listeners,
+                    "saved" => Section::Saved,
+                    "headers" => Section::Headers,
+                    "settings" => Section::Settings,
+                    "scripts" => Section::Scripts,
+                    _ => Section::Emit,
+                };
+            }
+            tab.auto = None;
+        }
+        _ => {}
+    }
     // Server events waiting for our acknowledgement.
     let pending = tab.session.as_ref().map(|s| s.pending_acks()).unwrap_or_default();
     // Replies of acknowledgements that were sent (or whose connection closed).
     tab.ack_replies.retain(|id, _| pending.iter().any(|a| a.id == *id));
     let mut send_ack = None;
-    if !pending.is_empty() {
-        pc::notice_card(ui, icons::HOURGLASS, tr("The server is waiting for acknowledgements"), |ui| {
-            for a in &pending {
-                ui.push_id(("sio-ack", a.id), |ui| {
-                    ui.horizontal(|ui| {
-                        kit::pill(ui, &format!("#{}", a.id), theme::pal(ui).text_muted);
-                        ui.label(RichText::new(&a.event).monospace());
-                        let reply = tab
-                            .ack_replies
-                            .entry(a.id)
-                            .or_insert_with(|| SocketIoArg::new(SocketIoArgKind::Json, "[]"));
-                        kind_combo(ui, &mut reply.kind).on_hover_text(match reply.kind {
-                            SocketIoArgKind::Json => {
-                                tr("Arguments as a JSON array, a single JSON value, or plain text.")
-                            }
-                            _ => tr("Sent as one argument"),
-                        });
-                        if reply.kind == SocketIoArgKind::File {
-                            choose_file(ui, &mut reply.value);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if kit::secondary(ui, Some(icons::CHECK), tr("Send ack")).clicked() {
-                                send_ack = Some(a.id);
-                            }
-                            ui.add(
-                                egui::TextEdit::singleline(&mut reply.value)
-                                    .desired_width(ui.available_width())
-                                    .font(egui::TextStyle::Monospace),
-                            );
-                        });
-                    });
-                });
+    let mut retry = false;
+    let panes = ui.make_persistent_id("sio-panes");
+    let item_id = item.id.clone();
+    let scripts = &mut item.scripts;
+    pc::view_panes(
+        ui,
+        panes,
+        |ui| {
+            let clicked = pc::connect_bar(
+                ui,
+                "SIO",
+                124.0,
+                |ui| {
+                    let w = (ui.available_width() - 121.0).max(120.0);
+                    let r = pc::bar_var(ui, "sio-url", &mut req.url, &vars, "http://localhost:3000", w);
+                    pc::bar_divider(ui);
+                    let ns = pc::bar_field(ui, "sio-ns", &mut req.namespace, tr("/namespace"), ui.available_width())
+                        .on_hover_text(tr("Namespace"));
+                    let enter = (r.lost_focus() || ns.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if enter && state != Conn::Live {
+                        action = Some(ConnAction::Connect);
+                    }
+                    r.has_focus() || ns.has_focus()
+                },
+                |ui| pc::connect_button(ui, state),
+            );
+            if clicked.is_some() {
+                action = clicked;
             }
-        });
-        ui.add_space(8.0);
-    }
-    if let Some(id) = send_ack {
-        answer_ack(app, tab, id, collection.as_deref());
-    }
-    {
-        let log = &mut tab.log;
-        let section = &mut tab.section;
-        let event = &mut tab.event;
-        let args = &mut tab.args;
-        let ack = &mut tab.ack;
-        let only_listened = &mut tab.only_listened;
-        let scripts_state = &mut tab.scripts;
-        let scripts = &mut item.scripts;
-        let item_id = item.id.clone();
-        pc::split_view(
-            ui,
-            ("sio-split", tab_id),
-            0.5,
-            |ui| match *section {
+            let listeners = req.listeners.iter().filter(|l| l.enabled).count();
+            let headers =
+                req.headers.iter().filter(|h| h.enabled).count() + req.params.iter().filter(|h| h.enabled).count();
+            let tabs = [
+                Tab::new(Section::Emit, tr("Emit")),
+                Tab::new(Section::Listeners, tr("Events")).count(listeners),
+                Tab::new(Section::Saved, tr("Saved")).count(req.messages.len()),
+                Tab::new(Section::Headers, tr("Headers")).count(headers),
+                Tab::new(Section::Settings, tr("Settings")),
+                Tab::new(Section::Scripts, tr("Scripts")).count(pc::scripts_count(scripts)),
+            ];
+            kit::tabs(ui, &mut tab.section, &tabs);
+            let event = &mut tab.event;
+            let args = &mut tab.args;
+            let ack = &mut tab.ack;
+            match tab.section {
                 Section::Emit => {
                     let p = theme::pal(ui);
-                    ui.horizontal(|ui| {
-                        ui.set_height(30.0);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ack_now = *ack;
+                    let event_now = event.clone();
+                    pc::toolbar(
+                        ui,
+                        |ui| {
+                            ui.label(RichText::new(tr("Event")).color(p.text_muted));
+                            let w = (ui.available_width() - 130.0).clamp(90.0, 150.0);
+                            pc::input_sm(ui, event, "message", w, true);
+                            pc::check_label(ui, ack, tr("Expect ack"))
+                                .on_hover_text(tr("Ask the server to acknowledge; its answer appears in the log"));
+                        },
+                        |ui| {
                             let hint = if connected { tr("Enter an event name first") } else { tr("Connect first") };
-                            let ok = connected && !event.trim().is_empty();
-                            if pc::send_button(ui, icons::PAPER_PLANE_RIGHT, tr("Emit"), ok, hint) {
-                                emit_now = Some((event.clone(), args.clone(), *ack));
+                            let ok = connected && !event_now.trim().is_empty();
+                            if pc::toolbar_send(ui, tr("Emit"), ok, hint) {
+                                emit_now = Some((event_now.clone(), args.clone(), ack_now));
                             }
-                            if pc::save_message_button(ui, !event.trim().is_empty()) {
+                            if pc::save_message_button(ui, !event_now.trim().is_empty()) {
                                 req.messages.push(SocketIoMessage {
-                                    name: event.clone(),
-                                    event: event.clone(),
+                                    name: event_now.clone(),
+                                    event: event_now.clone(),
                                     arguments: args.clone(),
-                                    ack: *ack,
+                                    ack: ack_now,
                                     ..Default::default()
                                 });
                             }
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(tr("Event")).color(p.text_muted));
-                                ui.add(
-                                    egui::TextEdit::singleline(event)
-                                        .desired_width((ui.available_width() - 130.0).clamp(120.0, 300.0))
-                                        .hint_text("message")
-                                        .font(egui::TextStyle::Monospace),
-                                );
-                                ui.add_space(4.0);
-                                ui.checkbox(ack, tr("Expect ack"))
-                                    .on_hover_text(tr("Ask the server to acknowledge; its answer appears in the log"));
-                            });
-                        });
-                    });
-                    ui.add_space(6.0);
-                    egui::ScrollArea::vertical().id_salt("sio-emit").show(ui, |ui| {
-                        args_editor(ui, args, &vars);
-                    });
+                        },
+                    );
+                    pc::body(ui, "sio-emit", 0.0, 10.0, |ui| args_editor(ui, args, &vars, &root));
                 }
                 Section::Listeners => {
-                    egui::ScrollArea::vertical().id_salt("sio-listeners").show(ui, |ui| {
-                        pc::section(
+                    let only = &mut tab.only_listened;
+                    pc::toolbar(
+                        ui,
+                        |ui| pc::toolbar_title(ui, tr("Event listeners"), None),
+                        |ui| {
+                            pc::check_label(ui, only, tr("Only show incoming events listed here"));
+                        },
+                    );
+                    pc::body(ui, "sio-listeners", 0.0, 10.0, |ui| {
+                        ui.label(kit::hint(
                             ui,
-                            tr("Event listeners"),
-                            Some(tr("Incoming events with these names are expected; the log can show only them.")),
-                        );
-                        ui.checkbox(only_listened, tr("Only show incoming events listed here"));
-                        ui.add_space(6.0);
-                        let p = theme::pal(ui);
+                            tr("Incoming events with these names are expected; the log can show only them."),
+                        ));
                         let mut remove = None;
                         if !req.listeners.is_empty() {
-                            egui::Frame::new()
-                                .stroke(egui::Stroke::new(1.0, p.border))
-                                .corner_radius(egui::CornerRadius::same(8))
-                                .inner_margin(egui::Margin::symmetric(8, 2))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    for (i, l) in req.listeners.iter_mut().enumerate() {
-                                        if i > 0 {
-                                            let y = ui.cursor().top();
-                                            ui.painter().hline(
-                                                ui.max_rect().expand2(egui::vec2(8.0, 0.0)).x_range(),
-                                                y,
-                                                egui::Stroke::new(1.0, p.border),
-                                            );
-                                        }
-                                        ui.push_id(i, |ui| {
-                                            ui.allocate_ui_with_layout(
-                                                egui::vec2(ui.available_width(), 34.0),
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if kit::icon_button(ui, icons::TRASH, tr("Remove event")).clicked()
-                                                    {
-                                                        remove = Some(i);
-                                                    }
-                                                    ui.with_layout(
-                                                        egui::Layout::left_to_right(egui::Align::Center),
-                                                        |ui| {
-                                                            ui.checkbox(&mut l.enabled, "")
-                                                                .on_hover_text(tr("Listen to this event"));
-                                                            ui.add(
-                                                                egui::TextEdit::singleline(&mut l.event)
-                                                                    .desired_width(ui.available_width())
-                                                                    .hint_text(tr("event name"))
-                                                                    .font(egui::TextStyle::Monospace),
-                                                            );
-                                                        },
-                                                    );
-                                                },
-                                            );
-                                        });
+                            let n = req.listeners.len();
+                            pc::list_box(ui, n, 40.0, |ui, i| {
+                                let l = &mut req.listeners[i];
+                                kit::check(ui, &mut l.enabled, tr("Listen to this event"))
+                                    .on_hover_text(tr("Listen to this event"));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add_space(8.0);
+                                    if kit::icon_button_sm(ui, icons::TRASH, tr("Remove event")).clicked() {
+                                        remove = Some(i);
                                     }
+                                    pc::row_input(ui, &mut l.event, tr("event name"), ui.available_width(), true);
                                 });
+                            });
                         }
                         if let Some(i) = remove {
                             req.listeners.remove(i);
                         }
-                        ui.add_space(6.0);
                         if kit::ghost(ui, Some(icons::PLUS), tr("Add event")).clicked() {
                             req.listeners.push(SocketIoListener { event: "message".into(), enabled: true });
                         }
                     });
                 }
                 Section::Saved => {
-                    egui::ScrollArea::vertical().id_salt("sio-saved").show(ui, |ui| {
+                    pc::toolbar(
+                        ui,
+                        |ui| pc::toolbar_title(ui, tr("Saved messages"), Some(req.messages.len())),
+                        |ui| {
+                            ui.label(kit::hint(ui, tr("Stored with the request")));
+                        },
+                    );
+                    pc::body(ui, "sio-saved", 0.0, 14.0, |ui| {
                         if req.messages.is_empty() {
-                            kit::empty_state(
+                            ui.label(kit::hint(
                                 ui,
-                                icons::BOOKMARK_SIMPLE,
-                                tr("No saved messages"),
                                 tr("Save events from the Emit section to reuse them; they are stored with the request."),
-                                |_| {},
-                            );
+                            ));
                         } else {
                             let p = theme::pal(ui);
-                            let acted = pc::saved_list(ui, "sio-saved-list", &mut req.messages, connected, tr("Emit now"), |ui, m| {
-                                pc::name_field(ui, &mut m.name, 140.0);
-                                kit::pill(ui, &crate::dialogs::ellipsize(&m.event, 30), p.text_muted);
-                                if m.ack {
-                                    ui.label(RichText::new(tr("ack")).small().color(p.text_muted));
-                                }
-                                let summary = args_summary(&m.argument_list());
-                                ui.add(egui::Label::new(RichText::new(summary).monospace().color(p.text_muted)).truncate());
-                            });
+                            let acted = pc::saved_list(
+                                ui,
+                                "sio-saved-list",
+                                &mut req.messages,
+                                connected,
+                                tr("Emit now"),
+                                |ui, m| {
+                                    pc::name_field(ui, &mut m.name, 120.0);
+                                    pc::mono_tag(ui, &m.event, 140.0);
+                                    if m.ack {
+                                        ui.label(RichText::new(tr("ack")).size(11.0).color(p.text_faint));
+                                    }
+                                    pc::row_summary(ui, &args_summary(&m.argument_list()));
+                                },
+                            );
                             match acted {
                                 Some((i, RowAction::Use)) => {
                                     let m = req.messages[i].clone();
                                     *args = m.argument_list();
                                     *event = m.event;
                                     *ack = m.ack;
-                                    *section = Section::Emit;
+                                    tab.section = Section::Emit;
                                 }
                                 Some((i, RowAction::Send)) => {
                                     let m = &req.messages[i];
@@ -413,12 +379,11 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
                                 None => {}
                             }
                         }
-                        ui.add_space(12.0);
                         crate::ws_tab::runner_section(ui, "sio", &mut req.runner, tr("event name"));
                     });
                 }
                 Section::Headers => {
-                    egui::ScrollArea::vertical().id_salt("sio-headers").show(ui, |ui| {
+                    pc::body(ui, "sio-headers", 0.0, 0.0, |ui| {
                         let mut h = req.headers.clone();
                         let opts = KvOptions {
                             title: Some(tr("Headers")),
@@ -431,7 +396,7 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
                         if widgets::kv_table(ui, "sio-headers", &mut h, &vars, opts) {
                             req.headers = h;
                         }
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                         let mut p = req.params.clone();
                         let opts = KvOptions {
                             title: Some(tr("Query parameters")),
@@ -445,98 +410,161 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut SioTab
                         }
                     });
                 }
-                Section::Scripts => crate::proto_common::scripts_ui(
+                Section::Scripts => pc::scripts_ui(
                     ui,
                     scripts,
                     &[(ScriptEvent::PreRequest, "Before connect"), (ScriptEvent::OnMessage, "On message")],
-                    scripts_state,
+                    &mut tab.scripts,
                     &vars,
                 ),
                 Section::Settings => {
-                    egui::ScrollArea::vertical().id_salt("sio-settings").show(ui, |ui| {
-                        pc::form_grid("sio-settings").show(ui, |ui| {
-                            pc::form_label(ui, tr("Transport"));
-                            ui.push_id("transport", |ui| {
-                                kit::segmented(
-                                    ui,
-                                    &mut req.transport,
-                                    &[
-                                        (SocketIoTransport::Auto, tr("Auto")),
-                                        (SocketIoTransport::WebSocket, "WebSocket"),
-                                        (SocketIoTransport::Polling, tr("Polling")),
-                                    ],
-                                )
+                    pc::toolbar(ui, |ui| pc::toolbar_title(ui, tr("Connection"), None), |_| {});
+                    pc::body(ui, "sio-settings", 0.0, 14.0, |ui| {
+                        kit::group(ui, "", "", |ui, rows| {
+                            rows.row(
+                                ui,
+                                tr("Transport"),
+                                tr("Auto: long-polling first, then upgrade to WebSocket, like the official client"),
+                                |ui| {
+                                    ui.push_id("transport", |ui| {
+                                        kit::segmented_ex(
+                                            ui,
+                                            &mut req.transport,
+                                            &[
+                                                (SocketIoTransport::Auto, None, tr("Auto")),
+                                                (SocketIoTransport::WebSocket, None, "WebSocket"),
+                                                (SocketIoTransport::Polling, None, tr("Polling")),
+                                            ],
+                                            true,
+                                        )
+                                    });
+                                },
+                            );
+                            rows.row(ui, tr("Server version"), "", |ui| {
+                                ui.push_id("version", |ui| {
+                                    kit::segmented_ex(
+                                        ui,
+                                        &mut req.version,
+                                        &[(SocketIoVersion::V4, None, "v3 / v4"), (SocketIoVersion::V2, None, "v2")],
+                                        true,
+                                    )
+                                });
                             });
-                            ui.end_row();
-                            ui.label("");
+                            rows.row(ui, tr("Handshake path"), "", |ui| {
+                                pc::input_sm(ui, &mut req.path, "/socket.io/", 150.0, true);
+                            });
+                            rows.row(ui, tr("Verify SSL certificates"), tr("For https:// servers"), |ui| {
+                                let mut v = req.verify_ssl.unwrap_or(true);
+                                if kit::check(ui, &mut v, tr("Verify SSL certificates")).changed() {
+                                    req.verify_ssl = Some(v);
+                                }
+                            });
+                        });
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            ui.label(kit::section_title(tr("Handshake auth")));
                             ui.label(kit::hint(
                                 ui,
-                                tr("Auto: long-polling first, then upgrade to WebSocket, like the official client"),
+                                tr("A JSON object sent with the connection (socket.handshake.auth)."),
                             ));
-                            ui.end_row();
-                            pc::form_label(ui, tr("Server version"));
-                            ui.push_id("version", |ui| {
-                                kit::segmented(
-                                    ui,
-                                    &mut req.version,
-                                    &[(SocketIoVersion::V4, "v3 / v4"), (SocketIoVersion::V2, "v2")],
-                                )
-                            });
-                            ui.end_row();
-                            pc::form_label(ui, tr("Handshake path"));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut req.path)
-                                    .hint_text("/socket.io/")
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_width(240.0),
+                            let margin = egui::Margin::ZERO;
+                            let r = pc::editor_well(
+                                ui,
+                                "sio-auth",
+                                &mut req.auth_payload,
+                                Lang::Json,
+                                Some(&vars),
+                                margin,
+                                Some(70.0),
+                                None,
                             );
-                            ui.end_row();
-                            pc::form_label(ui, tr("Verify SSL certificates"));
-                            let mut v = req.verify_ssl.unwrap_or(true);
-                            if ui.checkbox(&mut v, tr("For https:// servers")).changed() {
-                                req.verify_ssl = Some(v);
-                            }
-                            ui.end_row();
+                            pc::well_placeholder(ui, &r, &req.auth_payload, "{ \"token\": \"…\" }");
                         });
-                        ui.add_space(14.0);
-                        pc::section(
-                            ui,
-                            tr("Handshake auth"),
-                            Some(tr("A JSON object sent with the connection (socket.handshake.auth).")),
-                        );
-                        widgets::code_editor(ui, "sio-auth", &mut req.auth_payload, Lang::Json, Some(&vars), 3, false);
-                        ui.add_space(14.0);
-                        pc::section(ui, tr("Authorization"), None);
-                        crate::auth_ui::auth_editor(
-                            ui,
-                            &mut req.auth,
-                            crate::auth_ui::AuthUiCtx {
-                                is_root: false,
-                                inherited: None,
-                                owner_id: &item_id,
-                                token: None,
-                                fetching: false,
-                                vars: &vars,
-                            },
-                        );
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            ui.label(kit::section_title(tr("Authorization")));
+                            crate::auth_ui::auth_editor(
+                                ui,
+                                &mut req.auth,
+                                crate::auth_ui::AuthUiCtx {
+                                    is_root: false,
+                                    inherited: inherited.clone(),
+                                    owner_id: &item_id,
+                                    token: None,
+                                    fetching: false,
+                                    vars: &vars,
+                                },
+                            );
+                        });
                     });
                 }
-            },
-            |ui| log.ui(ui, ("sio-log", tab_id)),
-        );
-    }
-    match tab.auto.as_deref() {
-        Some("connect") => {
-            if tab.session.is_none() {
-                action = Some(ConnAction::Connect);
             }
-            tab.auto = None;
-        }
-        Some("emit") if tab.connected => {
-            emit_now = Some((tab.event.clone(), tab.args.clone(), tab.ack));
-            tab.auto = None;
-        }
-        _ => {}
+        },
+        |ui| {
+            pc::status_row(
+                ui,
+                |ui| {
+                    let text = pc::conn_text(ui, state, since);
+                    pc::status_pill(ui, state, &text);
+                    let (sent, received) = tab.log.counts();
+                    pc::metrics(ui, |ui| {
+                        if let Some(sid) = tab.sid.as_deref().filter(|_| connected) {
+                            let short: String = sid.chars().take(6).collect();
+                            kit::metric(ui, icons::FINGERPRINT, &format!("sid {short}"))
+                                .on_hover_text(format!("{}: {sid}", tr("Session id")));
+                        }
+                        if connected || sent + received > 0 {
+                            kit::metric(ui, icons::ARROW_UP, &trf("{} sent", &[&sent]));
+                            kit::metric(ui, icons::ARROW_DOWN, &trf("{} received", &[&received]));
+                        }
+                    });
+                },
+                |ui| pc::pane_actions(ui, panes),
+            );
+            tab.log.bar(ui, ("sio-log", tab_id));
+            if let (Some(e), Conn::Failed) = (&tab.error, state) {
+                let (r, dismiss) = pc::connection_error(ui, tr("Could not connect"), e);
+                retry = r;
+                if dismiss {
+                    tab.error = None;
+                }
+            }
+            if !pending.is_empty() {
+                egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 0 }).show(
+                    ui,
+                    |ui| {
+                        pc::notice_card_ex(
+                            ui,
+                            icons::HOURGLASS,
+                            tr("The server is waiting for acknowledgements"),
+                            |ui| {
+                                kit::tone_pill(ui, &pending.len().to_string(), kit::Tone::Accent);
+                            },
+                            |ui| {
+                                for a in &pending {
+                                    ui.push_id(("sio-ack", a.id), |ui| {
+                                        let reply = tab
+                                            .ack_replies
+                                            .entry(a.id)
+                                            .or_insert_with(|| SocketIoArg::new(SocketIoArgKind::Json, "[]"));
+                                        if ack_row(ui, a.id, &a.event, reply) {
+                                            send_ack = Some(a.id);
+                                        }
+                                    });
+                                }
+                            },
+                        );
+                    },
+                );
+            }
+            tab.log.body(ui, ("sio-log", tab_id));
+        },
+    );
+    if retry {
+        action = Some(ConnAction::Connect);
+    }
+    if let Some(id) = send_ack {
+        answer_ack(app, tab, id, collection.as_deref());
     }
     if let Some(e) = emit_now {
         emit(app, tab, collection.as_deref(), e);
@@ -654,27 +682,60 @@ fn kind_label(kind: SocketIoArgKind) -> &'static str {
     }
 }
 
+/// The kind of an acknowledgement reply, as a small select box.
 fn kind_combo(ui: &mut Ui, kind: &mut SocketIoArgKind) -> egui::Response {
-    let r = egui::ComboBox::from_id_salt("kind")
-        .icon(crate::kit::combo_caret)
-        .width(90.0)
-        .selected_text(kind_label(*kind))
-        .show_ui(ui, |ui| {
-            for k in KINDS {
-                ui.selectable_value(kind, k, kind_label(k));
-            }
-        })
-        .response;
+    let r = kit::select_box(ui, None, kind_label(*kind), 84.0, true);
     widgets::a11y_name(&r, tr("Type"));
+    egui::Popup::menu(&r).width(120.0).show(|ui| {
+        for k in KINDS {
+            let item = kit::MenuItem { checked: Some(*kind == k), label: kind_label(k), ..Default::default() };
+            if kit::menu_item_ex(ui, item).clicked() {
+                *kind = k;
+            }
+        }
+    });
     r
 }
 
 fn choose_file(ui: &mut Ui, path: &mut String) {
-    if kit::secondary(ui, Some(icons::FOLDER_OPEN), tr("Choose file…")).clicked()
+    let opts = kit::ButtonOpts { icon: Some(icons::FILE_ARROW_UP), ..Default::default() };
+    if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Choose file…"), opts).clicked()
         && let Some(p) = rfd::FileDialog::new().pick_file()
     {
         *path = p.display().to_string();
     }
+}
+
+/// One server acknowledgement waiting for a reply: its id and event, the
+/// kind and text of the reply, and Send ack. Returns true when sent.
+fn ack_row(ui: &mut Ui, id: u64, event: &str, reply: &mut SocketIoArg) -> bool {
+    let mut send = false;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 26.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let opts = kit::ButtonOpts { icon: Some(icons::CHECK), ..Default::default() };
+            if kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Send ack"), opts).clicked() {
+                send = true;
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                pc::mono_tag(ui, &format!("#{id}"), 80.0);
+                ui.label(RichText::new(event).font(theme::mono(12.0)).strong());
+                let tip = match reply.kind {
+                    SocketIoArgKind::Json => tr("Arguments as a JSON array, a single JSON value, or plain text."),
+                    _ => tr("Sent as one argument"),
+                };
+                kind_combo(ui, &mut reply.kind).on_hover_text(tip);
+                if reply.kind == SocketIoArgKind::File {
+                    choose_file(ui, &mut reply.value);
+                }
+                pc::input_sm(ui, &mut reply.value, "[]", ui.available_width(), true);
+            });
+        },
+    );
+    send
 }
 
 /// What is wrong with an argument as typed; values with variables are
@@ -694,77 +755,113 @@ fn arg_problem(a: &SocketIoArg) -> Option<&'static str> {
     }
 }
 
-/// The emit arguments, one card each with its kind.
-fn args_editor(ui: &mut Ui, args: &mut Vec<SocketIoArg>, vars: &VarCtx) {
+/// The emit arguments: a numbered card each (`.argc`) with its kind.
+fn args_editor(ui: &mut Ui, args: &mut Vec<SocketIoArg>, vars: &VarCtx, root: &std::path::Path) {
     let p = theme::pal(ui);
     ui.horizontal(|ui| {
+        ui.set_height(24.0);
         ui.label(kit::section_title(tr("Arguments")));
         if !args.is_empty() {
-            pc::count_badge(ui, args.len());
+            kit::tone_pill(ui, &args.len().to_string(), kit::Tone::Neutral);
         }
-        ui.label(kit::hint(ui, tr("JSON, text or binary (an attachment, a Buffer on the server).")));
+        ui.add(
+            egui::Label::new(kit::hint(ui, tr("JSON, text or binary (an attachment, a Buffer on the server).")))
+                .truncate(),
+        );
     });
-    ui.add_space(4.0);
     let mut remove = None;
     for (i, a) in args.iter_mut().enumerate() {
         ui.push_id(("sio-arg", i), |ui| {
             egui::Frame::new()
+                .fill(p.surface)
                 .stroke(egui::Stroke::new(1.0, p.border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::same(8))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_CARD))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 11.0, p.subtle);
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            (i + 1).to_string(),
-                            theme::medium(11.5),
-                            p.text_muted,
-                        );
-                        let items: Vec<(SocketIoArgKind, &str)> = KINDS.iter().map(|k| (*k, kind_label(*k))).collect();
-                        kit::segmented(ui, &mut a.kind, &items);
-                        if let Some(problem) = arg_problem(a) {
-                            kit::pill(ui, &format!("{} {problem}", icons::WARNING_CIRCLE), p.err);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if kit::icon_button(ui, icons::TRASH, tr("Remove argument")).clicked() {
-                                remove = Some(i);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    // Header: number, kind, problem and Remove on the well fill.
+                    let w = ui.available_width();
+                    let (head, _) = ui.allocate_exact_size(egui::vec2(w, 36.0), egui::Sense::hover());
+                    let r = egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+                    ui.painter().rect_filled(head, r, p.well);
+                    ui.painter().hline(head.x_range(), head.bottom() - 0.5, egui::Stroke::new(1.0, p.border));
+                    let inner =
+                        egui::Rect::from_min_max(head.min + egui::vec2(10.0, 0.0), head.max - egui::vec2(8.0, 0.0));
+                    pc::inside(
+                        ui,
+                        egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            let (c, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                            ui.painter().circle_filled(c.center(), 10.0, p.subtle);
+                            ui.painter().text(
+                                c.center(),
+                                egui::Align2::CENTER_CENTER,
+                                (i + 1).to_string(),
+                                theme::semibold(11.0),
+                                p.text_muted,
+                            );
+                            let items: Vec<(SocketIoArgKind, Option<&str>, &str)> =
+                                KINDS.iter().map(|k| (*k, None, kind_label(*k))).collect();
+                            kit::segmented_ex(ui, &mut a.kind, &items, true);
+                            if let Some(problem) = arg_problem(a) {
+                                kit::pill_ex(
+                                    ui,
+                                    problem,
+                                    kit::Tone::Err,
+                                    kit::PillOpts { icon: Some(icons::WARNING_CIRCLE), ..Default::default() },
+                                );
                             }
-                        });
-                    });
-                    ui.add_space(4.0);
-                    let width = ui.available_width();
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if kit::icon_button_sm(ui, icons::TRASH, tr("Remove argument")).clicked() {
+                                    remove = Some(i);
+                                }
+                            });
+                        },
+                    );
                     match a.kind {
-                        SocketIoArgKind::Json => {
-                            widgets::code_editor(ui, "value", &mut a.value, Lang::Json, Some(vars), 2, false);
-                        }
-                        SocketIoArgKind::Text => {
-                            widgets::code_editor(ui, "value", &mut a.value, Lang::Text, Some(vars), 2, false);
+                        SocketIoArgKind::Json | SocketIoArgKind::Text => {
+                            let lang = if a.kind == SocketIoArgKind::Json { Lang::Json } else { Lang::Text };
+                            egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 6)).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                pc::plain_editor(ui, "value", &mut a.value, lang, Some(vars), 2);
+                            });
                         }
                         SocketIoArgKind::Binary => {
-                            widgets::var_line(
-                                ui,
-                                "value",
-                                &mut a.value,
-                                vars,
-                                tr("hex or base64, e.g. 01 02 ff or AQL/"),
-                                width,
-                            );
+                            egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                                let w = ui.available_width();
+                                pc::var_input_sm(
+                                    ui,
+                                    "value",
+                                    &mut a.value,
+                                    vars,
+                                    tr("hex or base64, e.g. 01 02 ff or AQL/"),
+                                    w,
+                                );
+                            });
                         }
                         SocketIoArgKind::File => {
-                            ui.horizontal(|ui| {
-                                choose_file(ui, &mut a.value);
-                                let hint = tr("File path (absolute or relative to the workspace folder)");
-                                widgets::var_line(ui, "value", &mut a.value, vars, hint, ui.available_width());
+                            egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    choose_file(ui, &mut a.value);
+                                    let size = (!a.value.trim().is_empty() && !a.value.contains("{{"))
+                                        .then(|| std::fs::metadata(root.join(a.value.trim())).ok())
+                                        .flatten()
+                                        .map(|m| ternarywire_core::util::human_bytes(m.len()));
+                                    let size_w = if size.is_some() { 60.0 } else { 0.0 };
+                                    let hint = tr("File path (absolute or relative to the workspace folder)");
+                                    let w = (ui.available_width() - size_w).max(80.0);
+                                    pc::var_input_sm(ui, "value", &mut a.value, vars, hint, w);
+                                    if let Some(s) = size {
+                                        ui.label(RichText::new(s).size(11.0).color(p.text_faint));
+                                    }
+                                });
                             });
                         }
                     }
                 });
         });
-        ui.add_space(6.0);
     }
     if let Some(i) = remove {
         args.remove(i);

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use egui::{RichText, Ui};
+use egui::{Color32, FontId, Rect, RichText, Sense, Stroke, Ui, pos2};
 
 use ternarywire_core::model::{Collection, Folder, HttpRequest, Id, Item, RequestItem, RequestKind, WsRequest};
 use ternarywire_core::storage::Workspace;
@@ -11,9 +11,9 @@ use ternarywire_core::storage::Workspace;
 use crate::app::{ItemRef, SidebarTab, TabKind, TernaryWireApp};
 use crate::dialogs::Dialog;
 use crate::i18n::{tr, trf};
-use crate::request_tab::RequestTab;
+
 use crate::widgets;
-use crate::{icons, kit};
+use crate::{icons, kit, theme};
 
 #[derive(Default)]
 pub struct SidebarState {
@@ -27,6 +27,10 @@ pub struct SidebarState {
     pub flows_dirty: bool,
     /// Scrolls the tree to this offset in the next frame (automation).
     pub scroll_to: Option<f32>,
+    /// The row whose hover actions stay up while their menu is open.
+    pub actions_open: Option<Id>,
+    /// History entry each tab was opened from (tab id → entry id), to mark it in History.
+    pub history_tabs: std::collections::HashMap<u64, Id>,
 }
 
 impl SidebarState {
@@ -98,55 +102,271 @@ fn matches_filter(item: &Item, q: &str) -> bool {
 }
 
 pub fn show(app: &mut TernaryWireApp, ui: &mut Ui) {
+    let p = crate::theme::pal(ui);
     let title = match app.sidebar_tab {
         SidebarTab::Collections => tr("Collections"),
         SidebarTab::Environments => tr("Environments"),
         SidebarTab::History => tr("History"),
-        SidebarTab::Apis => tr("APIs"),
+        SidebarTab::Apis => tr("API specs"),
         SidebarTab::Flows => tr("Flows"),
+        SidebarTab::Servers => tr("Local servers"),
     };
-    ui.horizontal(|ui| {
-        ui.set_height(28.0);
-        ui.label(RichText::new(title).font(crate::theme::semibold(14.0)));
+    ui.spacing_mut().item_spacing.y = 0.0;
+    // A 34 px header: the section's title, then its actions (small icon buttons).
+    kit::bar_ex(ui, 34.0, 0.0, false, |ui| {
+        ui.add_space(8.0);
+        ui.label(RichText::new(title).font(crate::theme::semibold(13.0)).color(p.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.add_space(2.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
             match app.sidebar_tab {
                 SidebarTab::Collections => {
-                    if kit::icon_button(ui, icons::DOWNLOAD_SIMPLE, tr("Import")).clicked() {
+                    let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
+                    egui::Popup::menu(&more).show(|ui| {
+                        ui.set_min_width(200.0);
+                        if kit::menu_item(ui, Some(icons::ARROWS_OUT_LINE_VERTICAL), tr("Expand all"), None).clicked() {
+                            expand_all(&app.ws.data, &mut app.sidebar);
+                        }
+                        if kit::menu_item(ui, Some(icons::ARROWS_IN_LINE_VERTICAL), tr("Collapse all"), None).clicked()
+                        {
+                            app.sidebar.expanded.clear();
+                        }
+                    });
+                    if kit::icon_button_sm(ui, icons::DOWNLOAD_SIMPLE, tr("Import")).clicked() {
                         app.dialog = Some(Dialog::import());
                     }
-                    if kit::icon_button(ui, icons::PLUS, tr("New Collection")).clicked() {
+                    if kit::icon_button_sm(ui, icons::PLUS, tr("New Collection")).clicked() {
                         app.dialog = Some(Dialog::prompt_new_collection());
                     }
                 }
                 SidebarTab::Environments => {
-                    if kit::icon_button(ui, icons::PLUS, tr("New Environment")).clicked() {
+                    if kit::icon_button_sm(ui, icons::PLUS, tr("New Environment")).clicked() {
                         app.dialog = Some(Dialog::prompt_new_environment());
                     }
                 }
                 SidebarTab::History => {
-                    if !app.ws.history.is_empty() && kit::icon_button(ui, icons::BROOM, tr("Clear")).clicked() {
+                    if !app.ws.history.is_empty()
+                        && kit::icon_button_sm(ui, icons::BROOM, tr("Clear history")).clicked()
+                    {
                         app.ws.clear_history();
                     }
                 }
-                SidebarTab::Apis | SidebarTab::Flows => {}
+                SidebarTab::Apis => crate::spec_tab::sidebar_actions(app, ui),
+                SidebarTab::Flows => crate::flow_tab::sidebar_actions(app, ui),
+                SidebarTab::Servers => {
+                    let add = kit::icon_button_sm(ui, icons::PLUS, tr("New server"));
+                    egui::Popup::menu(&add).show(|ui| new_server_menu(app, ui));
+                }
             }
         });
     });
-    ui.add_space(4.0);
     match app.sidebar_tab {
         SidebarTab::Collections => collections(app, ui),
         SidebarTab::Environments => crate::env_tab::sidebar_list(app, ui),
         SidebarTab::History => history(app, ui),
         SidebarTab::Apis => crate::spec_tab::sidebar_list(app, ui),
         SidebarTab::Flows => crate::flow_tab::sidebar_list(app, ui),
+        SidebarTab::Servers => servers(app, ui),
     }
 }
 
-/// The expand/collapse caret of a tree row.
-fn caret(ui: &mut Ui, open: bool, name: &str) -> egui::Response {
-    let icon = if open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
-    kit::icon_button_ex(ui, icon, &format!("{} {name}", if open { tr("Collapse") } else { tr("Expand") }), false, 18.0)
+/// The sidebar's search field: small, full width, 4 px above and 8 below.
+fn sidebar_search(ui: &mut Ui, id: &str, text: &mut String, hint: &str) -> egui::Response {
+    ui.add_space(4.0);
+    let r = kit::search_field_sm(ui, id, text, hint, ui.available_width());
+    ui.add_space(8.0);
+    r
+}
+
+/// Height [`sidebar_footer`] takes for `text` in a sidebar `width` wide.
+pub fn sidebar_footer_height(ui: &Ui, text: &str, width: f32) -> f32 {
+    let g = ui.painter().layout(text.to_string(), FontId::proportional(11.5), Color32::PLACEHOLDER, width - 12.0);
+    9.0 + g.size().y
+}
+
+/// The hint at the bottom of a sidebar (the prototype's `.sb-foot`): a
+/// hairline, then faint 11.5 text, pinned to the bottom of the space left.
+pub fn sidebar_footer(ui: &mut Ui, text: &str) {
+    let p = theme::pal(ui);
+    let rect = ui.available_rect_before_wrap();
+    let h = sidebar_footer_height(ui, text, rect.width());
+    let top = (rect.bottom() - h).max(rect.top());
+    let g = ui.painter().layout(text.to_string(), FontId::proportional(11.5), p.text_faint, rect.width() - 12.0);
+    ui.painter().hline(rect.x_range(), top + 0.5, Stroke::new(1.0, p.border));
+    ui.painter().galley(pos2(rect.left() + 6.0, top + 9.0), g, p.text_faint);
+    ui.allocate_rect(Rect::from_min_max(pos2(rect.left(), rect.top()), rect.max), Sense::hover());
+}
+
+fn expand_all(data: &Workspace, state: &mut SidebarState) {
+    fn walk(items: &[Item], state: &mut SidebarState) {
+        for i in items {
+            if let Item::Folder(f) = i {
+                state.expanded.insert(f.id.clone());
+                walk(&f.items, state);
+            }
+        }
+    }
+    for c in &data.collections {
+        state.expanded.insert(c.id.clone());
+        walk(&c.items, state);
+    }
+}
+
+fn count_requests(items: &[Item]) -> usize {
+    items
+        .iter()
+        .map(|i| match i {
+            Item::Folder(f) => count_requests(&f.items),
+            Item::Request(_) => 1,
+        })
+        .sum()
+}
+
+/// The "+" menu of Local servers.
+fn new_server_menu(app: &mut TernaryWireApp, ui: &mut Ui) {
+    ui.set_min_width(230.0);
+    let mock = kit::menu_item_ex(
+        ui,
+        kit::MenuItem { icon: Some(icons::CUBE), label: tr("Mock server…"), submenu: true, ..Default::default() },
+    );
+    let collections: Vec<(Id, String)> =
+        app.ws.data.collections.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
+    egui::Popup::menu(&mock).show(|ui| {
+        ui.set_min_width(200.0);
+        if collections.is_empty() {
+            ui.label(kit::hint(ui, tr("No collections yet")));
+        }
+        for (id, name) in &collections {
+            if kit::menu_item(ui, Some(icons::STACK), name, None).clicked() {
+                app.open_mock(id.clone());
+            }
+        }
+    });
+    if kit::menu_item(ui, Some(icons::WEBHOOKS_LOGO), tr("Webhook listener"), None).clicked() {
+        app.create_new(crate::app::NewItem::Webhook);
+    }
+    if kit::menu_item(ui, Some(icons::BROADCAST), tr("Capture traffic (proxy)"), None).clicked() {
+        app.create_new(crate::app::NewItem::Capture);
+    }
+}
+
+/// Local servers: the open mock, webhook and capture tabs, grouped, with
+/// their state; a click shows the tab.
+fn servers(app: &mut TernaryWireApp, ui: &mut Ui) {
+    let p = crate::theme::pal(ui);
+    ui.add_space(4.0);
+    #[derive(Clone)]
+    struct Srv {
+        idx: usize,
+        icon: &'static str,
+        name: String,
+        state: Option<String>,
+        tone: kit::Tone,
+        tip: String,
+    }
+    let mut groups: [(&str, Vec<Srv>); 3] =
+        [(tr("Mock servers"), vec![]), (tr("Webhook listeners"), vec![]), (tr("Capture proxy"), vec![])];
+    for (idx, t) in app.tabs.iter().enumerate() {
+        let port = |a: Option<std::net::SocketAddr>| a.map(|a| format!(":{}", a.port()));
+        match &t.kind {
+            TabKind::Mock(m) => {
+                let name = app.ws.data.collection(&m.collection).map(|c| c.name.clone()).unwrap_or_default();
+                let addr = m.address();
+                groups[0].1.push(Srv {
+                    idx,
+                    icon: icons::CUBE,
+                    name,
+                    state: port(addr),
+                    tone: kit::Tone::Ok,
+                    tip: addr.map(|a| format!("http://{a}")).unwrap_or_default(),
+                });
+            }
+            TabKind::Webhook(w) => {
+                let addr = w.address();
+                let n = w.request_count();
+                groups[1].1.push(Srv {
+                    idx,
+                    icon: icons::WEBHOOKS_LOGO,
+                    name: tr("Webhook listener").to_string(),
+                    state: port(addr).map(|s| if n > 0 { format!("{s} · {n}") } else { s }),
+                    tone: kit::Tone::Ok,
+                    tip: addr.map(|a| format!("http://{a}")).unwrap_or_default(),
+                });
+            }
+            TabKind::Capture(c) => {
+                let addr = c.address();
+                groups[2].1.push(Srv {
+                    idx,
+                    icon: icons::BROADCAST,
+                    name: tr("Capture traffic").to_string(),
+                    state: port(addr),
+                    tone: if c.is_paused() { kit::Tone::Warn } else { kit::Tone::Ok },
+                    tip: addr.map(|a| a.to_string()).unwrap_or_default(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if groups.iter().all(|g| g.1.is_empty()) {
+        kit::empty_state(
+            ui,
+            icons::BROADCAST,
+            tr("No local servers"),
+            tr("Start a mock server, a webhook listener or a capture proxy; they show here while their tab is open."),
+            |ui| {
+                ui.vertical_centered(|ui| {
+                    if kit::secondary(ui, Some(icons::WEBHOOKS_LOGO), tr("Webhook listener")).clicked() {
+                        app.create_new(crate::app::NewItem::Webhook);
+                    }
+                    ui.add_space(6.0);
+                    if kit::secondary(ui, Some(icons::BROADCAST), tr("Capture traffic")).clicked() {
+                        app.create_new(crate::app::NewItem::Capture);
+                    }
+                });
+            },
+        );
+        return;
+    }
+    let mut activate = None;
+    let foot = tr("Servers run on this machine only. Stopped servers keep their settings.");
+    let list_h = (ui.available_height() - sidebar_footer_height(ui, foot, ui.available_width())).max(40.0);
+    egui::ScrollArea::vertical().id_salt("servers").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+        for (title, rows) in &groups {
+            if rows.is_empty() {
+                continue;
+            }
+            kit::sidebar_group(ui, title);
+            for s in rows {
+                let stopped = tr("stopped");
+                let (r, _) = kit::tree_row(
+                    ui,
+                    kit::TreeRow {
+                        pad_left: 4.0,
+                        icon: Some(s.icon),
+                        label: &s.name,
+                        selected: s.idx == app.active,
+                        meta: s.state.is_none().then_some(stopped),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if let Some(st) = &s.state {
+                            kit::pill_ex(ui, st, s.tone, kit::PillOpts { dot: true, live: true, ..Default::default() });
+                        }
+                    },
+                );
+                let r = if s.tip.is_empty() { r } else { r.on_hover_text(&s.tip) };
+                widgets::a11y_button(&r, &s.name);
+                if r.clicked() {
+                    activate = Some(s.idx);
+                }
+            }
+        }
+    });
+    if let Some(i) = activate {
+        app.active = i;
+    }
+    let _ = p;
+    sidebar_footer(ui, foot);
 }
 
 fn active_ref(app: &TernaryWireApp) -> Option<ItemRef> {
@@ -155,16 +375,14 @@ fn active_ref(app: &TernaryWireApp) -> Option<ItemRef> {
 
 fn collections(app: &mut TernaryWireApp, ui: &mut Ui) {
     let mut acts: Vec<Act> = Vec::new();
-    let r = kit::search_field(ui, "tree-search", &mut app.sidebar.filter, tr("Filter requests"), ui.available_width());
+    let r = sidebar_search(ui, "tree-search", &mut app.sidebar.filter, tr("Filter requests"));
     widgets::a11y_name(&r, tr("Search requests"));
     if app.sidebar.focus_search {
         r.request_focus();
         app.sidebar.focus_search = false;
     }
-    ui.add_space(6.0);
     let active = active_ref(app);
     let filter = app.sidebar.filter.to_lowercase();
-    let dark = ui.visuals().dark_mode;
     if app.ws.data.collections.is_empty() {
         kit::empty_state(
             ui,
@@ -194,66 +412,36 @@ fn collections(app: &mut TernaryWireApp, ui: &mut Ui) {
     // same per frame as a small one.
     let rows = flatten(data, state, &filter);
     const ROW: f32 = 28.0;
-    let p = crate::theme::pal(ui);
     let mut area = egui::ScrollArea::vertical().id_salt("tree").auto_shrink([false; 2]);
     if let Some(y) = state.scroll_to.take() {
         area = area.vertical_scroll_offset(y);
     }
     kit::show_rows(area, ui, ROW, rows.len(), |ui, range| {
         for row in &rows[range] {
-            let bg = ui.painter().add(egui::Shape::Noop);
-            let line = ui.horizontal(|ui| {
-                ui.set_height(ROW);
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.add_space(4.0 + row.depth as f32 * 14.0);
-                match row.kind {
-                    RowKind::Collection => {
-                        let parent = fork_parents.get(row.collection.id.as_str()).map(String::as_str);
-                        collection_row(ui, state, row.collection, parent, row.open, &mut acts)
-                    }
-                    RowKind::Folder(f) => folder_row(ui, state, row.collection, f, row.open, &mut acts),
-                    RowKind::Request(r) => request_row(
-                        ui,
-                        state,
-                        row.collection,
-                        r,
-                        row.parent,
-                        row.index,
-                        active.as_ref(),
-                        dark,
-                        &mut acts,
-                    ),
-                    RowKind::Empty => {
-                        ui.add_space(18.0);
-                        ui.label(widgets::muted(ui, tr("Empty collection")));
+            match row.kind {
+                RowKind::Collection => {
+                    let parent = fork_parents.get(row.collection.id.as_str()).map(String::as_str);
+                    collection_row(ui, state, row, parent, &mut acts);
+                }
+                RowKind::Folder(f) => folder_row(ui, state, row, f, &mut acts),
+                RowKind::Request(r) => request_row(ui, state, row, r, active.as_ref(), &mut acts),
+                RowKind::Empty => {
+                    ui.horizontal(|ui| {
+                        ui.set_height(ROW);
+                        ui.add_space(4.0 + row.depth as f32 * 14.0 + 22.0);
+                        ui.label(kit::hint(ui, tr("Empty collection")));
                         if kit::ghost(ui, Some(icons::PLUS), tr("Add request")).clicked() {
                             acts.push(Act::NewRequest(row.collection.id.clone(), None));
                         }
-                    }
+                    });
                 }
-            });
-            // Row background (hover, open request) and indent guides.
-            let full = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), line.response.rect.y_range());
-            let is_active = matches!((row.kind, &active), (RowKind::Request(r), Some(a)) if a.item == r.id && a.collection == row.collection.id);
-            let fill = if is_active {
-                Some(p.accent_soft)
-            } else if ui.rect_contains_pointer(full) {
-                Some(p.hover)
-            } else {
-                None
-            };
-            if let Some(fill) = fill {
-                ui.painter().set(
-                    bg,
-                    egui::Shape::rect_filled(full.shrink2(egui::vec2(0.0, 1.0)), egui::CornerRadius::same(6), fill),
-                );
-            }
-            for d in 1..=row.depth {
-                let x = full.left() + 4.0 + (d as f32 - 1.0) * 14.0 + 9.0;
-                ui.painter().vline(x, full.y_range(), egui::Stroke::new(1.0, p.border));
             }
         }
     });
+    // Hover actions stay up while their menu is open.
+    if !egui::Popup::is_any_open(ui.ctx()) && !ui.input(|i| i.pointer.any_click()) {
+        state.actions_open = None;
+    }
     apply(app, acts);
 }
 
@@ -338,28 +526,69 @@ fn flatten<'a>(data: &'a Workspace, state: &SidebarState, filter: &str) -> Vec<R
     out
 }
 
+/// The inline rename field in place of a row.
+fn rename_row(ui: &mut Ui, depth: usize, state: &mut SidebarState, acts: &mut Vec<Act>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+    let field = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 4.0 + depth as f32 * 14.0 + 22.0, rect.top() + 2.0),
+        rect.max - egui::vec2(4.0, 2.0),
+    );
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field));
+    rename_field(&mut child, state, acts);
+}
+
+fn is_renaming(state: &SidebarState, id: &str) -> bool {
+    matches!(&state.renaming, Some((_, t, _)) if t == id)
+}
+
+/// Shows a row's hover actions in `rect` (right to left), keeping them up
+/// while their menu is open.
+fn row_actions(ui: &mut Ui, key: &str, rect: Option<egui::Rect>, add: impl FnOnce(&mut Ui) -> bool) -> bool {
+    let Some(rect) = rect else { return false };
+    // A child that doesn't move the list's cursor (the row is already allocated).
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .id_salt(("tree-actions", key))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = 2.0;
+    add(&mut child)
+}
+
 fn collection_row(
     ui: &mut Ui,
     state: &mut SidebarState,
-    c: &Collection,
+    row: &Row<'_>,
     fork_parent: Option<&str>,
-    open: bool,
     acts: &mut Vec<Act>,
 ) {
-    let a = caret(ui, open, &c.name);
-    if a.clicked() {
-        toggle(state, &c.id);
-    }
-    if matches!(&state.renaming, Some((_, t, _)) if t == &c.id) {
-        rename_field(ui, state, acts);
+    let c = row.collection;
+    if is_renaming(state, &c.id) {
+        rename_row(ui, row.depth, state, acts);
         return;
     }
-    ui.label(RichText::new(icons::STACK).font(crate::theme::icon_font(15.0)).color(crate::theme::pal(ui).text_muted));
-    let r = ui.add(
-        egui::Label::new(RichText::new(&c.name).font(crate::theme::medium(13.5)))
-            .sense(egui::Sense::click())
-            .selectable(false)
-            .truncate(),
+    let count = count_requests(&c.items);
+    let meta = if count > 0 { count.to_string() } else { String::new() };
+    let info = crate::theme::pal(ui).info;
+    let (r, actions) = kit::tree_row(
+        ui,
+        kit::TreeRow {
+            depth: row.depth,
+            caret: Some(row.open),
+            icon: Some(icons::STACK),
+            label: &c.name,
+            strong: true,
+            meta: (count > 0).then_some(meta.as_str()),
+            actions_width: 46.0,
+            force_actions: state.actions_open.as_deref() == Some(c.id.as_str()),
+            ..Default::default()
+        },
+        |ui| {
+            if let Some(p) = fork_parent {
+                kit::pill(ui, tr("fork"), info).on_hover_text(format!("{} {p}", tr("Forked from")));
+            }
+        },
     );
     widgets::a11y_button(&r, &format!("{} {}", tr("Collection"), c.name));
     if r.clicked() {
@@ -367,9 +596,6 @@ fn collection_row(
     }
     if r.double_clicked() {
         acts.push(Act::OpenContainer(c.id.clone(), None));
-    }
-    if let Some(p) = fork_parent {
-        kit::pill(ui, tr("fork"), crate::theme::pal(ui).info).on_hover_text(format!("{} {p}", tr("Forked from")));
     }
     // Dropping onto the collection header moves the item to the root.
     if let Some(p) = r.dnd_release_payload::<DragItem>() {
@@ -381,149 +607,203 @@ fn collection_row(
             index: usize::MAX,
         });
     }
-    r.context_menu(|ui| {
-        container_menu(ui, state, c, None, &c.name, acts);
-        ui.separator();
-        if ui.button(trf("{} (Postman v2.1)", &[&tr("Export")])).clicked() {
-            acts.push(Act::Export(c.id.clone(), ExportFormat::Postman));
-            ui.close();
-        }
-        if ui.button(trf("{} (OpenAPI 3)", &[&tr("Export")])).clicked() {
-            acts.push(Act::Export(c.id.clone(), ExportFormat::OpenApi));
-            ui.close();
-        }
-        if ui.button(tr("Preview documentation")).clicked() {
-            acts.push(Act::Docs(c.id.clone(), None));
-            ui.close();
-        }
-        if ui.button(tr("Export documentation (HTML)")).clicked() {
-            acts.push(Act::Docs(c.id.clone(), Some(false)));
-            ui.close();
-        }
-        if ui.button(tr("Export documentation (Markdown)")).clicked() {
-            acts.push(Act::Docs(c.id.clone(), Some(true)));
-            ui.close();
-        }
-        if ui.button(tr("Duplicate")).clicked() {
-            acts.push(Act::DuplicateCollection(c.id.clone()));
-            ui.close();
-        }
-        if ui.button(format!("{}…", tr("Fork"))).clicked() {
-            acts.push(Act::Fork(c.id.clone()));
-            ui.close();
-        }
-        if let Some(p) = fork_parent {
-            if ui.button(format!("{} “{p}”…", tr("Pull changes from"))).clicked() {
-                acts.push(Act::ForkSync(c.id.clone(), true));
-                ui.close();
-            }
-            if ui.button(format!("{} “{p}”…", tr("Merge into"))).clicked() {
-                acts.push(Act::ForkSync(c.id.clone(), false));
-                ui.close();
-            }
-        }
-        if ui.button(tr("Mock server")).clicked() {
-            acts.push(Act::Mock(c.id.clone()));
-            ui.close();
-        }
-    });
+    r.context_menu(|ui| collection_menu(ui, state, c, fork_parent, acts));
+    let key = c.id.clone();
+    if row_actions(ui, &key, actions, |ui| {
+        let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
+        egui::Popup::menu(&more).show(|ui| collection_menu(ui, state, c, fork_parent, acts));
+        let add = kit::icon_button_sm(ui, icons::PLUS, tr("Add request"));
+        egui::Popup::menu(&add).show(|ui| add_menu(ui, c, None, acts));
+        more.clicked() || add.clicked()
+    }) {
+        state.actions_open = Some(key);
+    }
 }
 
-fn folder_row(ui: &mut Ui, state: &mut SidebarState, c: &Collection, f: &Folder, open: bool, acts: &mut Vec<Act>) {
-    let a = caret(ui, open, &f.name);
-    let mut clicked = a.clicked();
-    if matches!(&state.renaming, Some((_, t, _)) if t == &f.id) {
-        rename_field(ui, state, acts);
+fn collection_menu(
+    ui: &mut Ui,
+    state: &mut SidebarState,
+    c: &Collection,
+    fork_parent: Option<&str>,
+    acts: &mut Vec<Act>,
+) {
+    ui.set_min_width(230.0);
+    container_menu(ui, state, c, None, &c.name, acts);
+    kit::menu_sep(ui);
+    if kit::menu_item(ui, Some(icons::EXPORT), &trf("{} (Postman v2.1)", &[&tr("Export")]), None).clicked() {
+        acts.push(Act::Export(c.id.clone(), ExportFormat::Postman));
+    }
+    if kit::menu_item(ui, Some(icons::EXPORT), &trf("{} (OpenAPI 3)", &[&tr("Export")]), None).clicked() {
+        acts.push(Act::Export(c.id.clone(), ExportFormat::OpenApi));
+    }
+    if kit::menu_item(ui, Some(icons::BOOK_OPEN), tr("Preview documentation"), None).clicked() {
+        acts.push(Act::Docs(c.id.clone(), None));
+    }
+    if kit::menu_item(ui, Some(icons::FILE_TEXT), tr("Export documentation (HTML)"), None).clicked() {
+        acts.push(Act::Docs(c.id.clone(), Some(false)));
+    }
+    if kit::menu_item(ui, Some(icons::FILE_TEXT), tr("Export documentation (Markdown)"), None).clicked() {
+        acts.push(Act::Docs(c.id.clone(), Some(true)));
+    }
+    if kit::menu_item(ui, Some(icons::COPY), tr("Duplicate"), None).clicked() {
+        acts.push(Act::DuplicateCollection(c.id.clone()));
+    }
+    if kit::menu_item(ui, Some(icons::GIT_FORK), &format!("{}…", tr("Fork")), None).clicked() {
+        acts.push(Act::Fork(c.id.clone()));
+    }
+    if let Some(p) = fork_parent {
+        if kit::menu_item(ui, Some(icons::ARROW_DOWN), &format!("{} “{p}”…", tr("Pull changes from")), None).clicked()
+        {
+            acts.push(Act::ForkSync(c.id.clone(), true));
+        }
+        if kit::menu_item(ui, Some(icons::GIT_MERGE), &format!("{} “{p}”…", tr("Merge into")), None).clicked() {
+            acts.push(Act::ForkSync(c.id.clone(), false));
+        }
+    }
+    if kit::menu_item(ui, Some(icons::CUBE), tr("Mock server"), None).clicked() {
+        acts.push(Act::Mock(c.id.clone()));
+    }
+}
+
+fn folder_row(ui: &mut Ui, state: &mut SidebarState, row: &Row<'_>, f: &Folder, acts: &mut Vec<Act>) {
+    let c = row.collection;
+    if is_renaming(state, &f.id) {
+        rename_row(ui, row.depth, state, acts);
         return;
     }
-    let drag_id = egui::Id::unique(("drag", &c.id, &f.id));
-    let payload = DragItem { collection: c.id.clone(), item: f.id.clone() };
-    let resp = ui
-        .dnd_drag_source(drag_id, payload, |ui| {
-            let icon = if open { icons::FOLDER_OPEN } else { icons::FOLDER_SIMPLE };
-            ui.label(RichText::new(icon).font(crate::theme::icon_font(15.0)).color(crate::theme::pal(ui).text_muted));
-            ui.add(egui::Label::new(&f.name).selectable(false).truncate());
-        })
-        .response;
-    let row = resp.interact(egui::Sense::click());
-    widgets::a11y_button(&row, &format!("{} {}", tr("Folder"), f.name));
-    clicked |= row.clicked();
-    if clicked {
+    let (r, actions) = kit::tree_row(
+        ui,
+        kit::TreeRow {
+            depth: row.depth,
+            caret: Some(row.open),
+            icon: Some(if row.open { icons::FOLDER_OPEN } else { icons::FOLDER_SIMPLE }),
+            label: &f.name,
+            actions_width: 46.0,
+            force_actions: state.actions_open.as_deref() == Some(f.id.as_str()),
+            ..Default::default()
+        },
+        |_| {},
+    );
+    widgets::a11y_button(&r, &format!("{} {}", tr("Folder"), f.name));
+    if r.drag_started() {
+        r.dnd_set_drag_payload(DragItem { collection: c.id.clone(), item: f.id.clone() });
+    }
+    if r.clicked() {
         toggle(state, &f.id);
     }
-    if row.double_clicked() {
+    if r.double_clicked() {
         acts.push(Act::OpenContainer(c.id.clone(), Some(f.id.clone())));
     }
-    drop_target(ui, &row, c, Some(&f.id), usize::MAX, acts, true);
-    row.context_menu(|ui| container_menu(ui, state, c, Some(f), &f.name, acts));
+    drop_target(ui, &r, c, Some(&f.id), usize::MAX, acts, true);
+    r.context_menu(|ui| {
+        ui.set_min_width(230.0);
+        container_menu(ui, state, c, Some(f), &f.name, acts)
+    });
+    let key = f.id.clone();
+    if row_actions(ui, &key, actions, |ui| {
+        let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
+        egui::Popup::menu(&more).show(|ui| {
+            ui.set_min_width(230.0);
+            container_menu(ui, state, c, Some(f), &f.name, acts)
+        });
+        let add = kit::icon_button_sm(ui, icons::PLUS, tr("Add request"));
+        egui::Popup::menu(&add).show(|ui| add_menu(ui, c, Some(f), acts));
+        more.clicked() || add.clicked()
+    }) {
+        state.actions_open = Some(key);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn request_row(
     ui: &mut Ui,
     state: &mut SidebarState,
-    c: &Collection,
+    row: &Row<'_>,
     r: &RequestItem,
-    parent: Option<&str>,
-    index: usize,
     active: Option<&ItemRef>,
-    dark: bool,
     acts: &mut Vec<Act>,
 ) {
-    ui.add_space(18.0);
-    if matches!(&state.renaming, Some((_, t, _)) if t == &r.id) {
-        rename_field(ui, state, acts);
+    let c = row.collection;
+    if is_renaming(state, &r.id) {
+        rename_row(ui, row.depth, state, acts);
         return;
     }
-    let is_active = active.map(|a| a.item == r.id).unwrap_or(false);
-    let drag_id = egui::Id::unique(("drag", &c.id, &r.id));
-    let payload = DragItem { collection: c.id.clone(), item: r.id.clone() };
-    let inner = ui.dnd_drag_source(drag_id, payload, |ui| {
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(40.0, 18.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.add(egui::Label::new(widgets::method_badge(&r.request.badge(), dark)).selectable(false));
-                },
-            );
-            let text = if is_active {
-                RichText::new(&r.name).font(crate::theme::medium(13.5))
-            } else {
-                RichText::new(&r.name)
-            };
-            ui.add(egui::Label::new(text).selectable(false).truncate());
-        });
-    });
-    let resp = inner.response.interact(egui::Sense::click());
-    widgets::a11y_button(&resp, &format!("{} {}", r.request.badge(), r.name));
+    let is_active = active.map(|a| a.item == r.id && a.collection == c.id).unwrap_or(false);
+    let badge = r.request.badge();
+    let (resp, actions) = kit::tree_row(
+        ui,
+        kit::TreeRow {
+            depth: row.depth,
+            indent_caret: true,
+            method: Some(&badge),
+            label: &r.name,
+            selected: is_active,
+            actions_width: 22.0,
+            force_actions: state.actions_open.as_deref() == Some(r.id.as_str()),
+            ..Default::default()
+        },
+        |_| {},
+    );
+    widgets::a11y_button(&resp, &format!("{badge} {}", r.name));
+    if resp.drag_started() {
+        resp.dnd_set_drag_payload(DragItem { collection: c.id.clone(), item: r.id.clone() });
+    }
     if resp.clicked() {
         acts.push(Act::Open(ItemRef { collection: c.id.clone(), item: r.id.clone() }));
     }
     let resp = resp.on_hover_text(r.request.url());
-    drop_target(ui, &resp, c, parent, index, acts, false);
-    resp.context_menu(|ui| {
-        if ui.button(tr("Open")).clicked() {
-            acts.push(Act::Open(ItemRef { collection: c.id.clone(), item: r.id.clone() }));
-            ui.close();
+    drop_target(ui, &resp, c, row.parent, row.index, acts, false);
+    resp.context_menu(|ui| request_menu(ui, state, c, r, acts));
+    let key = r.id.clone();
+    if row_actions(ui, &key, actions, |ui| {
+        let more = kit::icon_button_sm(ui, icons::DOTS_THREE, tr("More actions"));
+        egui::Popup::menu(&more).show(|ui| request_menu(ui, state, c, r, acts));
+        more.clicked()
+    }) {
+        state.actions_open = Some(key);
+    }
+}
+
+fn request_menu(ui: &mut Ui, state: &mut SidebarState, c: &Collection, r: &RequestItem, acts: &mut Vec<Act>) {
+    ui.set_min_width(210.0);
+    if kit::menu_item(ui, Some(icons::ARROW_SQUARE_OUT), tr("Open"), None).clicked() {
+        acts.push(Act::Open(ItemRef { collection: c.id.clone(), item: r.id.clone() }));
+    }
+    if kit::menu_item(ui, Some(icons::PENCIL_SIMPLE), tr("Rename"), None).clicked() {
+        state.renaming = Some((c.id.clone(), r.id.clone(), r.name.clone()));
+    }
+    if kit::menu_item(ui, Some(icons::COPY), tr("Duplicate"), None).clicked() {
+        acts.push(Act::Duplicate(c.id.clone(), r.id.clone()));
+    }
+    if r.http().is_some() && kit::menu_item(ui, Some(icons::TERMINAL), tr("Copy as cURL"), None).clicked() {
+        acts.push(Act::CopyCurl(c.id.clone(), r.id.clone()));
+    }
+    kit::menu_sep(ui);
+    let del = kit::MenuItem { icon: Some(icons::TRASH), label: tr("Delete"), danger: true, ..Default::default() };
+    if kit::menu_item_ex(ui, del).clicked() {
+        acts.push(Act::Delete(c.id.clone(), Some(r.id.clone())));
+    }
+}
+
+/// The "+" menu of a collection or folder row: the request types and a folder.
+fn add_menu(ui: &mut Ui, c: &Collection, folder: Option<&Folder>, acts: &mut Vec<Act>) {
+    ui.set_min_width(220.0);
+    let fid = folder.map(|f| f.id.clone());
+    if kit::menu_item(ui, Some(icons::GLOBE), tr("Add request"), None).clicked() {
+        acts.push(Act::NewRequest(c.id.clone(), fid.clone()));
+    }
+    if kit::menu_item(ui, Some(icons::PLUGS_CONNECTED), tr("Add WebSocket request"), None).clicked() {
+        acts.push(Act::NewWs(c.id.clone(), fid.clone()));
+    }
+    for (label, name, kind) in crate::app::protocol_templates() {
+        if kit::menu_item(ui, Some(crate::app::protocol_icon(name)), &label.replace("New", "Add"), None).clicked() {
+            acts.push(Act::NewProto(c.id.clone(), fid.clone(), name.to_string(), Box::new(kind)));
         }
-        if ui.button(tr("Rename")).clicked() {
-            state.renaming = Some((c.id.clone(), r.id.clone(), r.name.clone()));
-            ui.close();
-        }
-        if ui.button(tr("Duplicate")).clicked() {
-            acts.push(Act::Duplicate(c.id.clone(), r.id.clone()));
-            ui.close();
-        }
-        if r.http().is_some() && ui.button(tr("Copy as cURL")).clicked() {
-            acts.push(Act::CopyCurl(c.id.clone(), r.id.clone()));
-            ui.close();
-        }
-        if ui.button(RichText::new(tr("Delete")).color(crate::theme::err(dark))).clicked() {
-            acts.push(Act::Delete(c.id.clone(), Some(r.id.clone())));
-            ui.close();
-        }
-    });
+    }
+    kit::menu_sep(ui);
+    if kit::menu_item(ui, Some(icons::FOLDER_PLUS), tr("Add folder"), None).clicked() {
+        acts.push(Act::NewFolder(c.id.clone(), fid));
+    }
 }
 
 fn container_menu(
@@ -535,49 +815,26 @@ fn container_menu(
     acts: &mut Vec<Act>,
 ) {
     let fid = folder.map(|f| f.id.clone());
-    if ui.button(tr("Add request")).clicked() {
-        acts.push(Act::NewRequest(c.id.clone(), fid.clone()));
-        ui.close();
-    }
-    if ui.button(tr("Add WebSocket request")).clicked() {
-        acts.push(Act::NewWs(c.id.clone(), fid.clone()));
-        ui.close();
-    }
-    for (label, name, kind) in crate::app::protocol_templates() {
-        if ui.button(label.replace("New", "Add")).clicked() {
-            acts.push(Act::NewProto(c.id.clone(), fid.clone(), name.to_string(), Box::new(kind)));
-            ui.close();
-        }
-    }
-    if ui.button(tr("Add folder")).clicked() {
-        acts.push(Act::NewFolder(c.id.clone(), fid.clone()));
-        ui.close();
-    }
-    ui.separator();
-    if ui
-        .button(kit::with_icon(icons::PLAY, if folder.is_some() { tr("Run folder") } else { tr("Run collection") }))
-        .clicked()
-    {
+    add_menu(ui, c, folder, acts);
+    kit::menu_sep(ui);
+    let run = if folder.is_some() { tr("Run folder") } else { tr("Run collection") };
+    if kit::menu_item(ui, Some(icons::PLAY), run, None).clicked() {
         acts.push(Act::Run(c.id.clone(), fid.clone()));
-        ui.close();
     }
-    if ui.button(kit::with_icon(icons::GEAR_SIX, tr("Settings"))).clicked() {
+    if kit::menu_item(ui, Some(icons::SLIDERS_HORIZONTAL), tr("Settings"), None).clicked() {
         acts.push(Act::OpenContainer(c.id.clone(), fid.clone()));
-        ui.close();
     }
-    if ui.button(tr("Rename")).clicked() {
+    if kit::menu_item(ui, Some(icons::PENCIL_SIMPLE), tr("Rename"), None).clicked() {
         state.renaming = Some((c.id.clone(), fid.clone().unwrap_or_else(|| c.id.clone()), name.to_string()));
-        ui.close();
     }
     if let Some(f) = folder
-        && ui.button(tr("Duplicate")).clicked()
+        && kit::menu_item(ui, Some(icons::COPY), tr("Duplicate"), None).clicked()
     {
         acts.push(Act::Duplicate(c.id.clone(), f.id.clone()));
-        ui.close();
     }
-    if ui.button(RichText::new(tr("Delete")).color(crate::theme::err(ui.visuals().dark_mode))).clicked() {
+    let del = kit::MenuItem { icon: Some(icons::TRASH), label: tr("Delete"), danger: true, ..Default::default() };
+    if kit::menu_item_ex(ui, del).clicked() {
         acts.push(Act::Delete(c.id.clone(), fid));
-        ui.close();
     }
 }
 
@@ -776,12 +1033,12 @@ fn move_item(app: &mut TernaryWireApp, from: &str, item: &str, to: &str, parent:
 
 fn history(app: &mut TernaryWireApp, ui: &mut Ui) {
     let dark = ui.visuals().dark_mode;
-    kit::search_field(ui, "history-search", &mut app.sidebar.history_filter, tr("Search"), ui.available_width());
-    ui.add_space(4.0);
+    sidebar_search(ui, "history-search", &mut app.sidebar.history_filter, tr("Search history"));
     let q = app.sidebar.history_filter.clone();
     let mut open = None;
     let mut remove = None;
     let today = chrono::Local::now().date_naive();
+    let selected = app.tabs.get(app.active).and_then(|t| app.sidebar.history_tabs.get(&t.id).cloned());
     egui::ScrollArea::vertical().id_salt("history").auto_shrink([false; 2]).show(ui, |ui| {
         let mut last_day = None;
         for h in app.ws.history.iter().filter(|h| h.matches(&q)) {
@@ -791,19 +1048,35 @@ fn history(app: &mut TernaryWireApp, ui: &mut Ui) {
                 let label = match day {
                     Some(d) if d == today => tr("Today").to_string(),
                     Some(d) if Some(d) == today.pred_opt() => tr("Yesterday").to_string(),
-                    Some(d) => d.format("%d %b %Y").to_string(),
+                    Some(d) => d.format("%-d %b %Y").to_string(),
                     None => String::new(),
                 };
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(label.to_uppercase())
-                        .font(crate::theme::semibold(10.5))
-                        .color(crate::theme::pal(ui).text_faint),
-                );
+                kit::sidebar_group(ui, &label);
                 last_day = day;
             }
             let url = if h.resolved_url.is_empty() { &h.request.url } else { &h.resolved_url };
-            let r = history_row(ui, h, url, dark);
+            let shown = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+            let path = shown.find('/').map(|i| &shown[i..]).unwrap_or(shown);
+            let (status, color) = match (h.status, &h.error) {
+                (Some(code), _) => (code.to_string(), crate::theme::status_color(code, dark)),
+                (None, _) => (tr("Error").to_string(), crate::theme::err(dark)),
+            };
+            let (r, actions) = kit::tree_row(
+                ui,
+                kit::TreeRow {
+                    pad_left: 2.0,
+                    method: Some(&h.request.method),
+                    label: path,
+                    mono: true,
+                    meta: Some(&status),
+                    meta_color: Some(color),
+                    selected: selected.as_deref() == Some(h.id.as_str()),
+                    actions_width: 22.0,
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            widgets::a11y_button(&r, &format!("{} {url}", h.request.method));
             let r = r.on_hover_ui(|ui| {
                 ui.label(RichText::new(url).monospace());
                 if let Some(n) = &h.name {
@@ -817,77 +1090,40 @@ fn history(app: &mut TernaryWireApp, ui: &mut Ui) {
                 ));
             });
             if r.clicked() {
-                open = Some(h.clone());
+                open = Some(h.id.clone());
+            }
+            if let Some(rect) = actions {
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                if kit::icon_button_sm(&mut child, icons::ARROW_SQUARE_OUT, tr("Open in a new tab")).clicked() {
+                    open = Some(h.id.clone());
+                }
             }
             r.context_menu(|ui| {
-                if ui.button(tr("Delete")).clicked() {
+                let del =
+                    kit::MenuItem { icon: Some(icons::TRASH), label: tr("Delete"), danger: true, ..Default::default() };
+                if kit::menu_item_ex(ui, del).clicked() {
                     remove = Some(h.id.clone());
-                    ui.close();
                 }
             });
         }
         if app.ws.history.is_empty() {
-            ui.label(widgets::muted(ui, tr("Requests you send appear here.")));
+            kit::empty_state(
+                ui,
+                icons::CLOCK_COUNTER_CLOCKWISE,
+                tr("No history yet"),
+                tr("Requests you send appear here."),
+                |_| {},
+            );
         }
     });
-    if let Some(h) = open {
-        let name = h.name.clone().unwrap_or_else(|| h.request.url.clone());
-        let item = RequestItem::new(name, h.request.clone());
-        app.add_tab(TabKind::Request(Box::new(RequestTab::scratch(item))));
+    if let Some(id) = open {
+        app.open_history(&id);
     }
     if let Some(id) = remove {
         app.ws.remove_history(&id);
     }
-}
-
-/// One History row: method, the URL without its scheme (cut with "…" to the
-/// row), and the status code on the right; painted so a long URL never
-/// widens the sidebar.
-fn history_row(ui: &mut Ui, h: &ternarywire_core::history::HistoryEntry, url: &str, dark: bool) -> egui::Response {
-    const ROW: f32 = 28.0;
-    const METHOD_W: f32 = 46.0;
-    let p = crate::theme::pal(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW), egui::Sense::click());
-    let label = format!("{} {url}", h.request.method);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-    if !ui.is_rect_visible(rect) {
-        return resp;
-    }
-    let painter = ui.painter_at(rect);
-    if resp.hovered() {
-        painter.rect_filled(rect.shrink2(egui::vec2(0.0, 1.0)), egui::CornerRadius::same(6), p.hover);
-    }
-    let y = rect.center().y;
-    let method = widgets::method_badge(&h.request.method, dark);
-    let method_font = crate::theme::semibold(10.5);
-    painter.text(
-        egui::pos2(rect.left() + 6.0, y),
-        egui::Align2::LEFT_CENTER,
-        method.text(),
-        method_font,
-        crate::theme::method_color(&h.request.method, dark),
-    );
-    let small =
-        ui.style().text_styles.get(&egui::TextStyle::Small).cloned().unwrap_or(egui::FontId::proportional(11.5));
-    let mut right = rect.right() - 6.0;
-    let status = match (h.status, &h.error) {
-        (Some(code), _) => Some((code.to_string(), crate::theme::status_color(code, dark))),
-        (None, Some(_)) => Some((tr("Error").to_string(), crate::theme::err(dark))),
-        _ => None,
-    };
-    if let Some((text, color)) = status {
-        let g = painter.layout_no_wrap(text, small.clone(), color);
-        right -= g.size().x;
-        painter.galley(egui::pos2(right, y - g.size().y / 2.0), g, color);
-        right -= 10.0;
-    }
-    let shown = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let left = rect.left() + 6.0 + METHOD_W;
-    let mut job = egui::text::LayoutJob::simple_singleline(shown.to_string(), small, p.text);
-    job.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(10.0));
-    let g = painter.layout_job(job);
-    painter.galley(egui::pos2(left, y - g.size().y / 2.0), g, p.text);
-    resp
 }
 
 #[cfg(test)]

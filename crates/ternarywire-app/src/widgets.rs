@@ -194,11 +194,6 @@ pub fn a11y_tab(r: &egui::Response, name: &str, selected: bool) {
     r.ctx.accesskit_node_builder(r.id, |n| n.set_selected(selected));
 }
 
-/// A small frameless icon button; `name` is its tooltip and accessible name.
-pub fn small_icon_button(ui: &mut Ui, icon: &str, name: &str) -> egui::Response {
-    crate::kit::icon_button_ex(ui, icon, name, false, 22.0)
-}
-
 pub fn var_line(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
@@ -254,12 +249,18 @@ fn var_line_ex(
         .hint_text(hint)
         .desired_width(width)
         .font(egui::TextStyle::Monospace)
-        .margin(if frame { egui::Margin::symmetric(8, 5) } else { egui::Margin::symmetric(6, 4) })
+        .margin(if frame { egui::Margin::symmetric(10, 0) } else { egui::Margin::symmetric(9, 0) })
         .layouter(&mut layouter);
-    if !frame {
+    if frame {
+        edit = edit.min_size(egui::vec2(0.0, 30.0)).align(egui::Align2::LEFT_CENTER);
+    } else {
         // Fill the cell or group height with the text centered in it.
         let h = ui.available_height().clamp(20.0, 34.0);
-        edit = edit.frame(egui::Frame::NONE).min_size(egui::vec2(0.0, h)).align(egui::Align2::LEFT_CENTER);
+        // egui ignores `.margin()` once a frame is set: the margin goes in the frame.
+        edit = edit
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(9, 0)))
+            .min_size(egui::vec2(0.0, h))
+            .align(egui::Align2::LEFT_CENTER);
     }
     let out = edit.show(ui);
     variable_tooltip(ui, &out, text, vars);
@@ -305,6 +306,38 @@ pub fn code_editor_with(
     readonly: bool,
     completions: Option<CompletionFn<'_>>,
 ) -> egui::Response {
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, false)
+}
+
+/// The code editor of the redesign: frameless (put it in a `kit::well` or a
+/// bordered frame), a line-number gutter on the `well` fill, 20 px lines and
+/// the line with the cursor tinted.
+#[allow(clippy::too_many_arguments)]
+pub fn code_editor_gutter(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+    vars: Option<&VarCtx>,
+    min_rows: usize,
+    readonly: bool,
+    completions: Option<CompletionFn<'_>>,
+) -> egui::Response {
+    code_editor_impl(ui, id, text, lang, vars, min_rows, readonly, completions, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn code_editor_impl(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    lang: Lang,
+    vars: Option<&VarCtx>,
+    min_rows: usize,
+    readonly: bool,
+    completions: Option<CompletionFn<'_>>,
+    gutter: bool,
+) -> egui::Response {
     let id = ui.make_persistent_id(id);
     let dark = is_dark(ui);
     let font_size = ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5);
@@ -335,9 +368,17 @@ pub fn code_editor_with(
             HlKey { text: buf.as_str(), lang, dark, search: "", vars: names, font_size, wrap: true },
         );
         job.wrap.max_width = wrap_width;
+        if gutter {
+            // Long tokens (URLs, base64) wrap anywhere, like the prototype's editors.
+            job.wrap.break_anywhere = true;
+            for section in &mut job.sections {
+                section.format.line_height = Some(20.0);
+            }
+        }
         ui.fonts_mut(|f| f.layout_job(job))
     };
-    let edit = TextEdit::multiline(text)
+    let lines = text.split('\n').count().max(1);
+    let mut edit = TextEdit::multiline(text)
         .id(id)
         .code_editor()
         .desired_rows(min_rows)
@@ -345,7 +386,63 @@ pub fn code_editor_with(
         .lock_focus(true)
         .interactive(!readonly)
         .layouter(&mut layouter);
-    let out = edit.show(ui);
+    let p = theme::pal(ui);
+    // 12 px in, the digits, a 10 px fold column 4 px after them and 8 px out
+    // (the prototype's `.code .gut`).
+    let gutter_w =
+        if gutter { 12.0 + lines.to_string().len().max(2) as f32 * (font_size * 0.6) + 4.0 + 10.0 + 8.0 } else { 0.0 };
+    let start = ui.cursor().min;
+    let full_w = ui.available_width();
+    let gutter_bg = ui.painter().add(egui::Shape::Noop);
+    let line_bg = ui.painter().add(egui::Shape::Noop);
+    let out = if gutter {
+        // egui ignores `.margin()` once a frame is set: the margin goes in the frame.
+        edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 14, right: 14, top: 8, bottom: 8 }));
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(start.x + gutter_w, start.y),
+            egui::pos2(start.x + full_w, ui.max_rect().bottom().max(start.y + 40.0)),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| edit.show(ui)).inner
+    } else {
+        edit.show(ui)
+    };
+    if gutter {
+        let bottom = out.response.response.rect.bottom();
+        let g = egui::Rect::from_min_max(start, egui::pos2(start.x + gutter_w, bottom));
+        ui.painter()
+            .set(gutter_bg, egui::Shape::rect_filled(g, egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, p.well));
+        ui.painter().vline(g.right() - 0.5, g.y_range(), egui::Stroke::new(1.0, p.border));
+        let font = theme::mono(font_size - 0.5);
+        let mut n = 0;
+        let mut new_line = true;
+        for row in &out.galley.rows {
+            if new_line {
+                n += 1;
+                let y = out.galley_pos.y + row.rect().center().y;
+                if y > ui.clip_rect().top() - 20.0 && y < ui.clip_rect().bottom() + 20.0 {
+                    ui.painter().text(
+                        egui::pos2(g.right() - 22.0, y),
+                        egui::Align2::RIGHT_CENTER,
+                        n.to_string(),
+                        font.clone(),
+                        p.text_faint,
+                    );
+                }
+            }
+            new_line = row.ends_with_newline;
+        }
+        // The line with the cursor, tinted.
+        if out.response.has_focus()
+            && let Some(range) = out.cursor_range
+        {
+            let r = out.galley.pos_from_cursor(range.primary).translate(out.galley_pos.to_vec2());
+            let band = egui::Rect::from_min_max(
+                egui::pos2(g.right(), r.top() - 2.0),
+                egui::pos2(start.x + full_w, r.bottom() + 2.0),
+            );
+            ui.painter().set(line_bg, egui::Shape::rect_filled(band, 0.0, theme::soft(p.accent, 0.06)));
+        }
+    }
     if let Some(v) = vars {
         variable_tooltip(ui, &out, text, v);
     }
@@ -506,7 +603,7 @@ fn suggestions(ui: &mut Ui, out: &egui::text_edit::TextEditOutput, text: &mut St
 
 #[derive(Clone, Copy, Default)]
 pub struct KvOptions<'a> {
-    /// Title shown on the table's toolbar row (left of "Bulk Edit").
+    /// Title shown on the table's toolbar row (left of "Bulk edit").
     pub title: Option<&'a str>,
     pub key_suggestions: Option<&'a [&'a str]>,
     pub show_description: bool,
@@ -545,15 +642,15 @@ fn kv_table_inner(
     let bulk_id = id.with("bulk");
     let mut bulk: bool = ui.data(|d| d.get_temp(bulk_id).unwrap_or(false));
     ui.horizontal(|ui| {
-        ui.set_height(26.0);
+        ui.set_height(theme::size::TOOLBAR);
         if let Some(title) = opts.title {
             ui.label(crate::kit::section_title(title));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (icon, label) = if bulk {
-                (crate::icons::TABLE, tr("Key-Value Edit"))
+                (crate::icons::TABLE, tr("Key-value edit"))
             } else {
-                (crate::icons::TEXT_ALIGN_LEFT, tr("Bulk Edit"))
+                (crate::icons::TEXT_ALIGN_LEFT, tr("Bulk edit"))
             };
             if crate::kit::ghost(ui, Some(icon), label).clicked() {
                 bulk = !bulk;
@@ -564,7 +661,6 @@ fn kv_table_inner(
             }
         });
     });
-    ui.add_space(4.0);
     if bulk {
         let stored: String = ui.data(|d| d.get_temp(id.with("bulk-text")).unwrap_or_default());
         let mut text = bulk_text(stored, rows);
@@ -585,23 +681,41 @@ fn kv_table_inner(
         return changed;
     }
 
-    // A bordered grid: header row, one row per entry and an empty row that
-    // adds one. Cells are frameless inputs; the focused one gets a ring.
-    const CHECK: f32 = 34.0;
-    const DEL: f32 = 32.0;
-    const HEAD: f32 = 28.0;
-    const ROW: f32 = 32.0;
+    // A bordered grid (the prototype's `.kv`): a 28 px header, one 32 px row
+    // per entry and an empty row that adds one. Cells are frameless inputs
+    // separated by hairlines; the focused one gets an accent ring.
+    const CHECK: f32 = 30.0;
+    const DEL: f32 = 30.0;
+    let head_h = theme::size::TABLE_HEAD;
+    let row_h = theme::size::ROW;
     let width = ui.available_width().max(240.0);
     let left = ui.cursor().left();
     let top = ui.cursor().top();
     let cols = width - CHECK - DEL;
-    // The description column takes what is left between the value and the delete column.
-    let (key_w, val_w) = if opts.show_description { (cols * 0.3, cols * 0.42) } else { (cols * 0.38, cols * 0.62) };
+    // Key 1 : value 1.3 : description 1, or key 1 : value 1.4.
+    let (key_w, val_w) =
+        if opts.show_description { (cols / 3.3, cols * 1.3 / 3.3) } else { (cols / 2.4, cols * 1.4 / 2.4) };
     let xs = [left + CHECK, left + CHECK + key_w, left + CHECK + key_w + val_w, left + width - DEL];
-    let mono = theme::mono(ui.style().text_styles.get(&egui::TextStyle::Monospace).map(|f| f.size).unwrap_or(12.5));
+    let mono = theme::mono(12.0);
+    let bg = ui.painter().add(egui::Shape::Noop);
 
-    let head = Rect::from_min_size(pos2(left, top), vec2(width, HEAD));
-    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.chrome);
+    let head = Rect::from_min_size(pos2(left, top), vec2(width, head_h));
+    ui.painter().rect_filled(head, CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, p.well);
+    // Header checkbox: all rows on, some on (dash) or none; clicking sets all.
+    if !rows.is_empty() {
+        let all = rows.iter().all(|r| r.enabled);
+        let some = rows.iter().any(|r| r.enabled);
+        let c = Rect::from_center_size(pos2(left + CHECK / 2.0, head.center().y), vec2(15.0, 15.0));
+        let r = ui.interact(c, id.with("all"), egui::Sense::click());
+        a11y_name(&r, tr("Enabled"));
+        crate::kit::paint_check(ui, c, all, some && !all, r.hovered(), ui.is_enabled());
+        if r.clicked() {
+            for row in rows.iter_mut() {
+                row.enabled = !all;
+            }
+            changed = true;
+        }
+    }
     let head_font = theme::medium(11.5);
     let mut labels = vec![(xs[0], tr("Key")), (xs[1], tr("Value"))];
     if opts.show_description {
@@ -609,7 +723,7 @@ fn kv_table_inner(
     }
     for (x, label) in labels {
         ui.painter().text(
-            pos2(x + 10.0, head.center().y),
+            pos2(x + 9.0, head.center().y),
             egui::Align2::LEFT_CENTER,
             label,
             head_font.clone(),
@@ -619,6 +733,9 @@ fn kv_table_inner(
     let mut y = head.bottom();
     let mut remove = None;
     let n = rows.len();
+    let ring = |ui: &Ui, r: Rect| {
+        ui.painter().rect_stroke(r.shrink(1.0), CornerRadius::same(4), Stroke::new(1.5, p.accent), StrokeKind::Inside);
+    };
     for i in 0..=n {
         let is_new = i == n;
         if is_new && !opts.allow_add {
@@ -626,18 +743,18 @@ fn kv_table_inner(
         }
         let mut row = if is_new { KeyValue::default() } else { rows[i].clone() };
         let mut row_changed = false;
-        let row_rect = Rect::from_min_size(pos2(left, y), vec2(width, ROW));
+        let row_rect = Rect::from_min_size(pos2(left, y), vec2(width, row_h));
         ui.painter().hline(left..=left + width, y, Stroke::new(1.0, p.border));
         let hovered = ui.rect_contains_pointer(row_rect);
         if hovered && !is_new {
-            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.5)), 0.0, p.faint_row());
+            ui.painter().rect_filled(row_rect.shrink2(vec2(1.0, 0.0)).with_min_y(y + 0.5), 0.0, p.well);
         }
-        let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 4.0, y + 3.0), pos2(x1 - 4.0, y + ROW - 3.0));
+        // A cell spans its column between the hairlines.
+        let cell = |x0: f32, x1: f32| Rect::from_min_max(pos2(x0 + 1.0, y + 1.0), pos2(x1, y + row_h));
         ui.push_id(i, |ui| {
             if !is_new {
-                let c =
-                    Rect::from_center_size(pos2(left + CHECK / 2.0 + 2.0, row_rect.center().y), vec2(18.0, ROW - 6.0));
-                let r = ui.put(c, egui::Checkbox::without_text(&mut row.enabled));
+                let c = Rect::from_center_size(pos2(left + CHECK / 2.0, row_rect.center().y + 0.5), vec2(15.0, 15.0));
+                let r = ui.put(c, |ui: &mut Ui| crate::kit::check(ui, &mut row.enabled, ""));
                 a11y_name(&r, &format!("{} {}", tr("Enabled"), i + 1));
                 if r.changed() {
                     row_changed = true;
@@ -648,11 +765,10 @@ fn kv_table_inner(
             let key_out = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(key_rect), |ui| {
                     let mut edit = TextEdit::singleline(&mut row.key)
-                        .hint_text(if is_new { opts.key_hint } else { "" })
+                        .hint_text(RichText::new(if is_new { opts.key_hint } else { "" }).color(p.text_faint))
                         .desired_width(key_rect.width())
                         .font(mono.clone())
-                        .frame(egui::Frame::NONE)
-                        .margin(egui::Margin::symmetric(6, 2))
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(9, 0)))
                         .min_size(vec2(0.0, key_rect.height()))
                         .align(egui::Align2::LEFT_CENTER)
                         .interactive(!opts.readonly_keys || is_new);
@@ -664,12 +780,7 @@ fn kv_table_inner(
                 .inner;
             a11y_name(&key_out.response.response, &format!("{} {}", tr("Key"), i + 1));
             if key_out.response.response.has_focus() {
-                ui.painter().rect_stroke(
-                    key_rect,
-                    CornerRadius::same(5),
-                    Stroke::new(1.5, p.accent),
-                    StrokeKind::Outside,
-                );
+                ring(ui, key_rect);
             }
             if key_out.response.changed() {
                 row_changed = true;
@@ -682,17 +793,15 @@ fn kv_table_inner(
             let val_rect = cell(xs[1], if opts.show_description { xs[2] } else { xs[3] });
             let val_resp = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(val_rect), |ui| {
+                    if faded {
+                        ui.visuals_mut().override_text_color = Some(p.text_faint);
+                    }
                     var_cell(ui, "v", &mut row.value, vars, if is_new { opts.value_hint } else { "" }, val_rect.width())
                 })
                 .inner;
             a11y_name(&val_resp, &format!("{} {}", tr("Value"), i + 1));
             if val_resp.has_focus() {
-                ui.painter().rect_stroke(
-                    val_rect,
-                    CornerRadius::same(5),
-                    Stroke::new(1.5, p.accent),
-                    StrokeKind::Outside,
-                );
+                ring(ui, val_rect);
             }
             if val_resp.changed() {
                 row_changed = true;
@@ -702,31 +811,27 @@ fn kv_table_inner(
                 let r = ui.put(
                     d_rect,
                     TextEdit::singleline(&mut row.description)
-                        .frame(egui::Frame::NONE)
-                        .margin(egui::Margin::symmetric(6, 2))
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(9, 0)))
+                        .font(egui::FontId::proportional(12.5))
+                        .text_color(if faded { p.text_faint } else { p.text_muted })
                         .min_size(vec2(0.0, d_rect.height()))
                         .align(egui::Align2::LEFT_CENTER)
-                        .hint_text(if is_new { tr("Description") } else { "" })
+                        .hint_text(RichText::new(if is_new { tr("Description") } else { "" }).color(p.text_faint))
                         .desired_width(d_rect.width()),
                 );
                 a11y_name(&r, &format!("{} {}", tr("Description"), i + 1));
                 if r.has_focus() {
-                    ui.painter().rect_stroke(
-                        d_rect,
-                        CornerRadius::same(5),
-                        Stroke::new(1.5, p.accent),
-                        StrokeKind::Outside,
-                    );
+                    ring(ui, d_rect);
                 }
                 if r.changed() {
                     row_changed = true;
                 }
             }
             if !is_new && hovered {
-                let d = Rect::from_center_size(pos2(xs[3] + DEL / 2.0, row_rect.center().y), vec2(24.0, 24.0));
+                let d = Rect::from_center_size(pos2(xs[3] + DEL / 2.0, row_rect.center().y), vec2(22.0, 22.0));
                 let r = ui
                     .scope_builder(egui::UiBuilder::new().max_rect(d), |ui| {
-                        crate::kit::icon_button_ex(ui, crate::icons::TRASH, tr("Remove"), false, 24.0)
+                        crate::kit::icon_button_sm(ui, crate::icons::TRASH, tr("Remove"))
                     })
                     .inner;
                 a11y_name(&r, &format!("{} {}", tr("Remove"), i + 1));
@@ -735,7 +840,7 @@ fn kv_table_inner(
                 }
             }
         });
-        y += ROW;
+        y += row_h;
         if row_changed {
             changed = true;
             if is_new {
@@ -749,6 +854,7 @@ fn kv_table_inner(
         }
     }
     let table = Rect::from_min_max(pos2(left, top), pos2(left + width, y));
+    ui.painter().set(bg, egui::Shape::rect_filled(table, CornerRadius::same(8), p.surface));
     for x in &xs[..if opts.show_description { 3 } else { 2 }] {
         ui.painter().vline(*x, table.y_range(), Stroke::new(1.0, p.border));
     }
@@ -831,24 +937,17 @@ pub fn method_picker(ui: &mut Ui, method: &mut String) -> bool {
     changed
 }
 
-pub fn method_badge(method: &str, dark: bool) -> RichText {
-    let short = match method {
+/// The short form of a method or protocol label (`DEL`, `OPT`).
+pub fn method_short(method: &str) -> &str {
+    match method {
         "DELETE" => "DEL",
         "OPTIONS" => "OPT",
-        "PATCH" => "PATCH",
         m => m,
-    };
-    RichText::new(short).font(theme::semibold(10.5)).color(theme::method_color(method, dark))
+    }
 }
 
-/// A row of tabs (`Params | Auth | Headers ...`) with an underlined
-/// selection; a trailing ` (n)` becomes a count badge.
-pub fn sub_tabs<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[(T, String)]) {
-    crate::kit::tab_strip(ui, current, items);
-}
-
-pub fn count_label(n: usize) -> String {
-    if n == 0 { String::new() } else { format!(" ({n})") }
+pub fn method_badge(method: &str, dark: bool) -> RichText {
+    RichText::new(method_short(method)).font(theme::semibold(10.5)).color(theme::method_color(method, dark))
 }
 
 pub fn muted(ui: &Ui, text: impl Into<String>) -> RichText {

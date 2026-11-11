@@ -18,7 +18,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, UiBuilder, pos2,
+    vec2,
+};
 use parking_lot::Mutex;
 use serde_json::Value;
 
@@ -644,6 +647,8 @@ struct Prepared {
     json: Option<Arc<Value>>,
     /// Show `json` as a tree.
     tree: bool,
+    /// Preview of a text body: it has none, which the view explains.
+    no_preview: bool,
     content: Content,
 }
 
@@ -742,7 +747,14 @@ pub struct BodyState {
     /// Row viewer: widest row drawn (wide glyphs beyond the estimate).
     rows_width: f32,
     pending_fold: Option<FoldCmd>,
+    /// Fold the block of the value at this JSON path (automation).
+    pending_fold_path: Option<String>,
     pending_scroll: Option<egui::Vec2>,
+    /// The Raw view wraps its lines unless turned off (its own setting:
+    /// a raw body is often one long line).
+    raw_unwrap: bool,
+    /// The last fold command collapsed blocks (the fold button expands then).
+    folded_all: bool,
     /// The row index of a body in a file, made once for all views.
     file_index: Option<FileIndex>,
     row_search: Option<RowSearch>,
@@ -768,7 +780,10 @@ impl Default for BodyState {
             menu: None,
             rows_width: 0.0,
             pending_fold: None,
+            pending_fold_path: None,
             pending_scroll: None,
+            raw_unwrap: false,
+            folded_all: false,
             file_index: None,
             row_search: None,
         }
@@ -787,11 +802,17 @@ impl BodyState {
     /// Opens the JSONPath filter with `expr` (automation).
     pub fn set_filter(&mut self, expr: &str) {
         self.filter_open = true;
+        self.focus_filter = true;
         self.filter = expr.to_string();
     }
 
-    /// `expand`, `collapse`, `level1`, `level2`, … (automation).
+    /// `expand`, `collapse`, `level1`, `level2`, …, or the JSON path of a
+    /// block to fold (`$.data[2]`) (automation).
     pub fn fold(&mut self, what: &str) {
+        if what.starts_with('$') {
+            self.pending_fold_path = Some(what.to_string());
+            return;
+        }
         self.pending_fold = Some(match what {
             "expand" => FoldCmd::ExpandAll,
             "collapse" => FoldCmd::CollapseAll,
@@ -876,6 +897,7 @@ impl BodyState {
     }
 
     fn apply_fold(&mut self, cmd: FoldCmd) {
+        self.folded_all = cmd != FoldCmd::ExpandAll;
         if self.prepared.as_ref().is_some_and(|p| p.tree) {
             self.tree_open.clear();
             self.tree_level = Some(match cmd {
@@ -896,6 +918,38 @@ impl BodyState {
             };
         }
         fv.display = None;
+    }
+
+    /// Folds the block of the value at `path` in the Pretty view.
+    fn fold_path(&mut self, path: &str) {
+        let Some(doc) = self.current_doc() else { return };
+        let (Some(folds), Some(json)) = (doc.folds.clone(), doc.json.clone()) else { return };
+        let fv = self.fold_view(&doc);
+        for (c, r) in fv.collapsed.iter_mut().zip(&folds.regions) {
+            if json.target(r.start as usize).is_some_and(|(p, _)| p == path) {
+                *c = true;
+                fv.display = None;
+            }
+        }
+    }
+
+    /// The blocks were collapsed with Collapse all or a level: the fold
+    /// button offers Expand all.
+    fn any_folded(&self) -> bool {
+        self.folded_all
+    }
+
+    /// Lines of the current view wrap.
+    fn wraps(&self) -> bool {
+        if self.view == BodyView::Raw { !self.raw_unwrap } else { self.wrap }
+    }
+
+    fn toggle_wrap(&mut self) {
+        if self.view == BodyView::Raw {
+            self.raw_unwrap = !self.raw_unwrap;
+        } else {
+            self.wrap = !self.wrap;
+        }
     }
 
     fn toggle_region(&mut self, doc: &Doc, region: u32) {
@@ -936,6 +990,7 @@ fn prepare(
         image: None,
         json: None,
         tree: false,
+        no_preview: false,
         content: Content::Empty,
     };
     if language == BodyLanguage::Binary && view != BodyView::Raw {
@@ -956,6 +1011,12 @@ fn prepare(
         p.note = Some(tr("The tree view shows JSON bodies; this body is shown formatted instead.").to_string());
     }
     let small = len <= max_pretty && !resp.body.is_file();
+    if view == BodyView::Preview && small && language != BodyLanguage::Html {
+        p.no_preview = true;
+        return p;
+    }
+    // The Raw view shows the text as it came, without colors.
+    let lang = if view == BodyView::Raw { Lang::Text } else { lang };
     match (view, small) {
         (BodyView::Pretty | BodyView::Tree | BodyView::Preview, true) => {
             let bytes = resp.body.read_all().unwrap_or_default();
@@ -1020,6 +1081,35 @@ fn prepare(
 // Toolbar
 // ---------------------------------------------------------------------------
 
+/// Height of a line of the code view (`.code` in the prototype).
+const LINE_H: f32 = 20.0;
+/// Space above the first line and below the last.
+const PAD_Y: f32 = 8.0;
+/// Space between the gutter and the text, and after the text.
+const TEXT_PAD: f32 = 14.0;
+/// Side and bottom margin of the viewer box in the pane.
+const MARGIN: f32 = 12.0;
+/// Toolbar icon buttons and the gap between toolbar items.
+const ICON: f32 = 22.0;
+const GAP: f32 = 8.0;
+/// Width of the search field, and the least it shrinks to before the less
+/// used actions move into the ⋯ menu (and then search onto its own row).
+const SEARCH_W: f32 = 130.0;
+const SEARCH_MIN: f32 = 72.0;
+
+/// Draws `add` in a child of `ui` (which the caller has made room for:
+/// unlike `scope_builder`, this leaves the cursor of `ui` where it is).
+fn inside<R>(ui: &mut Ui, builder: UiBuilder, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let mut child = ui.new_child(builder);
+    add(&mut child)
+}
+
+/// Width of the gutter: 12 px, the line numbers, 4 px, the 10 px column of
+/// fold carets, 8 px.
+fn gutter_width(lines: usize, char_w: f32) -> f32 {
+    12.0 + lines.max(1).to_string().len() as f32 * char_w + 4.0 + 10.0 + 8.0
+}
+
 /// What the current view offers.
 #[derive(Default)]
 struct Caps {
@@ -1059,13 +1149,21 @@ fn copy_body(ui: &Ui, state: &BodyState, resp: &HttpResponse) {
     }
 }
 
-fn search_box(ui: &mut Ui, state: &mut BodyState, width: f32) {
-    let r = kit::search_field(ui, "body-search", &mut state.search, tr("Search"), width);
+/// The search field and, while searching, its next-match button. `rtl`:
+/// laid out right to left (the button goes first so it ends up after the field).
+fn search_box(ui: &mut Ui, state: &mut BodyState, width: f32, rtl: bool) {
+    let searching = !state.search.is_empty();
+    let next_button = |ui: &mut Ui| kit::icon_button_ex(ui, icons::ARROW_DOWN, tr("Next match"), false, ICON).clicked();
+    let mut next = rtl && searching && next_button(ui);
+    let r = kit::search_field_sm(ui, "body-search", &mut state.search, tr("Search"), width);
+    if !rtl && searching {
+        next |= next_button(ui);
+    }
     if r.changed() {
         state.match_cursor = 0;
     }
     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    if (kit::icon_button(ui, icons::ARROW_DOWN, tr("Next match")).clicked() || enter) && !state.search.is_empty() {
+    if (next || enter) && !state.search.is_empty() {
         state.match_cursor += 1;
         state.jump = true;
         if enter {
@@ -1075,157 +1173,211 @@ fn search_box(ui: &mut Ui, state: &mut BodyState, width: f32) {
     }
 }
 
-/// View switch, search and actions. Narrow panels move the less used
+/// Width of a small segmented control with these labels (as `kit::segmented_sm` draws it).
+fn segmented_sm_width(ui: &Ui, labels: &[&str]) -> f32 {
+    let text: f32 = labels
+        .iter()
+        .map(|l| ui.painter().layout_no_wrap(l.to_string(), theme::medium(11.5), Color32::PLACEHOLDER).size().x + 16.0)
+        .sum();
+    text + labels.len().saturating_sub(1) as f32 + 4.0
+}
+
+/// The fold commands, as menu items.
+fn fold_items(ui: &mut Ui, cmd: &mut Option<FoldCmd>) {
+    if kit::menu_item(ui, Some(icons::ARROWS_OUT_LINE_VERTICAL), tr("Expand all"), None).clicked() {
+        *cmd = Some(FoldCmd::ExpandAll);
+    }
+    if kit::menu_item(ui, Some(icons::ARROWS_IN_LINE_VERTICAL), tr("Collapse all"), None).clicked() {
+        *cmd = Some(FoldCmd::CollapseAll);
+    }
+    for level in [1, 2] {
+        if kit::menu_item(ui, Some(icons::LIST), &trf("Collapse to level {}", &[&level]), None).clicked() {
+            *cmd = Some(FoldCmd::Level(level));
+        }
+    }
+}
+
+/// Collapse all, or Expand all when something is folded; a right click
+/// offers the fold levels.
+fn fold_button(ui: &mut Ui, state: &BodyState) -> Option<FoldCmd> {
+    let folded = state.any_folded();
+    let (icon, name, what) = if folded {
+        (icons::ARROWS_OUT_LINE_VERTICAL, tr("Expand all"), FoldCmd::ExpandAll)
+    } else {
+        (icons::ARROWS_IN_LINE_VERTICAL, tr("Collapse all"), FoldCmd::CollapseAll)
+    };
+    let r = kit::icon_button_ex(ui, icon, name, false, ICON)
+        .on_hover_text(RichText::new(tr("Right-click to fold to a level")).size(11.5).color(theme::pal(ui).text_muted));
+    let mut cmd = r.clicked().then_some(what);
+    egui::Popup::context_menu(&r).show(|ui| {
+        ui.set_min_width(210.0);
+        fold_items(ui, &mut cmd);
+    });
+    cmd
+}
+
+/// View switch, search and actions (40 px). Narrow panes move the less used
 /// actions into the ⋯ menu, and very narrow ones put search on its own row.
 fn toolbar(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, caps: &Caps) -> Option<FoldCmd> {
-    let avail = ui.available_width();
-    let compact = avail < 660.0;
-    let stacked = avail < 440.0;
+    let views = [
+        (BodyView::Pretty, tr("Pretty")),
+        (BodyView::Raw, tr("Raw")),
+        (BodyView::Preview, tr("Preview")),
+        (BodyView::Tree, tr("Tree")),
+    ];
+    let labels: Vec<&str> = views.iter().map(|v| v.1).collect();
+    // Room right of the view switch for search and the icon buttons.
+    let room = ui.available_width() - 2.0 * kit::size::PAD - segmented_sm_width(ui, &labels) - GAP;
+    let icons_w = |n: usize| n as f32 * (ICON + GAP);
+    let next_w = if state.search.is_empty() { 0.0 } else { ICON + GAP };
+    let full = usize::from(caps.filter) + usize::from(caps.fold) + usize::from(caps.wrap) + 2;
+    let compact_n = usize::from(caps.filter) + 1;
+    let compact = room - icons_w(full) - next_w < SEARCH_MIN;
+    let stacked = compact && room - icons_w(compact_n) - next_w < SEARCH_MIN;
+    let search_w = (room - icons_w(if compact { compact_n } else { full }) - next_w).min(SEARCH_W);
     let mut cmd = None;
-    ui.horizontal(|ui| {
+    kit::toolbar(ui, |ui| {
         let mut view = state.view;
-        kit::segmented(
-            ui,
-            &mut view,
-            &[
-                (BodyView::Pretty, tr("Pretty")),
-                (BodyView::Raw, tr("Raw")),
-                (BodyView::Preview, tr("Preview")),
-                (BodyView::Tree, tr("Tree")),
-            ],
-        );
+        kit::segmented_sm(ui, &mut view, &views);
         if view != state.view {
             state.view = view;
             state.reset();
         }
-        let icons_right = if compact {
-            1 + usize::from(caps.filter)
-        } else {
-            2 + usize::from(caps.wrap) + usize::from(caps.filter) + if caps.fold { 3 } else { 0 }
-        };
-        if !stacked {
-            ui.add_space(4.0);
-            let w = (ui.available_width() - icons_right as f32 * 30.0 - 60.0).clamp(110.0, 220.0);
-            search_box(ui, state, w);
-        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if !compact {
-                if kit::icon_button(ui, icons::DOWNLOAD_SIMPLE, tr("Save response to file")).clicked() {
-                    save_body(resp);
-                }
-                if kit::icon_button(ui, icons::COPY, tr("Copy")).clicked() {
-                    copy_body(ui, state, resp);
-                }
-                if caps.wrap && kit::icon_toggle(ui, icons::TEXT_ALIGN_LEFT, tr("Wrap"), state.wrap).clicked() {
-                    state.wrap = !state.wrap;
-                }
-                if caps.fold || caps.filter {
-                    kit::vdivider(ui, 18.0);
-                }
-            }
-            if compact || caps.fold {
-                let more = kit::icon_button(ui, icons::DOTS_THREE, tr("More actions"));
+            ui.spacing_mut().item_spacing.x = GAP;
+            if compact {
+                let more = kit::icon_button_ex(ui, icons::DOTS_THREE, tr("More actions"), false, ICON);
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(210.0);
                     if caps.fold {
-                        if compact {
-                            if ui.button(kit::with_icon(icons::ARROWS_OUT_LINE_VERTICAL, tr("Expand all"))).clicked() {
-                                cmd = Some(FoldCmd::ExpandAll);
-                            }
-                            if ui.button(kit::with_icon(icons::ARROWS_IN_LINE_VERTICAL, tr("Collapse all"))).clicked() {
-                                cmd = Some(FoldCmd::CollapseAll);
-                            }
-                        }
-                        for level in [1, 2] {
-                            let label = trf("Collapse to level {}", &[&level]);
-                            if ui.button(kit::with_icon(icons::LIST, &label)).clicked() {
-                                cmd = Some(FoldCmd::Level(level));
-                            }
+                        fold_items(ui, &mut cmd);
+                        kit::menu_sep(ui);
+                    }
+                    if caps.wrap {
+                        let icon = if state.wraps() { icons::CHECK } else { icons::TEXT_ALIGN_LEFT };
+                        if kit::menu_item(ui, Some(icon), tr("Wrap lines"), None).clicked() {
+                            state.toggle_wrap();
                         }
                     }
-                    if compact {
-                        if caps.fold {
-                            ui.separator();
-                        }
-                        if caps.wrap {
-                            let icon = if state.wrap { icons::CHECK } else { icons::TEXT_ALIGN_LEFT };
-                            if ui.button(kit::with_icon(icon, tr("Wrap lines"))).clicked() {
-                                state.wrap = !state.wrap;
-                            }
-                        }
-                        if ui.button(kit::with_icon(icons::COPY, tr("Copy"))).clicked() {
-                            copy_body(ui, state, resp);
-                            ui.close();
-                        }
-                        if ui.button(kit::with_icon(icons::DOWNLOAD_SIMPLE, tr("Save response to file"))).clicked() {
-                            ui.close();
-                            save_body(resp);
-                        }
+                    if kit::menu_item(ui, Some(icons::COPY), tr("Copy"), None).clicked() {
+                        copy_body(ui, state, resp);
                     }
-                    if cmd.is_some() {
-                        ui.close();
+                    if kit::menu_item(ui, Some(icons::DOWNLOAD_SIMPLE), tr("Save response to file"), None).clicked() {
+                        save_body(resp);
                     }
                 });
-            }
-            if !compact && caps.fold {
-                if kit::icon_button(ui, icons::ARROWS_IN_LINE_VERTICAL, tr("Collapse all")).clicked() {
-                    cmd = Some(FoldCmd::CollapseAll);
+            } else {
+                if kit::icon_button_ex(ui, icons::DOWNLOAD_SIMPLE, tr("Save response to file"), false, ICON).clicked() {
+                    save_body(resp);
                 }
-                if kit::icon_button(ui, icons::ARROWS_OUT_LINE_VERTICAL, tr("Expand all")).clicked() {
-                    cmd = Some(FoldCmd::ExpandAll);
+                if kit::icon_button_ex(ui, icons::COPY, tr("Copy"), false, ICON).clicked() {
+                    copy_body(ui, state, resp);
+                }
+                if caps.wrap
+                    && kit::icon_button_ex(ui, icons::TEXT_ALIGN_LEFT, tr("Wrap lines"), state.wraps(), ICON).clicked()
+                {
+                    state.toggle_wrap();
+                }
+                if caps.fold {
+                    cmd = fold_button(ui, state);
                 }
             }
             if caps.filter
-                && kit::icon_toggle(ui, icons::FUNNEL, tr("Filter with JSONPath"), state.filter_open).clicked()
+                && kit::icon_button_ex(ui, icons::FUNNEL, tr("Filter with JSONPath"), state.filter_open, ICON).clicked()
             {
                 state.filter_open = !state.filter_open;
                 state.focus_filter = state.filter_open;
             }
+            if !stacked {
+                search_box(ui, state, search_w, true);
+            }
         });
     });
     if stacked {
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let w = ui.available_width() - 38.0;
-            search_box(ui, state, w);
+        // Its own row, like the filter row: 26 px and 8 under it.
+        let full = ui.available_rect_before_wrap();
+        let row = Rect::from_min_size(full.min, vec2(full.width(), 26.0 + GAP));
+        let inner = Rect::from_min_max(
+            pos2(row.left() + kit::size::PAD, row.top()),
+            pos2(row.right() - kit::size::PAD, row.top() + 26.0),
+        );
+        inside(ui, UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            let w = ui.available_width() - next_w;
+            search_box(ui, state, w, false);
         });
+        ui.advance_cursor_after_rect(row);
     }
     cmd
 }
 
-/// The JSONPath field, with the number of matches or why the path is invalid.
+/// The JSONPath field (26 px, mono, with a focus ring), then the number of
+/// matches or why the path is invalid, then a button that clears the filter.
 fn filter_bar(ui: &mut Ui, state: &mut BodyState) {
     let p = theme::pal(ui);
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let slot = (ui.available_width() * 0.34).clamp(96.0, 280.0);
-        let width = (ui.available_width() - slot - 8.0).max(120.0);
+    state.update_filter();
+    let full = ui.available_rect_before_wrap();
+    let row = Rect::from_min_size(full.min, vec2(full.width(), 26.0 + GAP));
+    let inner = Rect::from_min_max(
+        pos2(row.left() + kit::size::PAD, row.top()),
+        pos2(row.right() - kit::size::PAD, row.top() + 26.0),
+    );
+    let mut clear = false;
+    inside(ui, UiBuilder::new().max_rect(inner).layout(Layout::right_to_left(Align::Center)), |ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        clear = kit::icon_button_ex(ui, icons::X, tr("Clear"), false, ICON).clicked();
+        if let Some(result) = &state.filter_result {
+            if let Some(e) = &result.error {
+                let size = 12.0;
+                let mut job = egui::text::LayoutJob::default();
+                job.append(icons::WARNING_CIRCLE, 0.0, egui::TextFormat::simple(theme::icon_font(size + 1.0), p.err));
+                job.append(
+                    &format!("  {}", tr(e.message)),
+                    0.0,
+                    egui::TextFormat::simple(FontId::proportional(size), p.text_muted),
+                );
+                job.wrap =
+                    egui::text::TextWrapping::truncate_at_width((ui.available_width() * 0.34).clamp(96.0, 280.0));
+                let g = ui.painter().layout_job(job);
+                let (rect, r) = ui.allocate_exact_size(g.size(), Sense::hover());
+                ui.painter().galley(rect.min, g, p.text_muted);
+                r.on_hover_text(trf("{} (at character {})", &[&tr(e.message), &(e.offset + 1)]));
+            } else if let Some(ok) = &result.ok {
+                let label = match ok.total {
+                    0 => tr("No matches").to_string(),
+                    1 => tr("1 match").to_string(),
+                    n => trf("{} matches", &[&n]),
+                };
+                let tone = if ok.total == 0 { kit::Tone::Neutral } else { kit::Tone::Ok };
+                let pill = kit::tone_pill(ui, &label, tone);
+                if ok.shown < ok.total {
+                    pill.on_hover_text(trf("Showing the first {} matches.", &[&ok.shown]));
+                }
+            }
+        }
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().max(120.0), 26.0), Sense::hover());
+        let radius = CornerRadius::same(theme::RADIUS_SM);
+        ui.painter().rect(rect, radius, p.surface, Stroke::new(1.0, p.border_strong), egui::StrokeKind::Inside);
+        let font = theme::mono(12.0);
         let edit = egui::TextEdit::singleline(&mut state.filter)
             .id_salt("body-jsonpath")
-            .hint_text(RichText::new("$.data[*].title").font(FontId::monospace(mono_size(ui))).color(p.text_faint))
-            .font(FontId::monospace(mono_size(ui)))
-            .desired_width(width)
-            .margin(egui::Margin { left: 26, right: 22, top: 4, bottom: 4 });
-        let field = ui.add(edit);
-        let r = field.rect;
-        let active = !state.filter.trim().is_empty();
+            .hint_text(RichText::new("$.data[*].title").font(font.clone()).color(p.text_faint))
+            .font(font)
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 30, right: 8, top: 0, bottom: 0 }))
+            .desired_width(rect.width())
+            .min_size(vec2(rect.width(), 26.0))
+            .align(Align2::LEFT_CENTER);
+        let field = ui.put(rect, edit);
+        crate::widgets::a11y_name(&field, tr("Filter with JSONPath"));
         ui.painter().text(
-            pos2(r.left() + 13.0, r.center().y),
+            pos2(rect.left() + 16.0, rect.center().y),
             Align2::CENTER_CENTER,
             icons::FUNNEL,
             theme::icon_font(14.0),
-            if active { p.accent_text } else { p.text_faint },
+            p.text_faint,
         );
-        if !state.filter.is_empty() {
-            let x_rect = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), egui::Vec2::splat(16.0));
-            let x = ui.interact(x_rect, field.id.with("clear"), Sense::click()).on_hover_text(tr("Clear"));
-            let color = if x.hovered() { p.text } else { p.text_faint };
-            ui.painter().text(x_rect.center(), Align2::CENTER_CENTER, icons::X_CIRCLE, theme::icon_font(14.0), color);
-            if x.clicked() {
-                state.filter.clear();
-                field.request_focus();
-            }
+        if field.has_focus() {
+            kit::focus_ring(ui, rect, theme::RADIUS_SM);
         }
         if std::mem::take(&mut state.focus_filter) {
             field.request_focus();
@@ -1233,41 +1385,33 @@ fn filter_bar(ui: &mut Ui, state: &mut BodyState) {
         if (field.has_focus() || field.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             state.filter_open = false;
         }
-        state.update_filter();
-        ui.add_space(8.0);
-        let Some(result) = &state.filter_result else { return };
-        if let Some(e) = &result.error {
-            let mut job = egui::text::LayoutJob::default();
-            let size = ui.style().text_styles.get(&egui::TextStyle::Small).map(|f| f.size).unwrap_or(11.5) + 0.5;
-            job.append(icons::WARNING_CIRCLE, 0.0, egui::TextFormat::simple(theme::icon_font(size + 1.0), p.err));
-            job.append(
-                &format!("  {}", tr(e.message)),
-                0.0,
-                egui::TextFormat::simple(FontId::proportional(size), p.text_muted),
-            );
-            ui.add(egui::Label::new(job).truncate())
-                .on_hover_text(trf("{} (at character {})", &[&tr(e.message), &(e.offset + 1)]));
-        } else if let Some(ok) = &result.ok {
-            let label = match ok.total {
-                0 => tr("No matches").to_string(),
-                1 => tr("1 match").to_string(),
-                n => trf("{} matches", &[&n]),
-            };
-            let pill = kit::pill(ui, &label, if ok.total == 0 { p.text_muted } else { p.info });
-            if ok.shown < ok.total {
-                pill.on_hover_text(trf("Showing the first {} matches.", &[&ok.shown]));
-            }
-        }
     });
+    if clear {
+        state.filter.clear();
+        state.filter_open = false;
+    }
+    state.update_filter();
+    ui.advance_cursor_after_rect(row);
 }
 
 // ---------------------------------------------------------------------------
 // The view
 // ---------------------------------------------------------------------------
 
-/// Toolbar + body. `max_pretty` comes from the settings. Returns what the
-/// user asked the request tab to do with a value.
+/// Toolbar + body, under the response tabs, edge to edge: the 40 px
+/// toolbar, the JSONPath filter row, then the viewer 12 px from the sides
+/// and the bottom of the pane. `max_pretty` comes from the settings.
+/// Returns what the user asked the request tab to do with a value.
 pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty: u64) -> Option<BodyAction> {
+    // The rows sit edge to edge, whatever spacing the caller uses.
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        show_body(ui, state, resp, max_pretty)
+    })
+    .inner
+}
+
+fn show_body(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty: u64) -> Option<BodyAction> {
     state.prepare(resp, max_pretty, ui.ctx());
     state.update_filter();
     let cmd = toolbar(ui, state, resp, &view_caps(state));
@@ -1279,13 +1423,27 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
     if let Some(cmd) = cmd.or(state.pending_fold.take()) {
         state.apply_fold(cmd);
     }
-    ui.add_space(8.0);
+    if let Some(path) = state.pending_fold_path.take() {
+        state.fold_path(&path);
+    }
+    let full = ui.available_rect_before_wrap();
+    let rect = Rect::from_min_max(
+        pos2(full.left() + MARGIN, full.top()),
+        pos2(full.right() - MARGIN, (full.bottom() - MARGIN).max(full.top() + 40.0)),
+    );
+    let action = inside(ui, UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)), |ui| {
+        ui.spacing_mut().item_spacing.y = GAP;
+        content(ui, state, resp)
+    });
+    ui.advance_cursor_after_rect(full);
+    action
+}
 
+fn content(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse) -> Option<BodyAction> {
     let pal = theme::pal(ui);
     let p = state.prepared.as_ref()?;
     if let Some(note) = &p.note {
-        crate::request_tab::banner(ui, icons::INFO, pal.info, note);
-        ui.add_space(8.0);
+        kit::banner(ui, kit::Tone::Info, icons::INFO, note);
     }
     if p.is_binary && state.view != BodyView::Raw {
         binary_state(ui, resp);
@@ -1296,22 +1454,21 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
             image_preview(ui, resp, p.image_size, image);
             return None;
         }
+        if p.no_preview {
+            no_preview(ui, resp.language() == BodyLanguage::Json);
+            return None;
+        }
         if p.is_html {
             let mut open = false;
-            crate::request_tab::banner_with(
-                ui,
-                icons::GLOBE,
-                pal.info,
-                tr("HTML preview opens in your browser."),
-                |ui| open = kit::ghost(ui, Some(icons::ARROW_SQUARE_OUT), tr("Open in browser")).clicked(),
-            );
+            kit::banner_with(ui, kit::Tone::Info, icons::GLOBE, tr("HTML preview opens in your browser."), |ui| {
+                open = kit::ghost(ui, Some(icons::ARROW_SQUARE_OUT), tr("Open in browser")).clicked();
+            });
             if open
                 && let Ok(path) = crate::widgets::private_temp_file("ternarywire-preview-", ".html")
                 && resp.body.save_to(&path).is_ok()
             {
                 let _ = open::that(&path);
             }
-            ui.add_space(8.0);
         }
     }
     let (tree, json, content) = (p.tree, p.json.clone(), p.content.clone());
@@ -1360,7 +1517,7 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
                     ui.vertical_centered(|ui| {
                         ui.add(egui::Spinner::new().size(20.0).color(pal.accent));
                         ui.add_space(6.0);
-                        ui.label(RichText::new(tr("Indexing large response…")).color(pal.text_muted));
+                        ui.label(RichText::new(tr("Indexing large response…")).size(12.5).color(pal.text_muted));
                     });
                 }
             }
@@ -1377,7 +1534,7 @@ pub fn show(ui: &mut Ui, state: &mut BodyState, resp: &HttpResponse, max_pretty:
     doc_editor(ui, state, &doc, filtered)
 }
 
-/// The frame around the text and tree views.
+/// The box of the text and tree views: surface, border, radius 8.
 fn code_frame(ui: &Ui) -> egui::Frame {
     let p = theme::pal(ui);
     egui::Frame::new()
@@ -1385,6 +1542,51 @@ fn code_frame(ui: &Ui) -> egui::Frame {
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::same(1))
+}
+
+/// The Preview of a text body: the viewer box with a note on what to use instead.
+fn no_preview(ui: &mut Ui, json: bool) {
+    let p = theme::pal(ui);
+    let text = if json {
+        tr("JSON has no visual preview. Tree shows it as an outline; Visualize renders a pm.visualizer template.")
+    } else {
+        tr("This body has no visual preview; Pretty shows it formatted.")
+    };
+    code_frame(ui).show(ui, |ui| {
+        ui.set_min_size(ui.available_size());
+        egui::Frame::new().inner_margin(egui::Margin::same(11)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // `pm.visualizer` in mono, the rest as written.
+            let mut job = egui::text::LayoutJob::default();
+            let plain = egui::TextFormat::simple(FontId::proportional(12.5), p.text);
+            let code = egui::TextFormat::simple(theme::mono(12.0), p.text);
+            for (i, part) in text.split("pm.visualizer").enumerate() {
+                if i > 0 {
+                    job.append("pm.visualizer", 0.0, code.clone());
+                }
+                job.append(part, 0.0, plain.clone());
+            }
+            rich_banner(ui, kit::Tone::Info, icons::INFO, job);
+        });
+    });
+}
+
+/// `kit::banner` with formatted text.
+fn rich_banner(ui: &mut Ui, tone: kit::Tone, icon: &str, mut job: egui::text::LayoutJob) {
+    let p = theme::pal(ui);
+    let (fg, bg) = p.tone(tone);
+    egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 9)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.label(RichText::new(icon).font(theme::icon_font(16.0)).color(fg));
+                job.wrap.max_width = ui.available_width();
+                ui.add(egui::Label::new(job).wrap());
+            });
+        },
+    );
 }
 
 /// A shown line within the visible part of a galley.
@@ -1439,7 +1641,8 @@ fn line_at_y(galley: &egui::Galley, gpos: Pos2, y: f32) -> Option<usize> {
     None
 }
 
-/// The selectable text view with line numbers and folding.
+/// The selectable text view: a gutter of line numbers and fold carets on
+/// `well`, 20 px lines, folded blocks shown as a "…" chip and their count.
 fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> Option<BodyAction> {
     let dark = ui.visuals().dark_mode;
     let pal = theme::pal(ui);
@@ -1447,7 +1650,7 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
     let font = FontId::monospace(font_size);
     let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
     let search = state.search.clone();
-    let wrap = state.wrap;
+    let wrap = state.wraps();
     let jump = std::mem::take(&mut state.jump);
 
     // Jumping to a match unfolds the blocks around it.
@@ -1468,8 +1671,8 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
     let scroll_char = scroll_to.map(|b| display.char_of(doc, b));
     let any_folded = !display.lines.is_empty();
 
-    let gutter_w = doc.lines.to_string().len().max(2) as f32 * char_w + 30.0;
-    let text_x = gutter_w + 10.0;
+    let gutter_w = gutter_width(doc.lines, char_w);
+    let text_x = gutter_w + TEXT_PAD;
     let lang = doc.lang;
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
         let mut job = highlight::cached(
@@ -1477,6 +1680,11 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
             HlKey { text: buf.as_str(), lang, dark, search: &search, vars: None, font_size, wrap },
         );
         job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
+        // Wrapped lines break anywhere, like `word-break: break-all`.
+        job.wrap.break_anywhere = wrap;
+        for section in &mut job.sections {
+            section.format.line_height = Some(LINE_H);
+        }
         ui.fonts_mut(|f| f.layout_job(job))
     };
     // The whole text's width is the content width: it doesn't change while
@@ -1485,7 +1693,7 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
         0.0
     } else {
         let s: &str = display.text.as_str();
-        layouter(ui, &s, f32::INFINITY).size().x + if any_folded { 120.0 } else { 24.0 }
+        layouter(ui, &s, f32::INFINITY).size().x + if any_folded { 120.0 } else { TEXT_PAD }
     };
 
     let salt = if filtered { "body-filter-scroll" } else { "body-scroll" };
@@ -1501,7 +1709,10 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
         }
         area.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.add_space(6.0);
+            let top = ui.cursor().top();
+            // The band of the selected line goes under the text.
+            let band_slot = ui.painter().add(egui::Shape::Noop);
+            ui.add_space(PAD_Y);
             let out = ui
                 .horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -1511,8 +1722,7 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
                         .id_salt((salt, "text"))
                         .code_editor()
                         .frame(egui::Frame::NONE)
-                        .margin(egui::Margin::ZERO)
-                        .desired_width(if wrap { ui.available_width() } else { f32::INFINITY })
+                        .desired_width(if wrap { (ui.available_width() - TEXT_PAD).max(40.0) } else { f32::INFINITY })
                         .layouter(&mut layouter);
                     if !wrap {
                         edit = edit.min_size(vec2(text_w, 0.0));
@@ -1520,7 +1730,8 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
                     edit.show(ui)
                 })
                 .inner;
-            ui.add_space(8.0);
+            ui.add_space(PAD_Y);
+            let bottom = ui.cursor().top();
 
             let galley = out.galley.clone();
             let gpos = out.galley_pos;
@@ -1528,6 +1739,8 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
             let vis = visible_lines(&galley, gpos, clip);
             let gid = ui.scope_id().with((salt, "gutter"));
             let painter = ui.painter().clone();
+            let band_x = (clip.left() + gutter_w)..=clip.right();
+            let tint = theme::soft(pal.accent, 0.06);
 
             // The value under a right click (JSON only).
             let text_resp = out.response.response.clone();
@@ -1549,56 +1762,76 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
                 Some(m) => m.clone(),
                 None => menu.clone(),
             };
+            let mut band = None;
             if let Some(m) = &menu {
                 let open = text_resp.context_menu(|ui| action = value_menu(ui, &m.path, &m.value, None));
                 if open.is_some()
                     && let Some(v) = vis.iter().find(|v| v.line == m.line)
                 {
-                    let band = Rect::from_x_y_ranges(clip.x_range(), v.first.top()..=v.last.bottom());
-                    painter.rect_filled(band, 0.0, theme::soft(pal.accent, if dark { 0.14 } else { 0.08 }));
+                    band = Some(v.first.top()..=v.last.bottom());
                 }
             }
+            // The line with the cursor.
+            if band.is_none()
+                && text_resp.has_focus()
+                && let Some(range) = out.cursor_range
+            {
+                let r = galley.pos_from_cursor(range.primary).translate(gpos.to_vec2());
+                band = Some(r.top()..=r.bottom());
+            }
+            if let Some(y) = band {
+                let rect = Rect::from_x_y_ranges(band_x.clone(), y);
+                painter.set(band_slot, egui::Shape::rect_filled(rect, 0.0, tint));
+            }
 
-            // Folded lines: a chip on the ellipsis and the count after the line.
+            // Folded lines: a "…" chip in place of the block and its count after the line.
+            let dots_font = theme::mono(11.0);
             for v in &vis {
                 let Some(dl) = display.lines.get(v.line) else { continue };
                 let Some(ri) = dl.collapsed else { continue };
                 let Some(region) = doc.folds.as_ref().and_then(|f| f.regions.get(ri as usize)) else { continue };
                 let pre = display.text[dl.start..dl.ellipsis].chars().count();
-                let a = galley.pos_from_cursor(egui::text::CCursor::new(v.char_start + pre));
-                let b = galley.pos_from_cursor(egui::text::CCursor::new(v.char_start + pre + 1));
-                let chip =
-                    Rect::from_min_max(pos2(a.left() - 3.0, a.top() + 1.0), pos2(b.left() + 3.0, a.bottom() - 1.0))
-                        .translate(gpos.to_vec2());
+                let a = galley.pos_from_cursor(egui::text::CCursor::new(v.char_start + pre)).translate(gpos.to_vec2());
+                let b =
+                    galley.pos_from_cursor(egui::text::CCursor::new(v.char_start + pre + 1)).translate(gpos.to_vec2());
+                let dots = painter.layout_no_wrap("…".into(), dots_font.clone(), Color32::PLACEHOLDER);
+                let chip = Rect::from_center_size(
+                    pos2((a.left() + b.left()) / 2.0, a.center().y),
+                    vec2(dots.size().x + 10.0, 17.0),
+                );
                 let chip_resp =
                     ui.interact(chip, gid.with(("chip", v.line)), Sense::click()).on_hover_text(tr("Expand"));
-                painter.rect_filled(
-                    chip,
-                    CornerRadius::same(4),
-                    theme::soft(pal.accent, if chip_resp.hovered() { 0.30 } else { 0.14 }),
+                let hovered = chip_resp.hovered();
+                painter.rect_filled(chip, CornerRadius::same(4), if hovered { pal.border_strong } else { pal.subtle });
+                painter.galley(
+                    chip.center() - dots.size() / 2.0,
+                    dots,
+                    if hovered { pal.text } else { pal.text_muted },
                 );
                 let label = count_label(region.count);
-                let small = FontId::proportional(font_size - 1.5);
-                let g = painter.layout_no_wrap(label, small, Color32::PLACEHOLDER);
-                let at = pos2(v.last.right() + 10.0, v.last.center().y - g.size().y / 2.0);
+                let g = painter.layout_no_wrap(label, font.clone(), Color32::PLACEHOLDER);
+                let at = pos2(v.last.right() + char_w, v.last.center().y - g.size().y / 2.0);
                 let count_rect = Rect::from_min_size(at, g.size()).expand(2.0);
                 let count_resp = ui.interact(count_rect, gid.with(("count", v.line)), Sense::click());
                 painter.galley(at, g, if count_resp.hovered() { pal.text_muted } else { pal.text_faint });
                 if chip_resp.clicked() || count_resp.clicked() {
                     toggle = Some(ri);
                 }
-                if chip_resp.hovered() || count_resp.hovered() {
+                if hovered || count_resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
             }
 
-            // The gutter stays at the left edge when scrolling sideways.
-            let gutter = Rect::from_min_max(clip.left_top(), pos2(clip.left() + gutter_w, clip.bottom()));
+            // The gutter stays at the left edge when scrolling sideways and
+            // ends with the text.
+            let (g_top, g_bottom) = (top.max(clip.top()), bottom.min(clip.bottom()));
+            let gutter =
+                Rect::from_min_max(pos2(clip.left(), g_top), pos2(clip.left() + gutter_w, g_bottom.max(g_top)));
             let gutter_resp = ui.interact(gutter, gid, Sense::click_and_drag());
             let hover_y = gutter_resp.hover_pos().map(|p| p.y);
-            painter.rect_filled(gutter, CornerRadius { nw: 7, sw: 7, ne: 0, se: 0 }, pal.surface);
+            let sw = if bottom >= clip.bottom() - 0.5 { 7 } else { 0 };
+            painter.rect_filled(gutter, CornerRadius { nw: 7, sw, ne: 0, se: 0 }, pal.well);
             painter.vline(gutter.right() - 0.5, gutter.y_range(), Stroke::new(1.0, pal.border));
-            let number_font = FontId::monospace(font_size - 1.0);
             let mut hovered_region = None;
             for v in &vis {
                 let orig = display.orig(v.line);
@@ -1612,24 +1845,17 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
                     pos2(gutter.right() - 22.0, y),
                     Align2::RIGHT_CENTER,
                     (orig + 1).to_string(),
-                    number_font.clone(),
+                    font.clone(),
                     if hovered { pal.text_muted } else { pal.text_faint },
                 );
                 if let Some((r, folded)) = region {
                     let caret = if folded { icons::CARET_RIGHT } else { icons::CARET_DOWN };
-                    let color = if hovered {
-                        pal.text
-                    } else if folded {
-                        pal.accent_text
-                    } else {
-                        pal.text_faint
-                    };
                     painter.text(
-                        pos2(gutter.right() - 11.0, y),
+                        pos2(gutter.right() - 13.0, y),
                         Align2::CENTER_CENTER,
                         caret,
-                        theme::icon_font(11.0),
-                        color,
+                        theme::icon_font(9.0),
+                        if hovered { pal.text } else { pal.text_faint },
                     );
                     if hovered {
                         hovered_region = Some(r);
@@ -1645,9 +1871,9 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
 
             if let Some(ch) = scroll_char {
                 let r = galley.pos_from_cursor(egui::text::CCursor::new(ch)).translate(gpos.to_vec2());
-                let text_left = clip.left() + gutter_w + 8.0;
+                let text_left = clip.left() + gutter_w + TEXT_PAD;
                 // Only move sideways when the match is out of sight.
-                let x = if r.left() >= text_left && r.right() + 8.0 <= clip.right() {
+                let x = if r.left() >= text_left && r.right() + TEXT_PAD <= clip.right() {
                     clip.x_range()
                 } else {
                     egui::Rangef::new(r.left() - (clip.width() - gutter_w) / 2.0, r.left() + gutter_w)
@@ -1669,35 +1895,33 @@ fn doc_editor(ui: &mut Ui, state: &mut BodyState, doc: &Doc, filtered: bool) -> 
 fn value_menu(ui: &mut Ui, path: &str, value: &Value, key: Option<&str>) -> Option<BodyAction> {
     let p = theme::pal(ui);
     let mut action = None;
-    ui.set_min_width(220.0);
-    ui.add(egui::Label::new(RichText::new(path).monospace().small().color(p.text_muted)).truncate());
-    ui.separator();
-    if ui.button(kit::with_icon(icons::COPY, tr("Copy value"))).clicked() {
+    ui.set_min_width(230.0);
+    // The path of the value, as the menu's header.
+    let g = kit::elide(ui, path, theme::mono(11.5), p.text_muted, ui.available_width() - 18.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    ui.painter().galley(pos2(rect.left() + 9.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+    kit::menu_sep(ui);
+    if kit::menu_item(ui, Some(icons::COPY), tr("Copy value"), None).clicked() {
         let text = match value {
             Value::String(s) => s.clone(),
             v => serde_json::to_string_pretty(v).unwrap_or_default(),
         };
         ui.ctx().copy_text(text);
-        ui.close();
     }
-    if ui.button(kit::with_icon(icons::PATH, tr("Copy path"))).clicked() {
+    if kit::menu_item(ui, Some(icons::PATH), tr("Copy path"), None).clicked() {
         ui.ctx().copy_text(path.to_string());
-        ui.close();
     }
     if let Some(k) = key
-        && ui.button(kit::with_icon(icons::KEY, tr("Copy key"))).clicked()
+        && kit::menu_item(ui, Some(icons::KEY), tr("Copy key"), None).clicked()
     {
         ui.ctx().copy_text(k.to_string());
-        ui.close();
     }
-    ui.separator();
-    if ui.button(kit::with_icon(icons::BRACKETS_CURLY, tr("Set as variable…"))).clicked() {
+    kit::menu_sep(ui);
+    if kit::menu_item(ui, Some(icons::BRACKETS_CURLY), tr("Set as variable…"), None).clicked() {
         action = Some(BodyAction::SetVariable { path: path.to_string(), value: value.clone() });
-        ui.close();
     }
-    if ui.button(kit::with_icon(icons::TEST_TUBE, tr("Add test for this value"))).clicked() {
+    if kit::menu_item(ui, Some(icons::TEST_TUBE), tr("Add test for this value"), None).clicked() {
         action = Some(BodyAction::AddTest { path: path.to_string(), value: value.clone() });
-        ui.close();
     }
     action
 }
@@ -1753,7 +1977,7 @@ fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &Arc<
     let dark = ui.visuals().dark_mode;
     let font_size = mono_size(ui);
     let font = FontId::monospace(font_size);
-    let row_h = ui.fonts_mut(|f| f.row_height(&font)) + 1.0;
+    let row_h = LINE_H;
     let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
     let rows = index.rows();
     let pal = theme::pal(ui);
@@ -1777,20 +2001,16 @@ fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &Arc<
         state.row_search = None;
     }
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(trf("{} rows · {}", &[&rows, &ternarywire_core::util::human_bytes(index.total)]))
-                .small()
-                .color(pal.text_muted),
-        );
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(kit::hint(ui, &trf("{} rows · {}", &[&rows, &ternarywire_core::util::human_bytes(index.total)])));
         if state.row_search.is_some() {
             ui.add(egui::Spinner::new().size(11.0).color(pal.text_muted));
-            ui.label(RichText::new(tr("Searching…")).small().color(pal.text_muted));
+            ui.label(kit::hint(ui, tr("Searching…")));
         }
     });
-    ui.add_space(4.0);
-    let gutter_w = rows.to_string().len().max(2) as f32 * char_w + 18.0;
-    let text_x = gutter_w + 10.0;
-    let text_w = (index.max_cols as f32 * char_w).max(state.rows_width) + 24.0;
+    let gutter_w = gutter_width(rows, char_w);
+    let text_x = gutter_w + TEXT_PAD;
+    let text_w = (index.max_cols as f32 * char_w).max(state.rows_width) + TEXT_PAD;
     let content_w = text_x + text_w;
     let mut area = egui::ScrollArea::both().auto_shrink([false; 2]).id_salt(("rows-scroll", salt));
     if let Some(Some(r)) = found {
@@ -1819,26 +2039,25 @@ fn rows_viewer(ui: &mut Ui, state: &mut BodyState, source: &Source, index: &Arc<
                     wrap: false,
                 });
                 let text_rect = Rect::from_min_size(pos2(rect.left() + text_x, rect.top()), vec2(text_w, row_h));
-                let label = ui
-                    .scope_builder(
-                        egui::UiBuilder::new().max_rect(text_rect).layout(Layout::left_to_right(Align::Center)),
-                        |ui| ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend)),
-                    )
-                    .inner;
+                let label = inside(
+                    ui,
+                    UiBuilder::new().max_rect(text_rect).layout(Layout::left_to_right(Align::Center)),
+                    |ui| ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend)),
+                );
                 widest = widest.max(label.rect.width());
                 placed.push((row, rect));
             }
             let gutter = Rect::from_min_max(clip.left_top(), pos2(clip.left() + gutter_w, clip.bottom()));
             ui.interact(gutter, ui.scope_id().with("rows-gutter"), Sense::click_and_drag());
             let painter = ui.painter();
-            painter.rect_filled(gutter, CornerRadius { nw: 7, sw: 7, ne: 0, se: 0 }, pal.surface);
+            painter.rect_filled(gutter, CornerRadius { nw: 7, sw: 7, ne: 0, se: 0 }, pal.well);
             painter.vline(gutter.right() - 0.5, gutter.y_range(), Stroke::new(1.0, pal.border));
             for (row, rect) in placed {
                 painter.text(
-                    pos2(gutter.right() - 8.0, rect.center().y),
+                    pos2(gutter.right() - 22.0, rect.center().y),
                     Align2::RIGHT_CENTER,
                     (row + 1).to_string(),
-                    FontId::monospace(font_size - 1.0),
+                    font.clone(),
                     pal.text_faint,
                 );
             }
@@ -1924,14 +2143,13 @@ fn image_preview(ui: &mut Ui, resp: &HttpResponse, size: Option<[u32; 2]>, (uri,
         ui.spacing_mut().item_spacing.x = 6.0;
         let ct = resp.content_type().split(';').next().unwrap_or("").trim().to_string();
         if !ct.is_empty() {
-            kit::pill(ui, &ct, p.text_muted);
+            kit::tone_pill(ui, &ct, kit::Tone::Neutral);
         }
         if let Some([w, h]) = size {
             kit::metric(ui, icons::ARROWS_OUT, &format!("{w} × {h} px"));
         }
         kit::metric(ui, icons::DOWNLOAD_SIMPLE, &ternarywire_core::util::human_bytes(bytes.len() as u64));
     });
-    ui.add_space(8.0);
     egui::ScrollArea::both().auto_shrink([false; 2]).id_salt("image-preview").show(ui, |ui| {
         let avail = ui.available_width();
         let (img_w, img_h) = match size {
@@ -1944,12 +2162,11 @@ fn image_preview(ui: &mut Ui, resp: &HttpResponse, size: Option<[u32; 2]>, (uri,
         let frame = vec2(avail, img_h + 32.0);
         let (rect, _) = ui.allocate_exact_size(frame, Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, CornerRadius::same(8), p.chrome);
+        painter.rect_filled(rect, CornerRadius::same(8), p.well);
         // Checkerboard behind the picture.
         let img_rect = Rect::from_center_size(rect.center(), vec2(img_w, img_h));
         let cell = 10.0;
-        let dark_cell = if ui.visuals().dark_mode { Color32::from_gray(44) } else { Color32::from_gray(232) };
-        let light_cell = if ui.visuals().dark_mode { Color32::from_gray(36) } else { Color32::WHITE };
+        let (dark_cell, light_cell) = (p.subtle, p.surface);
         painter.rect_filled(img_rect, 0.0, light_cell);
         let cols = (img_w / cell).ceil() as i32;
         let rows = (img_h / cell).ceil() as i32;
@@ -2043,9 +2260,9 @@ fn flatten_tree<'a>(
     }
 }
 
-/// The JSON body as a tree: carets, indent guides, type-colored values,
-/// counts on containers; click a container to fold it, right-click a value
-/// for its actions.
+/// The JSON body as an outline: a caret on containers, the key, then the
+/// value in its type's color (containers: their keys or item count).
+/// Click a container to fold it, right-click a row for its actions.
 fn json_tree_view(
     ui: &mut Ui,
     state: &mut BodyState,
@@ -2064,35 +2281,32 @@ fn json_tree_view(
     if more > 0 {
         rows.push(more_row(more, 0));
     }
-    let font_size = mono_size(ui);
-    let font = FontId::monospace(font_size);
-    let row_h = 22.0;
+    let font = theme::mono(12.0);
+    // Rows of 24 px, 8 apart; the list has 8 px above and 10 px at the sides.
+    let row_h = 32.0;
     const INDENT: f32 = 16.0;
+    const CARET: f32 = 13.0;
     let needle = search.to_lowercase();
+    let root_key = tr("root");
     let mut toggle: Option<(String, bool)> = None;
     let mut action = None;
     let mut area = egui::ScrollArea::both().auto_shrink([false; 2]).id_salt("json-tree");
     if let Some(off) = state.pending_scroll.take() {
         area = area.scroll_offset(off);
     }
-    code_frame(ui).inner_margin(egui::Margin::symmetric(4, 6)).show(ui, |ui| {
+    code_frame(ui).inner_margin(egui::Margin { left: 1, right: 1, top: 5, bottom: 5 }).show(ui, |ui| {
         kit::show_rows(area, ui, row_h, rows.len(), |ui, range| {
             let width = ui.available_width().max(200.0);
             for row in &rows[range] {
                 let (rect, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
-                let painter = ui.painter();
-                let x0 = rect.left() + 6.0 + row.depth as f32 * INDENT;
-                // Indent guides under each open ancestor.
-                for d in 0..row.depth {
-                    let x = rect.left() + 6.0 + d as f32 * INDENT + 7.0;
-                    painter.vline(x, rect.y_range(), Stroke::new(1.0, p.border));
-                }
+                let x0 = rect.left() + 10.0 + row.depth as f32 * INDENT;
+                let cy = rect.center().y;
                 if let Some(n) = row.more {
-                    painter.text(
-                        pos2(x0 + 18.0, rect.center().y),
+                    ui.painter().text(
+                        pos2(x0 + CARET + 6.0, cy),
                         Align2::LEFT_CENTER,
                         trf("… {} more", &[&n]),
-                        FontId::proportional(font_size),
+                        FontId::proportional(12.0),
                         p.text_muted,
                     );
                     continue;
@@ -2100,69 +2314,47 @@ fn json_tree_view(
                 let container = matches!(row.value, Value::Object(_) | Value::Array(_));
                 let mut job = egui::text::LayoutJob::default();
                 let fmt = |c: Color32| egui::TextFormat::simple(font.clone(), c);
-                let key_matches =
-                    row.key.as_ref().is_some_and(|k| !needle.is_empty() && k.to_lowercase().contains(&needle));
-                if let Some(k) = &row.key {
-                    let mut f = fmt(if row.is_index { p.text_faint } else { colors.key });
-                    if key_matches {
-                        f.background = highlight::search_background(dark);
-                    }
-                    job.append(k, 0.0, f);
-                    job.append(": ", 0.0, fmt(colors.punct));
+                let key = row.key.as_deref().unwrap_or(root_key);
+                let mut kf = fmt(colors.key);
+                if !needle.is_empty() && row.key.as_ref().is_some_and(|k| k.to_lowercase().contains(&needle)) {
+                    kf.background = highlight::search_background(dark);
                 }
-                let (summary, value_text, value_color) = match row.value {
+                job.append(key, 0.0, kf);
+                let (value_text, value_color) = match row.value {
+                    Value::Object(m) if m.is_empty() => ("{}".to_string(), p.text_faint),
                     Value::Object(m) => {
-                        let preview = if row.open {
-                            String::new()
-                        } else {
-                            let keys: Vec<&str> = m.keys().take(4).map(String::as_str).collect();
-                            format!(" {}{}", keys.join(", "), if m.len() > 4 { ", …" } else { "" })
-                        };
-                        (
-                            count_label(Count::Keys(m.len())),
-                            if row.open { "{".to_string() } else { format!("{{{preview} }}") },
-                            colors.punct,
-                        )
+                        let keys: Vec<&str> = m.keys().take(4).map(String::as_str).collect();
+                        (format!("{{ {}{} }}", keys.join(", "), if m.len() > 4 { ", …" } else { "" }), p.text_faint)
                     }
-                    Value::Array(a) => (
-                        count_label(Count::Items(a.len())),
-                        if row.open { "[".to_string() } else { "[…]".to_string() },
-                        colors.punct,
-                    ),
-                    Value::String(_) => (String::new(), row.value.to_string(), colors.string),
-                    Value::Number(_) => (String::new(), row.value.to_string(), colors.number),
-                    _ => (String::new(), row.value.to_string(), colors.keyword),
+                    Value::Array(a) => (format!("[{}]", count_label(Count::Items(a.len()))), p.text_faint),
+                    Value::String(_) => (row.value.to_string(), colors.string),
+                    Value::Number(_) => (row.value.to_string(), colors.number),
+                    _ => (row.value.to_string(), colors.keyword),
                 };
                 let mut vf = fmt(value_color);
                 if !container && !needle.is_empty() && value_text.to_lowercase().contains(&needle) {
                     vf.background = highlight::search_background(dark);
                 }
-                job.append(&value_text, 0.0, vf);
-                if !summary.is_empty() {
-                    job.append("  ", 0.0, fmt(p.text_faint));
-                    job.append(
-                        &summary,
-                        0.0,
-                        egui::TextFormat::simple(FontId::proportional(font_size - 1.0), p.text_faint),
-                    );
-                }
-                job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - x0 - 24.0).max(40.0));
+                job.append(&value_text, 6.0, vf);
+                let text_x = x0 + CARET + 6.0;
+                job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - text_x - 10.0).max(40.0));
                 let hovered = resp.hovered() || resp.context_menu_opened();
                 if hovered {
-                    ui.painter().rect_filled(rect, CornerRadius::same(4), p.faint_row());
+                    let band = Rect::from_x_y_ranges(rect.x_range().shrink(4.0), (cy - 12.0)..=(cy + 12.0));
+                    ui.painter().rect_filled(band, CornerRadius::same(4), p.hover);
                 }
                 if container {
                     let caret = if row.open { icons::CARET_DOWN } else { icons::CARET_RIGHT };
                     ui.painter().text(
-                        pos2(x0 + 7.0, rect.center().y),
+                        pos2(x0 + CARET / 2.0, cy),
                         Align2::CENTER_CENTER,
                         caret,
-                        theme::icon_font(11.0),
-                        if hovered { p.text } else { p.text_muted },
+                        theme::icon_font(12.5),
+                        if hovered { p.text_muted } else { p.text_faint },
                     );
                 }
                 let galley = ui.painter().layout_job(job);
-                ui.painter().galley(pos2(x0 + 18.0, rect.center().y - galley.size().y / 2.0), galley, p.text);
+                ui.painter().galley(pos2(text_x, cy - galley.size().y / 2.0), galley, p.text);
                 if container && resp.clicked() {
                     toggle = Some((row.path.clone(), !row.open));
                 }
@@ -2431,8 +2623,10 @@ mod tests {
         let d = state.fold_view(&doc).display(&doc);
         assert_eq!(d.text.as_str(), "{\n  \"status\": \"ok\",\n  \"data\": [ … ],\n  \"meta\": { … }\n}");
         state.apply_fold(FoldCmd::CollapseAll);
+        assert!(state.any_folded());
         assert_eq!(state.fold_view(&doc).display(&doc).text.as_str(), "{ … }");
         state.apply_fold(FoldCmd::ExpandAll);
+        assert!(!state.any_folded());
         assert!(Arc::ptr_eq(&state.fold_view(&doc).display(&doc).text, &doc.text));
         state.toggle_region(&doc, 0);
         assert_eq!(state.fold_view(&doc).display(&doc).text.as_str(), "{ … }");
@@ -2463,6 +2657,48 @@ mod tests {
         assert_eq!(doc.lang, Lang::Yaml);
         assert!(doc.foldable());
         assert!(!view_caps(&state).filter);
+    }
+
+    /// Automation folds one block by its JSON path; Raw shows plain wrapped
+    /// text and Preview of a text body has nothing to show.
+    #[test]
+    fn fold_by_path_and_views() {
+        let body = serde_json::to_vec(&sample()).unwrap();
+        let resp = HttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: ResponseBody::Memory(body.into()),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut state = BodyState::default();
+        state.prepare(&resp, 1 << 20, &ctx);
+        let doc = state.current_doc().unwrap();
+        assert!(!state.any_folded());
+        state.fold("$.data[0].address");
+        let path = state.pending_fold_path.take().unwrap();
+        state.fold_path(&path);
+        // One block folded: the button still offers Collapse all.
+        assert!(!state.any_folded());
+        let d = state.fold_view(&doc).display(&doc);
+        assert!(d.text.contains("\"address\": { … },"), "{}", d.text);
+        assert_eq!(d.text.matches('…').count(), 1);
+
+        assert!(!state.wraps());
+        state.view = BodyView::Raw;
+        state.reset();
+        state.prepare(&resp, 1 << 20, &ctx);
+        assert!(state.wraps(), "raw bodies wrap by default");
+        state.toggle_wrap();
+        assert!(!state.wraps() && !state.wrap);
+        assert_eq!(state.current_doc().unwrap().lang, Lang::Text);
+
+        state.view = BodyView::Preview;
+        state.reset();
+        state.prepare(&resp, 1 << 20, &ctx);
+        assert!(state.prepared.as_ref().unwrap().no_preview);
+        let caps = view_caps(&state);
+        assert!(!caps.fold && !caps.filter && !caps.wrap);
     }
 
     /// The JSONPath error messages shown in the filter bar are translated.

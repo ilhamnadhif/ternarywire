@@ -1,10 +1,11 @@
 //! Flows canvas (FR-D4): blocks connected by edges, edited visually, run
 //! with live per-block status, saved to `flows/<name>.flow.json`.
 //!
-//! The tab has a header (title, save state, zoom, Fit / Validate / Add block
-//! / Run), the canvas (dot grid, block cards with ports, bezier
-//! connections), the inspector on the right (flow settings, or the selected
-//! block or connection as form sections) and the run log under the canvas.
+//! The tab has a 46 px title row (breadcrumb, save state, zoom, Inspector,
+//! Fit / Validate / Add block / Run), the canvas (dot grid, block cards with
+//! ports, bezier connections, a floating zoom capsule), the inspector on the
+//! right at the full height of the view (flow settings, or the selected block
+//! or connection as sections) and the run log under the canvas.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
     Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Key, Layout, Pos2, Rect, Response, RichText, Sense,
-    Shape, Stroke, StrokeKind, Ui, UiBuilder, Vec2, vec2,
+    Shape, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -31,19 +32,28 @@ use ternarywire_flows::{
 use crate::app::{Msg, TabKind, TernaryWireApp};
 use crate::highlight::Lang;
 use crate::i18n::{tr, trf};
-use crate::theme::{self, Palette, RADIUS};
+use crate::kit::{Tone, size};
+use crate::theme::{self, Palette, RADIUS, RADIUS_SM};
 use crate::widgets::{self, KvOptions};
 use crate::{icons, kit};
 
 /// Block card layout in canvas units (screen pixels at 100 %).
-const BLOCK_W: f32 = 200.0;
-/// Tinted header with the kind icon, the name and the run badge.
-const HEAD_H: f32 = 32.0;
-/// Top of the first port row (under the summary line and a divider).
-const PORTS_TOP: f32 = 60.0;
+const BLOCK_W: f32 = 172.0;
+/// Tinted header with the kind icon, the name and the run badge (its bottom
+/// hairline included).
+const HEAD_H: f32 = 30.0;
+/// The summary line under the header (its bottom hairline included).
+const SUMMARY_H: f32 = 24.0;
+/// Top of the first port row: border, header, summary and 4 px padding.
+const PORTS_TOP: f32 = 1.0 + HEAD_H + SUMMARY_H + 4.0;
 const PORT_ROW: f32 = 20.0;
-/// Dot grid spacing; moved blocks snap to half of it.
+/// Snap grid: moved blocks snap to half of it; the dot grid uses it too.
 const GRID: f32 = 20.0;
+/// Default width of the inspector and height of the run log.
+const INSPECTOR_W: f32 = 324.0;
+const LOG_H: f32 = 196.0;
+/// Rows of the run log.
+const LOG_ROW: f32 = 22.0;
 const MIN_ZOOM: f32 = 0.3;
 const MAX_ZOOM: f32 = 2.0;
 /// "Fit" never zooms out further than this, so blocks stay readable; a flow
@@ -51,8 +61,6 @@ const MAX_ZOOM: f32 = 2.0;
 const FIT_MIN_ZOOM: f32 = 0.7;
 /// Below this zoom, port labels and summaries are left out.
 const DETAIL_ZOOM: f32 = 0.55;
-/// Run log lines shown (the newest ones).
-const LOG_SHOWN: usize = 600;
 
 pub enum FlowMsg {
     Event(FlowEvent),
@@ -155,10 +163,18 @@ pub struct FlowTab {
     moved_view: bool,
     /// Inspector shown; `None` decides by the width of the tab.
     inspector: Option<bool>,
+    /// Width of the inspector and height of the run log (both resizable by
+    /// their edge; a double click resets them).
+    inspector_w: f32,
+    log_h: f32,
     /// The flow name being edited in the header.
     renaming: Option<String>,
     /// Canvas position of the last right click ("Add block here").
     menu_at: Option<(f32, f32)>,
+    /// Automation: `validate`, `add-block` or `fit` on the next frame.
+    pub auto: Option<String>,
+    /// Open the Add block menu on the next frame.
+    open_add_menu: bool,
 }
 
 impl FlowTab {
@@ -182,8 +198,12 @@ impl FlowTab {
             view: Vec2::ZERO,
             moved_view: false,
             inspector: None,
+            inspector_w: INSPECTOR_W,
+            log_h: LOG_H,
             renaming: None,
             menu_at: None,
+            auto: None,
+            open_add_menu: false,
         }
     }
 
@@ -312,6 +332,13 @@ impl FlowTab {
         }
     }
 
+    /// Selects the block with this display name (automation); an unknown
+    /// or empty name clears the selection.
+    pub fn select_block(&mut self, name: &str) {
+        self.selected =
+            self.flow.blocks.iter().find(|b| b.display_name() == name).map(|b| Selection::Block(b.id.clone()));
+    }
+
     fn touch(&mut self) {
         self.last_edit = Some(Instant::now());
         self.diagnostics.clear();
@@ -341,7 +368,7 @@ fn kind_color(kind: BlockKind, dark: bool) -> Color32 {
 
 fn kind_icon(kind: BlockKind) -> &'static str {
     match kind {
-        BlockKind::Start => icons::PLAY_CIRCLE,
+        BlockKind::Start => icons::PLAY,
         BlockKind::Request => icons::GLOBE,
         BlockKind::Condition => icons::GIT_BRANCH,
         BlockKind::Loop => icons::ARROWS_CLOCKWISE,
@@ -351,9 +378,9 @@ fn kind_icon(kind: BlockKind) -> &'static str {
         BlockKind::Ai => icons::SPARKLE,
         BlockKind::Delay => icons::HOURGLASS,
         BlockKind::SetVariable => icons::BRACKETS_CURLY,
-        BlockKind::Template => icons::TEXT_ALIGN_LEFT,
+        BlockKind::Template => icons::FILE_TEXT,
         BlockKind::Output => icons::EXPORT,
-        BlockKind::Log => icons::TERMINAL_WINDOW,
+        BlockKind::Log => icons::NOTE,
     }
 }
 
@@ -383,7 +410,7 @@ fn port_color(port: &str, p: &Palette, dark: bool) -> Color32 {
         "item" => p.info,
         "break" => p.warn,
         PORT_BRANCHES => kind_color(BlockKind::Parallel, dark),
-        _ => p.text_muted,
+        _ => p.text_faint,
     }
 }
 
@@ -484,7 +511,7 @@ fn reference_key(b: &Block) -> String {
 
 fn block_height(kind: BlockKind) -> f32 {
     let rows = kind.input_ports().len().max(kind.output_ports().len()).max(1) as f32;
-    PORTS_TOP + rows * PORT_ROW + 8.0
+    PORTS_TOP + rows * PORT_ROW + 4.0 + 1.0
 }
 
 /// Rounds to the half grid, so moved blocks line up.
@@ -533,7 +560,8 @@ impl Geo {
 }
 
 fn bezier(a: Pos2, b: Pos2, zoom: f32) -> [Pos2; 4] {
-    let dx = ((b.x - a.x).abs() * 0.5).max(60.0 * zoom);
+    // Backward connections (loops) bend as far out as forward ones.
+    let dx = ((b.x - a.x).abs() * 0.5).max(36.0 * zoom);
     [a, Pos2::new(a.x + dx, a.y), Pos2::new(b.x - dx, b.y), b]
 }
 
@@ -589,36 +617,75 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTa
     if std::mem::take(&mut tab.auto_run) && !tab.is_running() {
         start_run(app, tab_id, tab);
     }
+    match tab.auto.take().as_deref() {
+        Some("validate") => {
+            tab.diagnostics = ternarywire_flows::validate(&tab.flow, Some(&app.ws.data.collections));
+        }
+        Some("add-block") => tab.open_add_menu = true,
+        Some("fit") => tab.fit = true,
+        _ => {}
+    }
+    ui.spacing_mut().item_spacing.y = 0.0;
     let width = ui.available_width();
     let inspector_open = tab.inspector.unwrap_or(width >= 820.0 || tab.selected.is_some());
     header(app, ui, tab_id, tab, inspector_open);
-    ui.add_space(10.0);
-    if inspector_open {
-        let max_w = (width * 0.45).max(260.0);
-        egui::Panel::right(egui::Id::unique(("flow-inspector", tab_id)))
-            .resizable(true)
-            .default_size(330.0_f32.min(max_w))
-            .min_size(260.0)
-            .max_size(max_w)
-            .frame(egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 0, top: 0, bottom: 0 }))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("flow-inspector-scroll")
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| inspector(app, ui, tab));
-            });
+
+    // Three fixed zones: the canvas, the run log under it and the inspector
+    // on the right at the full height of the view.
+    let body = ui.available_rect_before_wrap();
+    let insp_w = if inspector_open {
+        tab.inspector_w.clamp(260.0, (body.width() * 0.5).max(260.0)).min((body.width() - 200.0).max(0.0))
+    } else {
+        0.0
+    };
+    let left = Rect::from_min_max(body.min, pos2(body.right() - insp_w, body.bottom()));
+    let log_h = tab.log_h.clamp(110.0, (left.height() * 0.6).max(110.0)).min((left.height() - 90.0).max(0.0));
+    let log = Rect::from_min_max(pos2(left.left(), left.bottom() - log_h), left.max);
+    let canvas_rect = Rect::from_min_max(left.min, pos2(left.right(), log.top()));
+    let area = |ui: &mut Ui, rect: Rect, salt: &str, add: &mut dyn FnMut(&mut Ui)| {
+        ui.scope_builder(UiBuilder::new().max_rect(rect).id_salt(salt).layout(Layout::top_down(Align::Min)), |ui| {
+            ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui);
+        });
+    };
+    area(ui, canvas_rect, "flow-canvas-area", &mut |ui| canvas(app, ui, tab));
+    area(ui, log, "flow-log-area", &mut |ui| run_log(ui, tab));
+    let p = theme::pal(ui);
+    ui.painter().hline(log.x_range(), log.top() + 0.5, Stroke::new(1.0, p.border));
+    if insp_w > 0.0 {
+        let insp = Rect::from_min_max(pos2(left.right(), body.top()), body.max);
+        area(ui, insp, "flow-inspector-area", &mut |ui| inspector_panel(app, ui, tab));
+        ui.painter().vline(insp.left() + 0.5, insp.y_range(), Stroke::new(1.0, p.border));
+        let handle = Rect::from_center_size(pos2(insp.left(), insp.center().y), vec2(6.0, insp.height()));
+        let (d, reset) = resize_handle(ui, ui.scope_id().with(("flow-inspector-edge", tab_id)), handle, true);
+        if reset {
+            tab.inspector_w = INSPECTOR_W;
+        } else if d != 0.0 {
+            tab.inspector_w = insp_w - d;
+        }
     }
-    let height = ui.available_height();
-    egui::Panel::bottom(egui::Id::unique(("flow-log", tab_id)))
-        .resizable(true)
-        .show_separator_line(false)
-        .default_size((height * 0.24).clamp(110.0, 190.0))
-        .min_size(90.0)
-        .max_size((height * 0.6).max(120.0))
-        .frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 10, bottom: 0 }))
-        .show(ui, |ui| run_log(ui, tab));
-    canvas(app, ui, tab);
+    let handle = Rect::from_center_size(pos2(log.center().x, log.top()), vec2(log.width(), 6.0));
+    let (d, reset) = resize_handle(ui, ui.scope_id().with(("flow-log-edge", tab_id)), handle, false);
+    if reset {
+        tab.log_h = LOG_H;
+    } else if d != 0.0 {
+        tab.log_h = log_h - d;
+    }
+    ui.advance_cursor_after_rect(body);
     autosave(app, ui, tab);
+}
+
+/// A draggable edge between two zones (`vertical`: a vertical line, dragged
+/// sideways). Returns the drag along its axis and whether it was double
+/// clicked (reset).
+fn resize_handle(ui: &mut Ui, id: egui::Id, rect: Rect, vertical: bool) -> (f32, bool) {
+    let r = ui.interact(rect, id, Sense::click_and_drag());
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(if vertical { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical });
+    }
+    let d = if vertical { r.drag_delta().x } else { r.drag_delta().y };
+    (d, r.double_clicked())
 }
 
 fn autosave(app: &mut TernaryWireApp, ui: &Ui, tab: &mut FlowTab) {
@@ -656,50 +723,66 @@ impl FlowTab {
     }
 }
 
+/// The 46 px title row: breadcrumb with the flow name and save state on the
+/// left; zoom, Inspector, Fit, Validate, Add block and Run on the right.
 fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTab, inspector_open: bool) {
     let p = theme::pal(ui);
     let narrow = ui.available_width() < 780.0;
-    ui.horizontal(|ui| {
-        ui.set_height(30.0);
+    let opts = |icon: &'static str| kit::ButtonOpts { icon: Some(icon), ..Default::default() };
+    kit::bar(ui, size::VIEW_TITLE, true, |ui| {
+        ui.add_space(4.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             if tab.is_running() {
-                if kit::secondary(ui, Some(icons::STOP), tr("Stop")).on_hover_text(tr("Stop the run")).clicked() {
+                let stop = kit::button(ui, kit::Kind::Danger, kit::Size::Sm, tr("Stop"), opts(icons::STOP));
+                if stop.on_hover_text(tr("Stop the run")).clicked() {
                     tab.stop();
                 }
-            } else if kit::primary_icon(ui, icons::PLAY, tr("Run")).on_hover_text(tr("Run the flow")).clicked() {
-                start_run(app, tab_id, tab);
+            } else {
+                let run = kit::button(ui, kit::Kind::Primary, kit::Size::Sm, tr("Run"), opts(icons::PLAY));
+                if run.on_hover_text(tr("Run the flow (⌘↩)")).clicked() {
+                    start_run(app, tab_id, tab);
+                }
             }
             let add = if narrow {
-                kit::icon_button(ui, icons::PLUS, tr("Add block"))
+                kit::icon_button_sm(ui, icons::PLUS, tr("Add block"))
             } else {
-                kit::secondary(ui, Some(icons::PLUS), tr("Add block"))
+                let o = kit::ButtonOpts { icon: Some(icons::PLUS), caret: true, ..Default::default() };
+                kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Add block"), o)
             };
-            egui::Popup::menu(&add).width(240.0).show(|ui| block_menu(ui, tab, None));
+            if std::mem::take(&mut tab.open_add_menu) {
+                egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&add));
+            }
+            egui::Popup::menu(&add)
+                .width(268.0)
+                .align(egui::RectAlign::BOTTOM_END)
+                .show(|ui| block_menu(ui, tab, None));
             let validate = if narrow {
-                kit::icon_button(ui, icons::SHIELD_CHECK, tr("Validate"))
+                kit::icon_button_sm(ui, icons::SHIELD_CHECK, tr("Validate"))
             } else {
-                kit::secondary(ui, Some(icons::SHIELD_CHECK), tr("Validate"))
+                kit::button(ui, kit::Kind::Secondary, kit::Size::Sm, tr("Validate"), opts(icons::SHIELD_CHECK))
             };
             if validate.on_hover_text(tr("Check the flow for problems")).clicked() {
                 validate_flow(app, tab);
             }
             let fit = if narrow {
-                kit::icon_button(ui, icons::ARROWS_IN, tr("Fit"))
+                kit::icon_button_sm(ui, icons::ARROWS_OUT, tr("Fit"))
             } else {
-                kit::secondary(ui, Some(icons::ARROWS_IN), tr("Fit"))
+                kit::button(ui, kit::Kind::Ghost, kit::Size::Sm, tr("Fit"), opts(icons::ARROWS_OUT))
             };
             if fit.on_hover_text(tr("Show all blocks")).clicked() {
                 tab.fit = true;
             }
-            kit::vdivider(ui, 20.0);
-            if kit::icon_toggle(ui, icons::SLIDERS_HORIZONTAL, tr("Inspector"), inspector_open).clicked() {
+            vdiv(ui, 18.0);
+            if kit::icon_button_ex(ui, icons::SIDEBAR, tr("Inspector"), inspector_open, 22.0).clicked() {
                 tab.inspector = Some(!inspector_open);
             }
             if !narrow {
-                let pill = kit::pill(ui, &format!("{:.0}%", tab.zoom * 100.0), p.text_muted);
+                let text = format!("{:.0}%", tab.zoom * 100.0);
+                let pill =
+                    kit::pill_ex(ui, &text, Tone::Neutral, kit::PillOpts { outline: true, ..Default::default() });
                 let reset = ui
-                    .interact(pill.rect, ui.scope_id().with("flow-zoom-reset"), Sense::click())
+                    .interact(pill.rect, ui.scope_id().with(("flow-zoom-reset", tab_id)), Sense::click())
                     .on_hover_text(tr("Zoom level (click for 100 %)"));
                 widgets::a11y_button(&reset, tr("Reset zoom"));
                 if reset.clicked() {
@@ -707,11 +790,12 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTab,
                     set_zoom(tab, 1.0, anchor);
                 }
             }
+            // Breadcrumb: Flows › name, then the save state.
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new(icons::FLOW_ARROW).font(theme::icon_font(16.0)).color(p.text_muted));
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new(icons::FLOW_ARROW).font(theme::icon_font(13.5)).color(p.accent_text));
                 if !narrow {
-                    ui.label(RichText::new(tr("Flows")).color(p.text_muted));
+                    ui.label(RichText::new(tr("Flows")).size(12.5).color(p.text_muted));
                     ui.label(RichText::new(icons::CARET_RIGHT).font(theme::icon_font(11.0)).color(p.text_faint));
                 }
                 let title_w = (ui.available_width() - 96.0).max(60.0);
@@ -719,7 +803,7 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTab,
                     Some(buf) => {
                         let r = ui.add(
                             egui::TextEdit::singleline(buf)
-                                .font(theme::semibold(15.0))
+                                .font(theme::semibold(14.0))
                                 .desired_width(title_w.min(320.0)),
                         );
                         r.request_focus();
@@ -733,16 +817,11 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTab,
                         }
                     }
                     None => {
+                        let name = RichText::new(&tab.flow.name).font(theme::semibold(14.0)).color(p.text);
                         let r = ui
-                            .allocate_ui_with_layout(vec2(title_w, 30.0), Layout::left_to_right(Align::Center), |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&tab.flow.name).font(theme::semibold(15.0)).color(p.text),
-                                    )
-                                    .sense(Sense::click())
-                                    .selectable(false)
-                                    .truncate(),
-                                )
+                            .scope(|ui| {
+                                ui.set_max_width(title_w);
+                                ui.add(egui::Label::new(name).sense(Sense::click()).selectable(false).truncate())
                             })
                             .inner;
                         if r.on_hover_text(tr("Double-click to rename")).double_clicked() {
@@ -750,6 +829,7 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTab,
                         }
                     }
                 }
+                ui.add_space(2.0);
                 save_pill(ui, tab);
             });
         });
@@ -757,14 +837,14 @@ fn header(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut FlowTab,
 }
 
 fn save_pill(ui: &mut Ui, tab: &FlowTab) {
-    let p = theme::pal(ui);
+    let o = |icon: &'static str| kit::PillOpts { icon: Some(icon), ..Default::default() };
     if let Some(e) = &tab.error {
-        kit::pill(ui, &format!("{} {}", icons::WARNING_CIRCLE, tr("Not saved")), p.err).on_hover_text(e);
+        kit::pill_ex(ui, tr("Not saved"), Tone::Err, o(icons::WARNING_CIRCLE)).on_hover_text(e);
     } else if tab.dirty() || tab.last_edit.is_some() {
-        kit::pill(ui, &format!("{} {}", icons::CLOUD_ARROW_UP, tr("Saving…")), p.text_muted);
+        kit::pill_ex(ui, tr("Saving…"), Tone::Neutral, o(icons::CLOUD_ARROW_UP));
     } else {
         let where_ = tab.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        kit::pill(ui, &format!("{} {}", icons::CHECK, tr("Saved")), p.text_muted).on_hover_text(where_);
+        kit::pill_ex(ui, tr("Saved"), Tone::Ok, o(icons::CHECK)).on_hover_text(where_);
     }
 }
 
@@ -790,10 +870,11 @@ fn validate_flow(app: &mut TernaryWireApp, tab: &mut FlowTab) {
     }
 }
 
-/// The "Add block" menu: block kinds by group, with their icons.
+/// The "Add block" menu: block kinds in groups (Actions, Logic, Data), each
+/// with its colored tile and its description on a second line.
 fn block_menu(ui: &mut Ui, tab: &mut FlowTab, at: Option<(f32, f32)>) {
-    let p = theme::pal(ui);
-    ui.set_min_width(230.0);
+    ui.set_min_width(256.0);
+    ui.spacing_mut().item_spacing.y = 0.0;
     let groups: [(&str, &[BlockKind]); 3] = [
         (tr("Actions"), &[BlockKind::Request, BlockKind::Script, BlockKind::Ai]),
         (tr("Logic"), &[BlockKind::Condition, BlockKind::Loop, BlockKind::Parallel, BlockKind::Join, BlockKind::Delay]),
@@ -803,13 +884,8 @@ fn block_menu(ui: &mut Ui, tab: &mut FlowTab, at: Option<(f32, f32)>) {
         add_block(tab, BlockKind::Start, at);
         ui.close();
     }
-    for (i, (title, kinds)) in groups.iter().enumerate() {
-        if i > 0 {
-            ui.add_space(2.0);
-            ui.separator();
-        }
-        ui.add_space(2.0);
-        ui.label(RichText::new(*title).font(theme::medium(11.5)).color(p.text_faint));
+    for (title, kinds) in groups.iter() {
+        kit::menu_header(ui, title);
         for kind in kinds.iter() {
             if block_menu_item(ui, *kind).clicked() {
                 add_block(tab, *kind, at);
@@ -819,29 +895,40 @@ fn block_menu(ui: &mut Ui, tab: &mut FlowTab, at: Option<(f32, f32)>) {
     }
 }
 
+/// One kind in the Add block menu: a 26 px tile, the name and the
+/// description under it.
 fn block_menu_item(ui: &mut Ui, kind: BlockKind) -> Response {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
-    let w = ui.available_width().max(220.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+    let w = ui.available_width().max(240.0);
+    let text_w = w - 8.0 - 26.0 - 10.0 - 8.0;
+    // Line heights of the prototype: 13 × 1.45 and 11 × 1.25.
+    let lay = |text: &str, font: FontId, color: Color32, line: f32, wrap: f32| {
+        let mut job = LayoutJob::default();
+        job.append(text, 0.0, TextFormat { line_height: Some(line), ..TextFormat::simple(font, color) });
+        job.wrap.max_width = wrap;
+        ui.painter().layout_job(job)
+    };
+    let label = lay(tr(kind.label()), theme::medium(13.0), p.text, 19.0, f32::INFINITY);
+    let desc = lay(kind_description(kind), FontId::proportional(11.0), p.text_muted, 14.0, text_w);
+    let h = (label.size().y + desc.size().y + 10.0).max(36.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     widgets::a11y_button(&resp, tr(kind.label()));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if resp.hovered() {
             painter.rect_filled(rect, CornerRadius::same(RADIUS), p.hover);
         }
-        let tile = Rect::from_center_size(Pos2::new(rect.left() + 17.0, rect.center().y), Vec2::splat(20.0));
-        painter.rect_filled(tile, CornerRadius::same(5), kind_color(kind, dark));
-        painter.text(tile.center(), Align2::CENTER_CENTER, kind_icon(kind), theme::icon_font(12.5), p.surface);
-        painter.text(
-            Pos2::new(tile.right() + 10.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            tr(kind.label()),
-            theme::medium(13.0),
-            p.text,
-        );
+        let tile = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 13.0), Vec2::splat(26.0));
+        painter.rect_filled(tile, CornerRadius::same(RADIUS), kind_color(kind, dark));
+        painter.text(tile.center(), Align2::CENTER_CENTER, kind_icon(kind), theme::icon_font(14.0), p.on_accent);
+        let x = tile.right() + 10.0;
+        let top = rect.center().y - (label.size().y + desc.size().y) / 2.0;
+        let lh = label.size().y;
+        painter.galley(pos2(x, top), label, p.text);
+        painter.galley(pos2(x, top + lh), desc, p.text_muted);
     }
-    resp.on_hover_text(kind_description(kind))
+    resp
 }
 
 /// Adds a block at `at` (canvas units) or in the middle of the view, and
@@ -950,8 +1037,7 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
     let bg = ui.interact(rect, ui.scope_id().with("flow-canvas"), Sense::click_and_drag());
     widgets::a11y_name(&bg, tr("Flow canvas"));
     let painter = ui.painter_at(rect);
-    let radius = CornerRadius::same(8);
-    painter.rect_filled(rect, radius, p.chrome);
+    painter.rect_filled(rect, 0.0, p.well);
 
     // Zoom around the pointer with pinch or ⌘ + scroll; scroll or drag the
     // empty canvas to pan (diagonally too: no trackpad axis lock here).
@@ -982,18 +1068,16 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
     let geo = Geo { origin: rect.min + tab.pan, zoom: tab.zoom };
     let z = tab.zoom;
 
-    // Dot grid.
+    // Dot grid (moves and scales with the blocks).
     let step = GRID * z;
     if step >= 8.0 {
-        let dot = if dark { p.border_strong } else { p.border_strong.gamma_multiply(0.95) };
-        let r = (1.0 * z.sqrt()).clamp(0.7, 1.3);
         let ox = (geo.origin.x - rect.left()).rem_euclid(step);
         let oy = (geo.origin.y - rect.top()).rem_euclid(step);
         let mut y = rect.top() + oy;
         while y < rect.bottom() {
             let mut x = rect.left() + ox;
             while x < rect.right() {
-                painter.circle_filled(Pos2::new(x, y), r, dot);
+                painter.circle_filled(Pos2::new(x, y), 1.0, p.border_strong);
                 x += step;
             }
             y += step;
@@ -1014,8 +1098,7 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
             worst(&mut diag_blocks, b.clone(), d.severity);
         }
         if let Some(e) = d.edge {
-            let e2 = &mut diag_edges;
-            let entry = e2.entry(e).or_insert(d.severity);
+            let entry = diag_edges.entry(e).or_insert(d.severity);
             if d.severity == Severity::Error {
                 *entry = d.severity;
             }
@@ -1023,7 +1106,7 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
     }
     let over_block = pointer.is_some_and(|q| tab.flow.blocks.iter().any(|b| geo.block_rect(b).expand(6.0).contains(q)));
 
-    // Edges.
+    // Edges: green and thicker where the last run went, thin gray elsewhere.
     let edge_pts: Vec<Option<[Pos2; 4]>> = tab
         .flow
         .edges
@@ -1056,23 +1139,21 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
         let taken =
             matches!(tab.run.status.get(&e.from_block), Some(BlockStatus::Done { port, .. }) if *port == e.from_port);
         let (color, width) = if selected {
-            (p.accent, 2.5)
+            (p.accent, 2.4)
         } else if let Some(s) = diag_edges.get(&i) {
             (if *s == Severity::Error { p.err } else { p.warn }, 2.0)
         } else if hovered {
-            (theme::soft(p.accent, 0.75), 2.5)
+            (theme::soft(p.accent, 0.75), 2.4)
         } else if taken {
-            (if failure { p.err } else { p.ok }, 2.5)
-        } else if failure {
-            (theme::soft(p.err, 0.7), 1.75)
+            ((if failure { p.err } else { p.ok }).gamma_multiply(0.85), 2.2)
         } else {
-            (p.text_faint, 1.75)
+            (p.text_faint, 1.6)
         };
         painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
             pts,
             false,
             Color32::TRANSPARENT,
-            Stroke::new(width * z.sqrt().clamp(0.7, 1.4), color),
+            Stroke::new((width * z).max(1.0), color),
         ));
     }
 
@@ -1113,20 +1194,24 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
             snap_block = Some(b.id.clone());
         }
         card.context_menu(|ui| {
-            if kind != BlockKind::Start && ui.button(kit::with_icon(icons::COPY, tr("Duplicate"))).clicked() {
+            if kind != BlockKind::Start && kit::menu_item(ui, Some(icons::COPY), tr("Duplicate"), Some("⌘D")).clicked()
+            {
                 duplicate = Some(b.id.clone());
-                ui.close();
             }
-            if ui.button(kit::with_icon(icons::LINK_SIMPLE, tr("Remove connections"))).clicked() {
+            if kit::menu_item(ui, Some(icons::LINK_SIMPLE), tr("Remove connections"), None).clicked() {
                 disconnect = Some(b.id.clone());
-                ui.close();
             }
             if kind != BlockKind::Start {
-                ui.separator();
-                let del = RichText::new(kit::with_icon(icons::TRASH, tr("Delete"))).color(p.err);
-                if ui.button(del).clicked() {
+                kit::menu_sep(ui);
+                let del = kit::MenuItem {
+                    icon: Some(icons::TRASH),
+                    label: tr("Delete"),
+                    shortcut: Some("⌫"),
+                    danger: true,
+                    ..Default::default()
+                };
+                if kit::menu_item_ex(ui, del).clicked() {
                     delete_block = Some(b.id.clone());
-                    ui.close();
                 }
             }
         });
@@ -1152,16 +1237,16 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
         };
         draw_card(ui, &painter, &look);
 
-        // Input ports.
+        // Port rows: inputs on the left edge, outputs on the right one.
         let detail = z >= DETAIL_ZOOM;
-        let label_font = theme::medium(fs(11.0, z));
+        let label_font = FontId::proportional(fs(10.5, z));
         for (i, port) in kind.input_ports().iter().enumerate() {
             let c = geo.in_port(&b, i);
             let connected = tab.flow.edges.iter().any(|e| e.to_block == b.id && e.to_port == *port);
             let hover = pointer.is_some_and(|q| q.distance(c) < 12.0 * z.max(0.8));
             let target = tab.connecting.as_ref().is_some_and(|(from, _)| *from != b.id);
             if target {
-                painter.circle_filled(c, 10.0 * z, theme::soft(p.accent, if hover { 0.35 } else { 0.14 }));
+                painter.circle_filled(c, 11.0 * z, theme::soft(p.accent, if hover { 0.35 } else { 0.14 }));
             }
             let color = if target && hover { p.accent } else { port_color(port, &p, dark) };
             draw_port(&painter, &p, c, z, color, connected || (target && hover), hover && target);
@@ -1189,9 +1274,6 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
             widgets::a11y_name(&pr, &format!("{} {} · {}", tr("Connect from"), b.display_name(), tr(port)));
             let active = tab.connecting.as_ref().is_some_and(|(f, fp)| *f == b.id && fp == port);
             let color = port_color(port, &p, dark);
-            if taken {
-                painter.circle_filled(c, 9.0 * z, theme::soft(color, 0.22));
-            }
             draw_port(&painter, &p, c, z, color, connected || taken || active, pr.hovered() || active);
             if detail {
                 painter.text(c - vec2(11.0 * z, 0.0), Align2::RIGHT_CENTER, tr(port), label_font.clone(), p.text_muted);
@@ -1269,20 +1351,27 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
     }
     bg.context_menu(|ui| {
         if let Some(Selection::Edge(i)) = tab.selected {
-            let del = RichText::new(kit::with_icon(icons::TRASH, tr("Delete connection"))).color(p.err);
-            if ui.button(del).clicked() {
+            let del = kit::MenuItem {
+                icon: Some(icons::TRASH),
+                label: tr("Delete connection"),
+                shortcut: Some("⌫"),
+                danger: true,
+                ..Default::default()
+            };
+            if kit::menu_item_ex(ui, del).clicked() {
                 remove_edge = Some(i);
-                ui.close();
             }
-            ui.separator();
+            kit::menu_sep(ui);
         }
-        ui.menu_button(kit::with_icon(icons::PLUS, tr("Add block here")), |ui| {
+        let add =
+            kit::MenuItem { icon: Some(icons::PLUS), label: tr("Add block here"), submenu: true, ..Default::default() };
+        let r = kit::menu_item_ex(ui, add);
+        egui::containers::menu::SubMenu::default().show(ui, &r, |ui| {
             let at = tab.menu_at;
             block_menu(ui, tab, at);
         });
-        if ui.button(kit::with_icon(icons::ARROWS_IN, tr("Fit"))).clicked() {
+        if kit::menu_item(ui, Some(icons::ARROWS_OUT), tr("Fit"), None).clicked() {
             tab.fit = true;
-            ui.close();
         }
     });
 
@@ -1360,22 +1449,31 @@ fn canvas(app: &TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
         tab.touch();
     }
 
-    zoom_controls(ui, tab, rect);
+    zoom_capsule(ui, tab, rect);
     if tab.flow.blocks.len() <= 1 {
         empty_canvas(ui, tab, rect);
     }
-    painter.rect_stroke(rect, radius, Stroke::new(1.0, p.border), StrokeKind::Inside);
     ui.allocate_rect(rect, Sense::hover());
 }
 
+/// A port: a ring in the port's color while nothing is connected (an
+/// unhandled branch stands out), a filled dot with a halo once it is.
 fn draw_port(painter: &egui::Painter, p: &Palette, c: Pos2, z: f32, color: Color32, filled: bool, hovered: bool) {
-    let r = if hovered { 6.0 } else { 4.5 } * z.clamp(0.75, 1.5);
+    let s = z.clamp(0.6, 1.6);
     if hovered {
-        painter.circle_filled(c, r + 4.0 * z, theme::soft(color, 0.2));
+        painter.circle_filled(c, 10.0 * s, theme::soft(color, 0.2));
     }
-    painter.circle(c, r, if filled { color } else { p.surface }, Stroke::new(1.75 * z.clamp(0.75, 1.3), color));
+    if filled {
+        painter.circle_filled(c, 8.0 * s, color);
+        painter.circle_filled(c, 7.0 * s, p.surface);
+        painter.circle_filled(c, 5.0 * s, color);
+    } else {
+        painter.circle(c, 5.75 * s, p.surface, Stroke::new(1.5 * s, color));
+    }
 }
 
+/// A block card: header tinted with the kind's color (tile, name, run
+/// badge), a monospace summary line, then the port rows.
 fn draw_card(ui: &Ui, painter: &egui::Painter, look: &CardLook) {
     let p = theme::pal(ui);
     let dark = ui.visuals().dark_mode;
@@ -1383,60 +1481,58 @@ fn draw_card(ui: &Ui, painter: &egui::Painter, look: &CardLook) {
     let r = look.rect;
     let kind = look.block.kind();
     let color = kind_color(kind, dark);
-    let rad = (8.0 * z).round().clamp(3.0, 16.0) as u8;
-    let cr = CornerRadius::same(rad);
-    let shadow = egui::Shadow {
-        offset: [0, (2.0 * z).round() as i8],
-        blur: (10.0 * z).round() as u8,
-        spread: 0,
-        color: Color32::from_black_alpha(if dark { 90 } else { 18 }),
+    let px = |v: f32| (v * z).round().clamp(0.0, 255.0) as u8;
+    let cr = CornerRadius::same(px(10.0).max(3));
+    if look.selected {
+        // Accent halo, then a soft drop shadow.
+        painter.rect_filled(r.expand(4.0 * z), CornerRadius::same(px(14.0)), theme::soft(p.accent, 0.2));
+    }
+    let shadow = if dark {
+        egui::Shadow { offset: [0, px(4.0) as i8], blur: px(14.0), spread: 0, color: Color32::from_black_alpha(89) }
+    } else if look.selected {
+        egui::Shadow { offset: [0, px(6.0) as i8], blur: px(16.0), spread: 0, color: Color32::from_black_alpha(26) }
+    } else {
+        egui::Shadow { offset: [0, px(2.0) as i8], blur: px(8.0), spread: 0, color: Color32::from_black_alpha(18) }
     };
     painter.add(shadow.as_shape(r, cr));
-    if look.selected {
-        painter.rect_filled(r.expand(5.0), CornerRadius::same(rad + 5), theme::soft(p.accent, 0.12));
-        painter.rect_stroke(
-            r.expand(2.5),
-            CornerRadius::same(rad + 2),
-            Stroke::new(2.0, p.accent),
-            StrokeKind::Outside,
-        );
-    }
     painter.rect_filled(r, cr, p.surface);
-    let head = Rect::from_min_size(r.min, vec2(r.width(), HEAD_H * z));
-    painter.rect_filled(
-        head,
-        CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 },
-        theme::soft(color, if dark { 0.13 } else { 0.08 }),
-    );
 
+    // Header.
+    let inner = r.shrink(1.0);
+    let head = Rect::from_min_size(inner.min, vec2(inner.width(), HEAD_H * z - 1.0));
+    let hr = px(9.0).max(2);
+    painter.rect_filled(head, CornerRadius { nw: hr, ne: hr, sw: 0, se: 0 }, theme::soft(color, 0.10));
+    painter.hline(inner.x_range(), head.bottom() + 0.5 * z.min(1.0), Stroke::new(1.0, p.border));
     let t = 20.0 * z;
-    let tile = Rect::from_min_size(Pos2::new(r.left() + 8.0 * z, head.center().y - t / 2.0), Vec2::splat(t));
-    painter.rect_filled(tile, CornerRadius::same((5.0 * z).round() as u8), color);
-    painter.text(tile.center(), Align2::CENTER_CENTER, kind_icon(kind), theme::icon_font(fs(12.0, z)), p.surface);
-
-    let right = r.right() - 8.0 * z;
+    let tile = Rect::from_min_size(Pos2::new(inner.left() + 7.0 * z, head.center().y - t / 2.0), Vec2::splat(t));
+    painter.rect_filled(tile, CornerRadius::same(px(6.0)), color);
+    painter.text(tile.center(), Align2::CENTER_CENTER, kind_icon(kind), theme::icon_font(fs(12.0, z)), p.on_accent);
+    let right = inner.right() - 6.0 * z;
     let badge_left = draw_badge(ui, painter, look, Pos2::new(right, head.center().y)).unwrap_or(right + 6.0 * z);
-    let tx = tile.right() + 8.0 * z;
-    let g = one_line(painter, look.block.display_name(), theme::medium(fs(13.0, z)), p.text, badge_left - 6.0 * z - tx);
+    let tx = tile.right() + 6.0 * z;
+    let g =
+        one_line(painter, look.block.display_name(), theme::semibold(fs(11.5, z)), p.text, badge_left - 6.0 * z - tx);
     painter.galley(Pos2::new(tx, head.center().y - g.size().y / 2.0), g, p.text);
 
+    // Summary line.
+    let sum = Rect::from_min_size(Pos2::new(inner.left(), r.top() + HEAD_H * z), vec2(inner.width(), SUMMARY_H * z));
     if z >= DETAIL_ZOOM {
         let text = if look.line.trim().is_empty() { "—" } else { look.line };
-        let g = one_line(painter, text, theme::mono(fs(11.0, z)), p.text_muted, r.width() - 20.0 * z);
-        let y = head.bottom() + (PORTS_TOP - HEAD_H - 4.0) * z / 2.0;
-        painter.galley(Pos2::new(r.left() + 10.0 * z, y - g.size().y / 2.0), g, p.text_muted);
+        let mut job = var_job(text, theme::mono(fs(10.5, z)), p.text_muted, dark, false);
+        job.wrap = egui::text::TextWrapping::truncate_at_width((sum.width() - 16.0 * z).max(1.0));
+        let g = painter.layout_job(job);
+        painter.galley(Pos2::new(sum.left() + 8.0 * z, sum.center().y - 0.5 * z - g.size().y / 2.0), g, p.text_muted);
     }
-    let dy = r.top() + (PORTS_TOP - 4.0) * z;
-    painter.hline((r.left() + 1.0)..=(r.right() - 1.0), dy, Stroke::new(1.0, p.border));
+    painter.hline(inner.x_range(), sum.bottom() - 0.5 * z.min(1.0), Stroke::new(1.0, p.border));
 
     let border = match (look.status, look.diag) {
         (Some(BlockStatus::Running { .. }), _) => Stroke::new(1.5, p.accent),
         (Some(BlockStatus::Done { failed: true, .. }), _) => Stroke::new(1.5, p.err),
-        (None, Some(Severity::Error)) => Stroke::new(1.5, p.err),
-        (None, Some(Severity::Warning)) => Stroke::new(1.5, p.warn),
+        (None, Some(Severity::Error)) => Stroke::new(1.0, p.err),
+        (None, Some(Severity::Warning)) => Stroke::new(1.0, p.warn),
         _ if look.selected => Stroke::new(1.0, p.accent),
         _ if look.hovered => Stroke::new(1.0, p.text_faint),
-        _ => Stroke::new(1.0, if dark { p.border_strong } else { p.border }),
+        _ => Stroke::new(1.0, p.border_strong),
     };
     painter.rect_stroke(r, cr, border, StrokeKind::Inside);
 }
@@ -1445,67 +1541,87 @@ fn draw_card(ui: &Ui, painter: &egui::Painter, look: &CardLook) {
 /// left edge.
 fn draw_badge(ui: &Ui, painter: &egui::Painter, look: &CardLook, anchor: Pos2) -> Option<f32> {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
     let z = look.zoom;
-    let (icon, text, color) = match (look.status, look.diag) {
-        (Some(BlockStatus::Running { since }), _) => (None, elapsed(*since), p.accent),
-        (Some(BlockStatus::Done { failed: true, ms, .. }), _) => (Some(icons::X), human_ms(*ms), p.err),
+    let (icon, text, tone) = match (look.status, look.diag) {
+        (Some(BlockStatus::Running { since }), _) => (None, elapsed(*since), Tone::Accent),
+        (Some(BlockStatus::Done { failed: true, ms, .. }), _) => (Some(icons::X), human_ms(*ms), Tone::Err),
         (Some(BlockStatus::Done { ms, tests, .. }), _) => {
             let tests =
                 if tests.0 + tests.1 > 0 { format!(" · {}/{}", tests.0, tests.0 + tests.1) } else { String::new() };
-            (Some(icons::CHECK), format!("{}{tests}", human_ms(*ms)), p.ok)
+            (Some(icons::CHECK), format!("{}{tests}", human_ms(*ms)), Tone::Ok)
         }
-        (None, Some(Severity::Error)) => (Some(icons::WARNING_CIRCLE), String::new(), p.err),
-        (None, Some(Severity::Warning)) => (Some(icons::WARNING), String::new(), p.warn),
+        (None, Some(Severity::Error)) => (Some(icons::WARNING_CIRCLE), String::new(), Tone::Err),
+        (None, Some(Severity::Warning)) => (Some(icons::WARNING), String::new(), Tone::Warn),
         _ => return None,
     };
+    let (fg, bg) = p.tone(tone);
     let text = if z < DETAIL_ZOOM { String::new() } else { text };
-    let g = painter.layout_no_wrap(text, theme::medium(fs(11.0, z)), color);
-    let icon_w = 11.0 * z;
-    let gap = if g.size().x > 0.0 { 4.0 * z } else { 0.0 };
-    let pad = 6.0 * z;
-    let h = 18.0 * z;
+    let g = painter.layout_no_wrap(text, theme::medium(fs(10.0, z)), fg);
+    let icon_w = 10.0 * z;
+    let gap = if g.size().x > 0.0 { 3.0 * z } else { 0.0 };
+    let pad = 5.0 * z;
+    let h = 17.0 * z;
     let w = pad * 2.0 + icon_w + gap + g.size().x;
     let rect = Rect::from_min_size(Pos2::new(anchor.x - w, anchor.y - h / 2.0), vec2(w, h));
-    painter.rect_filled(rect, CornerRadius::same((h / 2.0) as u8), theme::soft(color, if dark { 0.2 } else { 0.13 }));
+    painter.rect_filled(rect, CornerRadius::same((h / 2.0) as u8), bg);
     let ic = Pos2::new(rect.left() + pad + icon_w / 2.0, rect.center().y);
     match icon {
         Some(i) => {
-            painter.text(ic, Align2::CENTER_CENTER, i, theme::icon_font(fs(11.5, z)), color);
+            painter.text(ic, Align2::CENTER_CENTER, i, theme::icon_font(fs(10.5, z)), fg);
         }
-        None => spinner(ui, painter, ic, icon_w * 0.42, color),
+        None => spinner(ui, painter, ic, icon_w * 0.42, fg),
     }
-    painter.galley(Pos2::new(ic.x + icon_w / 2.0 + gap, rect.center().y - g.size().y / 2.0), g, color);
+    painter.galley(Pos2::new(ic.x + icon_w / 2.0 + gap, rect.center().y - g.size().y / 2.0), g, fg);
     Some(rect.left())
 }
 
-/// Zoom out / in buttons at the bottom right of the canvas.
-fn zoom_controls(ui: &mut Ui, tab: &mut FlowTab, rect: Rect) {
+/// The floating zoom capsule at the bottom right of the canvas: zoom out,
+/// the zoom level (click for 100 %), zoom in, and Fit.
+fn zoom_capsule(ui: &mut Ui, tab: &mut FlowTab, rect: Rect) {
     let p = theme::pal(ui);
-    let size = vec2(62.0, 32.0);
-    let r = Rect::from_min_size(rect.right_bottom() - size - vec2(12.0, 12.0), size);
+    let size = vec2(3.0 + 22.0 + 2.0 + 40.0 + 2.0 + 22.0 + 2.0 + 5.0 + 2.0 + 22.0 + 3.0 + 2.0, 30.0);
+    let r = Rect::from_min_size(rect.right_bottom() - size - vec2(14.0, 14.0), size);
     if !rect.contains_rect(r) {
         return;
     }
     let painter = ui.painter();
+    let dark = ui.visuals().dark_mode;
     painter.add(
         egui::Shadow {
-            offset: [0, 2],
-            blur: 8,
+            offset: [0, 6],
+            blur: 24,
             spread: 0,
-            color: Color32::from_black_alpha(if ui.visuals().dark_mode { 80 } else { 16 }),
+            color: Color32::from_black_alpha(if dark { 128 } else { 31 }),
         }
-        .as_shape(r, CornerRadius::same(8)),
+        .as_shape(r, CornerRadius::same(theme::RADIUS_CARD)),
     );
-    painter.rect(r, CornerRadius::same(8), p.surface, Stroke::new(1.0, p.border), StrokeKind::Inside);
-    let mut c = ui.new_child(UiBuilder::new().max_rect(r.shrink(3.0)).layout(Layout::left_to_right(Align::Center)));
-    c.spacing_mut().item_spacing.x = 0.0;
+    painter.rect(r, CornerRadius::same(theme::RADIUS_CARD), p.surface, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    let mut c = ui.new_child(UiBuilder::new().max_rect(r.shrink(4.0)).layout(Layout::left_to_right(Align::Center)));
+    c.spacing_mut().item_spacing.x = 2.0;
     let anchor = rect.size() / 2.0;
-    if kit::icon_button_ex(&mut c, icons::MINUS, tr("Zoom out"), false, 26.0).clicked() {
+    if kit::icon_button_sm(&mut c, icons::MINUS, tr("Zoom out")).clicked() {
         set_zoom(tab, tab.zoom / 1.2, anchor);
     }
-    if kit::icon_button_ex(&mut c, icons::PLUS, tr("Zoom in"), false, 26.0).clicked() {
+    let (zr, zresp) = c.allocate_exact_size(vec2(40.0, 22.0), Sense::click());
+    let zresp = zresp.on_hover_text(tr("Zoom level (click for 100 %)"));
+    widgets::a11y_button(&zresp, tr("Reset zoom"));
+    c.painter().text(
+        zr.center(),
+        Align2::CENTER_CENTER,
+        format!("{:.0}%", tab.zoom * 100.0),
+        FontId::proportional(11.5),
+        if zresp.hovered() { p.text } else { p.text_muted },
+    );
+    if zresp.clicked() {
+        set_zoom(tab, 1.0, anchor);
+    }
+    if kit::icon_button_sm(&mut c, icons::PLUS, tr("Zoom in")).clicked() {
         set_zoom(tab, tab.zoom * 1.2, anchor);
+    }
+    let (dr, _) = c.allocate_exact_size(vec2(5.0, 14.0), Sense::hover());
+    c.painter().vline(dr.center().x, dr.y_range(), Stroke::new(1.0, p.border));
+    if kit::icon_button_sm(&mut c, icons::ARROWS_OUT, tr("Fit — show all blocks")).clicked() {
+        tab.fit = true;
     }
 }
 
@@ -1596,121 +1712,172 @@ fn fit_view(tab: &mut FlowTab, size: Vec2) {
 
 fn run_log(ui: &mut Ui, tab: &mut FlowTab) {
     let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
     let mut clear = false;
-    ui.horizontal(|ui| {
-        ui.set_height(26.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(RichText::new(icons::TERMINAL_WINDOW).font(theme::icon_font(15.0)).color(p.text_muted));
+    // Header: title, result, steps · time, tests; outputs and the broom on the right.
+    kit::bar_ex(ui, 36.0, 10.0, true, |ui| {
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(RichText::new(icons::TERMINAL_WINDOW).font(theme::icon_font(14.0)).color(p.text_muted));
         ui.label(kit::section_title(tr("Run log")));
-        if tab.is_running() {
-            let since = tab.run.started.map(elapsed).unwrap_or_default();
-            ui.add(egui::Spinner::new().size(13.0).color(p.accent));
-            ui.label(RichText::new(trf("Running… {}", &[&since])).color(p.accent_text).font(theme::medium(12.5)));
-            ui.ctx().request_repaint_after(Duration::from_millis(100));
-        } else if let Some(r) = &tab.run.result {
-            let (text, color, icon) = if r.cancelled {
-                (tr("Stopped"), p.warn, icons::STOP)
-            } else if r.success {
-                (tr("Succeeded"), p.ok, icons::CHECK_CIRCLE)
-            } else {
-                (tr("Failed"), p.err, icons::X_CIRCLE)
-            };
-            kit::pill(ui, &format!("{icon} {text}"), color);
-            ui.label(
-                RichText::new(format!("{} · {}", steps_text(r.steps.len()), human_ms(r.duration_ms)))
-                    .color(p.text_muted)
-                    .small(),
-            );
-            let tests = r.tests_passed + r.tests_failed;
-            if tests > 0 {
-                let c = if r.tests_failed > 0 { p.err } else { p.ok };
-                kit::pill(ui, &trf("{}/{} tests", &[&r.tests_passed, &tests]), c);
-            }
-        }
+        ui.add_space(2.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let can_clear = !tab.is_running() && (!tab.run.log.is_empty() || tab.run.result.is_some());
+        // The right part is measured first so the left one can give way.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let can_clear = !tab.is_running() && (!tab.run.log.is_empty() || tab.run.result.is_some());
-            if ui
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let broom = ui
                 .add_enabled_ui(can_clear, |ui| {
-                    kit::icon_button(ui, icons::BROOM, tr("Clear the log and block states"))
+                    kit::icon_button_sm(ui, icons::BROOM, tr("Clear the log and block states"))
                 })
-                .inner
-                .clicked()
-            {
+                .inner;
+            if broom.clicked() {
                 clear = true;
             }
-            if let Some(r) = &tab.run.result {
+            let room_for_left = 260.0;
+            if let Some(r) = &tab.run.result
+                && !r.outputs.is_empty()
+                && ui.available_width() > room_for_left + 140.0
+            {
                 for (k, v) in r.outputs.iter().take(3) {
-                    if ui.available_width() < 140.0 {
+                    let max_w = (ui.available_width() - room_for_left - 70.0).min(260.0);
+                    if max_w < 90.0 {
                         break;
                     }
-                    let max_w = (ui.available_width() - 70.0).min(320.0);
-                    let full = match v {
-                        Value::String(s) => s.clone(),
-                        v => v.to_string(),
-                    };
-                    let text = crate::dialogs::ellipsize(&full.replace('\n', " "), 36);
-                    egui::Frame::new()
-                        .fill(p.subtle)
-                        .corner_radius(CornerRadius::same(RADIUS))
-                        .inner_margin(egui::Margin::symmetric(8, 3))
-                        .show(ui, |ui| {
-                            ui.set_max_width(max_w);
-                            let mut job = LayoutJob::default();
-                            job.append(k, 0.0, TextFormat::simple(theme::medium(12.0), p.text_muted));
-                            job.append(" = ", 0.0, TextFormat::simple(theme::mono(11.5), p.text_faint));
-                            job.append(&text, 0.0, TextFormat::simple(theme::mono(11.5), p.text));
-                            ui.add(egui::Label::new(job).truncate());
-                        })
-                        .response
-                        .on_hover_text(full);
+                    out_chip(ui, k, v, max_w, dark);
                 }
-                if !r.outputs.is_empty() && ui.available_width() > 60.0 {
-                    ui.label(RichText::new(tr("Outputs")).small().color(p.text_faint));
-                }
+                ui.label(kit::eyebrow(ui, tr("Outputs")));
             }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if tab.is_running() {
+                    let since = tab.run.started.map(elapsed).unwrap_or_default();
+                    ui.add(egui::Spinner::new().size(13.0).color(p.accent));
+                    ui.label(
+                        RichText::new(trf("Running… {}", &[&since])).font(theme::medium(12.0)).color(p.accent_text),
+                    );
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                } else if let Some(r) = &tab.run.result {
+                    let (text, tone, icon) = if r.cancelled {
+                        (tr("Stopped"), Tone::Warn, icons::STOP)
+                    } else if r.success {
+                        (tr("Succeeded"), Tone::Ok, icons::CHECK_CIRCLE)
+                    } else {
+                        (tr("Failed"), Tone::Err, icons::X_CIRCLE)
+                    };
+                    kit::pill_ex(ui, text, tone, kit::PillOpts { icon: Some(icon), ..Default::default() });
+                    let summary = format!("{} · {}", steps_text(r.steps.len()), human_ms(r.duration_ms));
+                    // Narrow logs keep the result only.
+                    if ui.available_width() > 150.0 {
+                        ui.label(kit::hint(ui, &summary));
+                    }
+                    let tests = r.tests_passed + r.tests_failed;
+                    if tests > 0 && ui.available_width() > 80.0 {
+                        let tone = if r.tests_failed > 0 { Tone::Err } else { Tone::Ok };
+                        kit::tone_pill(ui, &trf("{}/{} tests", &[&r.tests_passed, &tests]), tone);
+                    }
+                } else if tab.run.log.is_empty() {
+                    ui.add(
+                        egui::Label::new(kit::hint(
+                            ui,
+                            tr("Run the flow to see each step, its timing and its messages here."),
+                        ))
+                        .truncate(),
+                    );
+                }
+            });
         });
     });
     if clear {
         tab.run = RunState::default();
     }
-    ui.add_space(4.0);
-    let frame = egui::Frame::new()
-        .fill(p.surface)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(10, 8));
-    frame.show(ui, |ui| {
-        ui.set_min_size(ui.available_size());
-        egui::ScrollArea::vertical().id_salt("flow-log-scroll").stick_to_bottom(true).auto_shrink([false; 2]).show(
-            ui,
-            |ui| {
-                if tab.run.log.is_empty() {
-                    ui.horizontal_top(|ui| {
-                        ui.label(RichText::new(icons::PLAY_CIRCLE).font(theme::icon_font(15.0)).color(p.text_faint));
-                        let text = if tab.is_running() {
-                            tr("Waiting for the first block…")
-                        } else {
-                            tr("Run the flow to see each step, its timing and its messages here.")
-                        };
-                        ui.add(egui::Label::new(RichText::new(text).color(p.text_muted)).wrap());
-                    });
-                    return;
-                }
-                ui.spacing_mut().item_spacing.y = 3.0;
-                let skip = tab.run.log.len().saturating_sub(LOG_SHOWN);
-                if skip > 0 {
-                    ui.label(RichText::new(trf("{} earlier lines not shown", &[&skip])).small().color(p.text_faint));
-                }
-                for line in &tab.run.log[skip..] {
-                    log_row(ui, &p, line);
-                }
-            },
-        );
+
+    let body = ui.available_rect_before_wrap();
+    if tab.run.log.is_empty() {
+        let mut c = ui.new_child(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Center)));
+        if tab.is_running() {
+            c.add_space((body.height() / 2.0 - 10.0).max(0.0));
+            c.label(kit::hint(&c, tr("Waiting for the first block…")));
+        } else {
+            kit::empty_state(&mut c, icons::TERMINAL_WINDOW, tr("No run yet"), "", |ui| {
+                // ⌘ ↩ runs the flow, centered on one line.
+                let hint = ui.painter().layout_no_wrap(
+                    tr("runs the flow").to_string(),
+                    FontId::proportional(12.0),
+                    p.text_muted,
+                );
+                let keys = kit::kbd_size(ui, "⌘").x + 6.0 + kit::kbd_size(ui, "↩").x;
+                let w = keys + 8.0 + hint.size().x;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                    kit::kbd(ui, "⌘");
+                    kit::kbd(ui, "↩");
+                    ui.add_space(2.0);
+                    ui.label(kit::hint(ui, tr("runs the flow")));
+                });
+            });
+        }
+        ui.advance_cursor_after_rect(body);
+        return;
+    }
+    // Lines stick to the bottom; only the visible ones are laid out.
+    let inner = Rect::from_min_max(pos2(body.left(), body.top() + 4.0), pos2(body.right(), body.bottom() - 6.0));
+    let n = tab.run.log.len();
+    let content_h = n as f32 * LOG_ROW;
+    let area_rect = if content_h < inner.height() {
+        Rect::from_min_max(pos2(inner.left(), inner.bottom() - content_h), inner.max)
+    } else {
+        inner
+    };
+    let mut c = ui.new_child(UiBuilder::new().max_rect(area_rect).layout(Layout::top_down(Align::Min)));
+    c.set_clip_rect(area_rect.intersect(ui.clip_rect()));
+    let area = egui::ScrollArea::vertical().id_salt("flow-log-scroll").stick_to_bottom(true).auto_shrink([false; 2]);
+    kit::show_rows(area, &mut c, LOG_ROW, n, |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for line in &tab.run.log[range] {
+            log_row(ui, &p, line);
+        }
     });
+    // Lines fade out under the header.
+    if content_h > inner.height() - 30.0 {
+        vfade(ui.painter(), Rect::from_min_size(inner.min, vec2(inner.width(), 30.0)), p.canvas);
+    }
+    ui.advance_cursor_after_rect(body);
 }
 
+/// A named output of the run: `name = "value…"` on a well chip.
+fn out_chip(ui: &mut Ui, key: &str, value: &Value, max_w: f32, dark: bool) -> Response {
+    let p = theme::pal(ui);
+    let full = match value {
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    let shown = match value {
+        Value::String(s) => format!("\"{}\"", crate::dialogs::ellipsize(&s.replace('\n', " "), 200)),
+        v => crate::dialogs::ellipsize(&v.to_string(), 200),
+    };
+    let font = theme::mono(11.0);
+    let mut job = LayoutJob::default();
+    job.append(key, 0.0, TextFormat::simple(font.clone(), crate::highlight::json_colors(dark).key));
+    job.append(" = ", 0.0, TextFormat::simple(font.clone(), p.text_muted));
+    job.append(&shown, 0.0, TextFormat::simple(font, p.text));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((max_w - 18.0).max(20.0));
+    let g = ui.painter().layout_job(job);
+    let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 18.0, 22.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(RADIUS_SM), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.painter().galley(pos2(rect.left() + 9.0, rect.center().y - g.size().y / 2.0), g, p.text);
+    resp.on_hover_text(full)
+}
+
+/// One run log line: clock, icon, block chip and text, on one line (the
+/// whole text in a tooltip when it is cut).
 fn log_row(ui: &mut Ui, p: &Palette, line: &LogLine) {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, LOG_ROW), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
     let (icon, color) = match line.kind {
         LogKind::Step => (icons::CHECK, p.ok),
         LogKind::Info => (icons::INFO, p.info),
@@ -1721,155 +1888,209 @@ fn log_row(ui: &mut Ui, p: &Palette, line: &LogLine) {
     };
     let text_color = match line.kind {
         LogKind::Error => p.err,
-        LogKind::Debug => p.text_muted,
+        LogKind::Debug => p.text_faint,
         _ => p.text,
     };
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(RichText::new(clock(line.at)).font(theme::mono(11.0)).color(p.text_faint));
-        ui.label(RichText::new(icon).font(theme::icon_font(13.5)).color(color));
-        let mut job = LayoutJob::default();
-        if let Some(b) = &line.block {
-            let chip = TextFormat { background: p.subtle, ..TextFormat::simple(theme::medium(12.0), p.text) };
-            job.append(&format!(" {b} "), 0.0, chip);
-            job.append("  ", 0.0, TextFormat::simple(theme::medium(12.0), p.text_muted));
-        }
-        let font = if matches!(line.kind, LogKind::Done) { theme::medium(12.5) } else { theme::mono(12.0) };
-        job.append(&line.text, 0.0, TextFormat::simple(font, text_color));
-        ui.add(egui::Label::new(job).wrap());
-    });
+    let painter = ui.painter();
+    let cy = rect.center().y;
+    let mut x = rect.left() + 14.0;
+    painter.text(pos2(x, cy), Align2::LEFT_CENTER, clock(line.at), theme::mono(11.5), p.text_faint);
+    x += 72.0 + 9.0;
+    painter.text(pos2(x + 6.5, cy), Align2::CENTER_CENTER, icon, theme::icon_font(12.5), color);
+    x += 13.0 + 9.0;
+    if let Some(b) = &line.block {
+        let g = one_line(painter, b, theme::medium(11.0), p.text, 140.0);
+        let chip = Rect::from_min_size(pos2(x, cy - 9.0), vec2(g.size().x + 12.0, 18.0));
+        painter.rect_filled(chip, CornerRadius::same(5), p.subtle);
+        painter.galley(pos2(chip.left() + 6.0, cy - g.size().y / 2.0), g, p.text);
+        x = chip.right() + 9.0;
+    }
+    let font =
+        if line.kind == LogKind::Done && line.block.is_none() { theme::semibold(11.5) } else { theme::mono(11.5) };
+    let g = one_line(painter, &line.text, font, text_color, rect.right() - 14.0 - x);
+    let cut = g.elided;
+    painter.galley(pos2(x, cy - g.size().y / 2.0), g, text_color);
+    if cut {
+        resp.on_hover_text(&line.text);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Inspector
 // ---------------------------------------------------------------------------
 
-/// Space and a hairline between inspector sections.
-fn section_gap(ui: &mut Ui) {
+/// An inspector section: a hairline across the panel, then 14 × 16 padding
+/// and 10 px between its parts.
+fn section<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let p = theme::pal(ui);
-    ui.add_space(14.0);
-    let r = ui.available_rect_before_wrap();
-    ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, p.border));
-    ui.add_space(14.0);
+    let top = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), top + 0.5, Stroke::new(1.0, p.border));
+    egui::Frame::new()
+        .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 14 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 10.0;
+            add(ui)
+        })
+        .inner
 }
 
+/// The title of an inspector section, with an optional hint under it.
 fn section_head(ui: &mut Ui, title: &str, help: Option<&str>) {
-    ui.label(kit::section_title(title));
+    ui.label(kit::section_title(title).line_height(Some(18.0)));
     if let Some(h) = help {
-        ui.add_space(1.0);
-        ui.label(kit::hint(ui, h));
+        rich_label(ui, h, 12.0, theme::pal(ui).text_muted);
     }
-    ui.add_space(6.0);
 }
 
-fn field_label(ui: &mut Ui, text: &str) {
+/// A section title with controls at its right end.
+fn section_head_with(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
+    row(ui, 22.0, |ui| {
+        ui.label(kit::section_title(title));
+        ui.with_layout(Layout::right_to_left(Align::Center), right);
+    });
+}
+
+/// A field (label above the control) whose help may hold `**bold**` words
+/// and `{{variables}}`.
+fn field<R>(ui: &mut Ui, label: &str, help: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
     let p = theme::pal(ui);
-    ui.add_space(6.0);
-    ui.label(RichText::new(text).font(theme::medium(12.5)).color(p.text_muted));
-    ui.add_space(1.0);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 5.0;
+        ui.label(RichText::new(label).font(theme::medium(12.0)).color(p.text).line_height(Some(17.5)));
+        let r = add(ui);
+        if !help.is_empty() {
+            rich_label(ui, help, 11.5, p.text_muted);
+        }
+        r
+    })
+    .inner
 }
 
-/// A label on the left and a control on the right.
-fn setting_row(ui: &mut Ui, label: &str, control: impl FnOnce(&mut Ui)) {
+/// A row of the run settings: label (and help) on the left, the control on
+/// the right.
+fn setting_row(ui: &mut Ui, label: &str, help: &str, control_w: f32, control: impl FnOnce(&mut Ui)) {
+    let p = theme::pal(ui);
     ui.horizontal(|ui| {
-        ui.set_min_height(26.0);
-        ui.label(label);
+        let label_w = (ui.available_width() - control_w - 8.0).max(80.0);
+        ui.allocate_ui_with_layout(vec2(label_w, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(label_w);
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.label(RichText::new(label).font(theme::medium(13.0)).color(p.text));
+            if !help.is_empty() {
+                ui.add(egui::Label::new(kit::hint(ui, help)).wrap());
+            }
+        });
         ui.with_layout(Layout::right_to_left(Align::Center), control);
     });
 }
 
-/// The top of the inspector: a tinted icon, a small line above the title,
-/// and actions on the right.
+/// The top of the inspector: a tinted 36 px tile, a small line above the
+/// title, and actions on the right.
 fn inspector_head(ui: &mut Ui, icon: &str, color: Color32, eyebrow: &str, title: &str, actions: impl FnOnce(&mut Ui)) {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    ui.horizontal(|ui| {
-        ui.set_height(38.0);
-        let (tile, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-        ui.painter().rect_filled(tile, CornerRadius::same(8), theme::soft(color, if dark { 0.2 } else { 0.12 }));
-        ui.painter().text(tile.center(), Align2::CENTER_CENTER, icon, theme::icon_font(19.0), color);
-        ui.add_space(2.0);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            actions(ui);
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add_space(1.0);
-                ui.add(egui::Label::new(RichText::new(eyebrow).small().color(p.text_muted)).truncate());
-                ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(15.0)).color(p.text)).truncate());
+    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 14, top: 14, bottom: 12 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (tile, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+            ui.painter().rect_filled(tile, CornerRadius::same(theme::RADIUS_CARD), theme::soft(color, 0.14));
+            ui.painter().text(tile.center(), Align2::CENTER_CENTER, icon, theme::icon_font(18.0), color);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                actions(ui);
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add_space(2.0);
+                    ui.add(egui::Label::new(kit::eyebrow(ui, eyebrow)).truncate());
+                    ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(14.0)).color(p.text)).truncate());
+                });
             });
         });
     });
 }
 
-/// A tinted box with an icon and a message (run state of a block).
-fn banner(ui: &mut Ui, color: Color32, icon: Option<&str>, title: &str, detail: Option<&str>) {
+/// The run state of a block on the soft fill of its tone: an icon (or a
+/// spinner), the text, and an error under it.
+fn run_banner(ui: &mut Ui, tone: Tone, icon: Option<&str>, text: &str, detail: Option<&str>) {
     let p = theme::pal(ui);
-    let dark = ui.visuals().dark_mode;
-    egui::Frame::new()
-        .fill(theme::soft(color, if dark { 0.12 } else { 0.07 }))
-        .stroke(Stroke::new(1.0, theme::soft(color, 0.25)))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 10))
-        .show(ui, |ui| {
+    let (fg, bg) = p.tone(tone);
+    egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(12, 9)).show(
+        ui,
+        |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
                 match icon {
                     Some(i) => {
-                        ui.label(RichText::new(i).font(theme::icon_font(16.0)).color(color));
+                        ui.label(RichText::new(i).font(theme::icon_font(16.0)).color(fg));
                     }
                     None => {
-                        ui.add(egui::Spinner::new().size(14.0).color(color));
+                        ui.add(egui::Spinner::new().size(14.0).color(fg));
                     }
                 }
-                ui.label(RichText::new(title).font(theme::medium(13.0)).color(p.text));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let color = if matches!(tone, Tone::Ok | Tone::Err | Tone::Warn) { fg } else { p.text };
+                    rich_label(ui, text, 12.5, color);
+                    if let Some(d) = detail {
+                        let c = if tone == Tone::Err { p.err } else { p.text_muted };
+                        ui.add(egui::Label::new(RichText::new(d).font(theme::mono(11.5)).color(c)).wrap());
+                    }
+                });
             });
-            if let Some(d) = detail {
-                ui.add_space(4.0);
-                ui.label(RichText::new(d).font(theme::mono(12.0)).color(if color == p.err {
-                    p.err
-                } else {
-                    p.text_muted
-                }));
-            }
-        });
+        },
+    );
 }
 
+/// A clickable problem on the soft fill of its severity: who (bold) and
+/// what, with `{{variables}}` drawn as chips.
 fn problem_row(ui: &mut Ui, severity: Severity, who: Option<&str>, message: &str) -> Response {
     let p = theme::pal(ui);
-    let (icon, color) = if severity == Severity::Error { (icons::X_CIRCLE, p.err) } else { (icons::WARNING, p.warn) };
-    let bg = ui.painter().add(Shape::Noop);
-    let row = ui
-        .horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_space(4.0);
-            ui.label(RichText::new(icon).font(theme::icon_font(14.5)).color(color));
-            let mut job = LayoutJob::default();
-            if let Some(w) = who {
-                job.append(w, 0.0, TextFormat::simple(theme::medium(13.0), p.text));
-                job.append("  ", 0.0, TextFormat::simple(theme::medium(13.0), p.text));
-            }
-            job.append(message, 0.0, TextFormat::simple(FontId::proportional(13.0), p.text_muted));
-            ui.add(egui::Label::new(job).wrap().selectable(false));
-        })
-        .response;
-    let rect = row.rect.expand2(vec2(0.0, 3.0));
-    let resp = ui.interact(rect, row.id.with("problem"), Sense::click());
-    if resp.hovered() {
-        ui.painter().set(bg, Shape::rect_filled(rect, CornerRadius::same(RADIUS), p.hover));
+    let dark = ui.visuals().dark_mode;
+    let (icon, tone) =
+        if severity == Severity::Error { (icons::X_CIRCLE, Tone::Err) } else { (icons::WARNING, Tone::Warn) };
+    let (fg, bg) = p.tone(tone);
+    let w = ui.available_width();
+    let mut job = LayoutJob::default();
+    if let Some(who) = who {
+        job.append(who, 0.0, TextFormat::simple(theme::semibold(12.5), p.text));
+        job.append(" ", 0.0, TextFormat::simple(FontId::proportional(12.5), p.text));
     }
-    ui.add_space(2.0);
+    append_vars(&mut job, message, FontId::proportional(12.5), p.text_muted, dark, true);
+    job.wrap.max_width = (w - 10.0 - 15.0 - 8.0 - 10.0).max(40.0);
+    let g = ui.painter().layout_job(job);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, g.size().y + 16.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if resp.hovered() { theme::soft(fg, 0.22) } else { bg };
+        ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+        ui.painter().text(
+            pos2(rect.left() + 10.0 + 7.5, rect.top() + 8.0 + 8.0),
+            Align2::CENTER_CENTER,
+            icon,
+            theme::icon_font(14.5),
+            fg,
+        );
+        ui.painter().galley(pos2(rect.left() + 10.0 + 15.0 + 8.0, rect.top() + 8.0), g, p.text);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    widgets::a11y_button(&resp, message);
     resp
 }
 
-fn inspector(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
-    ui.add_space(2.0);
-    match tab.selected.clone() {
-        Some(Selection::Edge(i)) => edge_inspector(ui, tab, i),
-        Some(Selection::Block(id)) => block_inspector(app, ui, tab, &id),
-        None => flow_settings(ui, tab),
-    }
-    ui.add_space(20.0);
+fn inspector_panel(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab) {
+    egui::ScrollArea::vertical().id_salt("flow-inspector-scroll").auto_shrink([false; 2]).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        match tab.selected.clone() {
+            Some(Selection::Edge(i)) => edge_inspector(ui, tab, i),
+            Some(Selection::Block(id)) => block_inspector(app, ui, tab, &id),
+            None => flow_settings(ui, tab),
+        }
+        ui.add_space(8.0);
+    });
 }
 
 #[derive(PartialEq)]
@@ -1890,14 +2111,14 @@ fn block_inspector(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab, id:
     let kind = block.kind();
     let mut act = HeadAction::None;
     inspector_head(ui, kind_icon(kind), kind_color(kind, dark), tr(kind.label()), block.display_name(), |ui| {
-        if kit::icon_button(ui, icons::X, tr("Close")).clicked() {
+        if kit::icon_button_sm(ui, icons::X, tr("Close")).clicked() {
             act = HeadAction::Close;
         }
         if kind != BlockKind::Start {
-            if kit::icon_button(ui, icons::TRASH, tr("Delete block")).clicked() {
+            if kit::icon_button_sm(ui, icons::TRASH, tr("Delete block")).clicked() {
                 act = HeadAction::Delete;
             }
-            if kit::icon_button(ui, icons::COPY, tr("Duplicate")).clicked() {
+            if kit::icon_button_sm(ui, icons::COPY, tr("Duplicate (⌘D)")).clicked() {
                 act = HeadAction::Duplicate;
             }
         }
@@ -1919,83 +2140,126 @@ fn block_inspector(app: &mut TernaryWireApp, ui: &mut Ui, tab: &mut FlowTab, id:
             return;
         }
     }
-    ui.add_space(12.0);
 
     // Run state first: it is what one looks for while a flow runs.
-    match tab.run.status.get(&block.id) {
+    let banner = match tab.run.status.get(&block.id) {
         Some(BlockStatus::Running { since }) => {
-            banner(ui, p.accent, None, &trf("Running… {}", &[&elapsed(*since)]), None);
-            ui.add_space(4.0);
+            Some((Tone::Accent, None, format!("**{}** {}", tr("Running…"), elapsed(*since)), None))
         }
         Some(BlockStatus::Done { port, failed, ms, error, tests, .. }) => {
-            let (color, icon) = if *failed { (p.err, icons::X_CIRCLE) } else { (p.ok, icons::CHECK_CIRCLE) };
-            let mut title =
-                format!("{} → {} · {}", if *failed { tr("Failed") } else { tr("Succeeded") }, tr(port), human_ms(*ms));
+            let (tone, icon) = if *failed { (Tone::Err, icons::X_CIRCLE) } else { (Tone::Ok, icons::CHECK_CIRCLE) };
+            let head = if *failed { tr("Failed") } else { tr("Succeeded") };
+            let mut text = format!("**{head}** → {} · {}", tr(port), human_ms(*ms));
             if tests.0 + tests.1 > 0 {
-                title.push_str(&format!(" · {}", trf("{}/{} tests", &[&tests.0, &(tests.0 + tests.1)])));
+                text.push_str(&format!(" · {}", trf("{}/{} tests", &[&tests.0, &(tests.0 + tests.1)])));
             }
-            banner(ui, color, Some(icon), &title, error.as_deref());
-            ui.add_space(4.0);
+            Some((tone, Some(icon), text, error.clone()))
         }
-        None => {}
+        None => None,
+    };
+    if let Some((tone, icon, text, error)) = banner {
+        egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 14 }).show(ui, |ui| {
+            run_banner(ui, tone, icon, &text, error.as_deref());
+        });
     }
 
-    section_head(ui, tr("Block"), None);
-    field_label(ui, tr("Label"));
-    ui.add(egui::TextEdit::singleline(&mut block.label).hint_text(tr(kind.label())).desired_width(f32::INFINITY));
-    field_label(ui, tr("Reference"));
-    let reference = format!("{{{{blocks.{}.output}}}}", reference_key(&block));
-    egui::Frame::new()
-        .fill(p.subtle)
-        .corner_radius(CornerRadius::same(RADIUS))
-        .inner_margin(egui::Margin { left: 8, right: 2, top: 2, bottom: 2 })
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if kit::icon_button_ex(ui, icons::COPY, tr("Copy"), false, 24.0).clicked() {
-                        ui.ctx().copy_text(reference.clone());
-                    }
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(&reference).font(theme::mono(12.0)).color(p.text))
-                                .truncate(),
-                        );
-                    });
-                });
-            });
+    section(ui, |ui| {
+        ui.label(kit::section_title(tr("Block")));
+        field(ui, tr("Label"), "", |ui| {
+            let id = ui.make_persistent_id(("flow-label", &block.id));
+            input_sm(ui, id, &mut block.label, tr(kind.label()), ui.available_width(), false, false);
         });
-    ui.label(kit::hint(ui, tr("Later blocks read this block's output with this reference.")));
+        let reference = format!("{{{{blocks.{}.output}}}}", reference_key(&block));
+        field(ui, tr("Reference"), tr("Later blocks read this block's output with this reference."), |ui| {
+            reference_tag(ui, &reference);
+        });
+    });
 
-    section_gap(ui);
     let vars = app.var_ctx(None);
-    config_editor(app, ui, &mut block, &vars);
+    section(ui, |ui| config_editor(app, ui, &mut block, &vars));
 
     let problems: Vec<&Diagnostic> =
         tab.diagnostics.iter().filter(|d| d.block.as_deref() == Some(block.id.as_str())).collect();
     if !problems.is_empty() {
-        section_gap(ui);
-        section_head(ui, tr("Problems"), None);
-        for d in problems {
-            problem_row(ui, d.severity, None, &d.message);
-        }
+        section(ui, |ui| {
+            section_head_with(ui, tr("Problems"), |ui| {
+                let errors = problems.iter().any(|d| d.severity == Severity::Error);
+                kit::tone_pill(ui, &problems.len().to_string(), if errors { Tone::Err } else { Tone::Warn });
+            });
+            for d in &problems {
+                problem_row(ui, d.severity, None, &d.message);
+            }
+        });
     }
     if let Some(text) = tab.run.live_text(&block.id) {
-        section_gap(ui);
-        section_head(ui, tr("Answer so far"), None);
-        crate::proto_common::text_view(ui, ("flow-live", &block.id), &crate::dialogs::ellipsize(text, 20_000));
+        let text = crate::dialogs::ellipsize(text, 20_000);
+        section(ui, |ui| {
+            section_head(ui, tr("Answer so far"), None);
+            code_view(ui, &text, Lang::Text);
+        });
     }
     if let Some(BlockStatus::Done { output, .. }) = tab.run.status.get(&block.id) {
-        section_gap(ui);
-        section_head(ui, tr("Output"), Some(tr("What the block produced in the last run.")));
         let text = serde_json::to_string_pretty(output.as_ref()).unwrap_or_default();
-        crate::proto_common::text_view(ui, ("flow-output", &block.id), &crate::dialogs::ellipsize(&text, 20_000));
+        section(ui, |ui| {
+            section_head_with(ui, tr("Output"), |ui| {
+                if kit::icon_button_sm(ui, icons::COPY, tr("Copy")).clicked() {
+                    ui.ctx().copy_text(text.clone());
+                }
+            });
+            ui.label(kit::hint(ui, tr("What the block produced in the last run.")));
+            code_view(ui, &crate::dialogs::ellipsize(&text, 20_000), Lang::Json);
+        });
     }
+    let _ = p;
     if let Some(slot) = tab.flow.block_mut(&block.id)
         && *slot != block
     {
         *slot = block;
         tab.touch();
     }
+}
+
+/// `{{blocks.<name>.output}}` on a well, with a Copy button.
+fn reference_tag(ui: &mut Ui, reference: &str) {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
+    ui.painter().rect(rect, CornerRadius::same(RADIUS), p.well, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    let inner = Rect::from_min_max(pos2(rect.left() + 9.0, rect.top()), pos2(rect.right() - 4.0, rect.bottom()));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::right_to_left(Align::Center)));
+    c.spacing_mut().item_spacing.x = 6.0;
+    let copy = kit::button(
+        &mut c,
+        kit::Kind::Ghost,
+        kit::Size::Sm,
+        tr("Copy"),
+        kit::ButtonOpts { icon: Some(icons::COPY), ..Default::default() },
+    );
+    if copy.clicked() {
+        c.ctx().copy_text(reference.to_string());
+    }
+    let mut job = var_job(reference, theme::mono(11.5), p.text, dark, false);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(c.available_width().max(20.0));
+    let g = c.painter().layout_job(job);
+    c.painter().galley(pos2(inner.left(), rect.center().y - g.size().y / 2.0), g, p.text);
+}
+
+/// Read-only text on a well (JSON highlighted), selectable.
+pub(crate) fn code_view(ui: &mut Ui, text: &str, lang: Lang) {
+    let dark = ui.visuals().dark_mode;
+    kit::well(ui).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut job = crate::highlight::cached(
+            ui.ctx(),
+            crate::highlight::HlKey { text, lang, dark, search: "", vars: None, font_size: 12.5, wrap: true },
+        );
+        for s in &mut job.sections {
+            s.format.line_height = Some(20.0);
+        }
+        job.wrap.max_width = ui.available_width();
+        ui.add(egui::Label::new(job).selectable(true));
+    });
 }
 
 fn edge_inspector(ui: &mut Ui, tab: &mut FlowTab, i: usize) {
@@ -2009,30 +2273,34 @@ fn edge_inspector(ui: &mut Ui, tab: &mut FlowTab, i: usize) {
     let title = format!("{} → {}", name(&e.from_block), name(&e.to_block));
     let mut close = false;
     inspector_head(ui, icons::LINK_SIMPLE, port_color(&e.from_port, &p, dark), tr("Connection"), &title, |ui| {
-        close = kit::icon_button(ui, icons::X, tr("Close")).clicked();
+        close = kit::icon_button_sm(ui, icons::X, tr("Close")).clicked();
     });
     if close {
         tab.selected = None;
         return;
     }
-    ui.add_space(12.0);
     let mut select = None;
-    for (head, block, port) in [(tr("From"), &e.from_block, &e.from_port), (tr("To"), &e.to_block, &e.to_port)] {
-        field_label(ui, head);
-        if endpoint_row(ui, tab.flow.block(block), port).clicked() {
-            select = Some(block.clone());
-        }
-    }
-    ui.add_space(4.0);
-    ui.label(kit::hint(
-        ui,
-        &trf("“{}” runs when “{}” finishes on “{}”.", &[&name(&e.to_block), &name(&e.from_block), &tr(&e.from_port)]),
-    ));
-    ui.add_space(12.0);
     let mut delete = false;
-    ui.horizontal(|ui| {
-        delete = kit::button_ex(ui, kit::Kind::Danger, Some(icons::TRASH), tr("Delete connection"), false).clicked();
-        kit::kbd(ui, "⌫");
+    section(ui, |ui| {
+        for (head, block, port) in [(tr("From"), &e.from_block, &e.from_port), (tr("To"), &e.to_block, &e.to_port)] {
+            field(ui, head, "", |ui| {
+                if endpoint_row(ui, tab.flow.block(block), port).clicked() {
+                    select = Some(block.clone());
+                }
+            });
+        }
+        ui.label(kit::hint(
+            ui,
+            &trf(
+                "“{}” runs when “{}” finishes on “{}”.",
+                &[&name(&e.to_block), &name(&e.from_block), &tr(&e.from_port)],
+            ),
+        ));
+        ui.horizontal(|ui| {
+            let o = kit::ButtonOpts { icon: Some(icons::TRASH), ..Default::default() };
+            delete = kit::button(ui, kit::Kind::Danger, kit::Size::Sm, tr("Delete connection"), o).clicked();
+            kit::kbd(ui, "⌫");
+        });
     });
     if delete {
         tab.flow.edges.remove(i);
@@ -2062,8 +2330,8 @@ fn endpoint_row(ui: &mut Ui, block: Option<&Block>, port: &str) -> Response {
         None => (icons::QUESTION, p.text_muted, tr("(missing block)").to_string()),
     };
     let tile = Rect::from_center_size(Pos2::new(rect.left() + 20.0, rect.center().y), Vec2::splat(22.0));
-    painter.rect_filled(tile, CornerRadius::same(6), color);
-    painter.text(tile.center(), Align2::CENTER_CENTER, icon, theme::icon_font(13.0), p.surface);
+    painter.rect_filled(tile, CornerRadius::same(RADIUS_SM), color);
+    painter.text(tile.center(), Align2::CENTER_CENTER, icon, theme::icon_font(13.0), p.on_accent);
     let pc = port_color(port, &p, dark);
     let pg = painter.layout_no_wrap(tr(port).to_string(), theme::medium(11.5), pc);
     let pill = Rect::from_min_size(
@@ -2101,114 +2369,124 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
         tr("Flow settings"),
         |_| {},
     );
-    ui.add_space(12.0);
     let mut flow = tab.flow.clone();
 
-    section_head(ui, tr("Description"), None);
-    ui.add(
-        egui::TextEdit::multiline(&mut flow.description)
-            .hint_text(tr("What the flow does and what it needs"))
-            .desired_rows(3)
-            .desired_width(f32::INFINITY),
-    );
+    section(ui, |ui| {
+        ui.label(kit::section_title(tr("Description")));
+        ui.add(
+            egui::TextEdit::multiline(&mut flow.description)
+                .hint_text(RichText::new(tr("What the flow does and what it needs")).color(p.text_faint))
+                .margin(egui::Margin::symmetric(10, 8))
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
+    });
 
-    section_gap(ui);
-    section_head(ui, tr("Inputs"), Some(tr("Values the flow starts with; blocks read them as {{inputs.name}}.")));
-    let mut remove = None;
-    for (i, input) in flow.inputs.iter_mut().enumerate() {
-        ui.push_id(i, |ui| {
-            egui::Frame::new()
-                .fill(p.surface)
-                .stroke(Stroke::new(1.0, p.border))
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
+    section(ui, |ui| {
+        section_head(ui, tr("Inputs"), Some(tr("Values the flow starts with; blocks read them as {{inputs.name}}.")));
+        let mut remove = None;
+        for (i, input) in flow.inputs.iter_mut().enumerate() {
+            ui.push_id(i, |ui| {
+                kit::card(ui).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 8.0;
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            if widgets::small_icon_button(ui, icons::TRASH, tr("Remove input")).clicked() {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if kit::icon_button_sm(ui, icons::TRASH, tr("Remove input")).clicked() {
                                 remove = Some(i);
                             }
-                            ui.checkbox(&mut input.required, tr("Required"));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut input.name)
-                                    .hint_text(tr("name"))
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_width(ui.available_width()),
-                            );
+                            check_label(ui, &mut input.required, tr("Required"), 12.0);
+                            let id = ui.make_persistent_id("name");
+                            input_sm(ui, id, &mut input.name, tr("name"), ui.available_width(), true, false);
                         });
                     });
-                    ui.add_space(4.0);
-                    let label_w = 76.0;
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(vec2(label_w, 24.0), Layout::left_to_right(Align::Center), |ui| {
-                            ui.label(RichText::new(tr("Default")).color(p.text_muted).small());
+                    let half = ((ui.available_width() - 8.0) / 2.0).floor();
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.allocate_ui_with_layout(vec2(half, 0.0), Layout::top_down(Align::Min), |ui| {
+                            field(ui, tr("Default"), "", |ui| {
+                                let mut default = default_text(tab.typed_defaults.remove(&i), &input.default);
+                                let id = ui.make_persistent_id("default");
+                                if input_sm(ui, id, &mut default, tr("JSON value"), half, true, false).changed() {
+                                    input.default = if default.trim().is_empty() {
+                                        Value::Null
+                                    } else {
+                                        serde_json::from_str(&default).unwrap_or(Value::String(default.clone()))
+                                    };
+                                }
+                                tab.typed_defaults.insert(i, (default, input.default.clone()));
+                            });
                         });
-                        let mut default = default_text(tab.typed_defaults.remove(&i), &input.default);
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut default)
-                                    .hint_text(tr("JSON value"))
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_width(ui.available_width()),
-                            )
-                            .changed()
-                        {
-                            input.default = if default.trim().is_empty() {
-                                Value::Null
-                            } else {
-                                serde_json::from_str(&default).unwrap_or(Value::String(default.clone()))
-                            };
-                        }
-                        tab.typed_defaults.insert(i, (default, input.default.clone()));
-                    });
-                    let value = tab.inputs.entry(input.name.clone()).or_default();
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(vec2(label_w, 24.0), Layout::left_to_right(Align::Center), |ui| {
-                            ui.label(RichText::new(tr("Next run")).color(p.text_muted).small());
+                        ui.allocate_ui_with_layout(vec2(half, 0.0), Layout::top_down(Align::Min), |ui| {
+                            field(ui, tr("Next run"), "", |ui| {
+                                let value = tab.inputs.entry(input.name.clone()).or_default();
+                                let id = ui.make_persistent_id("next");
+                                input_sm(ui, id, value, tr("next run only"), half, true, false)
+                                    .on_hover_text(tr("value for the next run"));
+                            });
                         });
-                        ui.add(
-                            egui::TextEdit::singleline(value)
-                                .hint_text(tr("value for the next run"))
-                                .desired_width(ui.available_width()),
-                        );
                     });
                 });
+            });
+        }
+        if let Some(i) = remove {
+            flow.inputs.remove(i);
+        }
+        ui.horizontal(|ui| {
+            if kit::ghost(ui, Some(icons::PLUS), tr("Add input")).clicked() {
+                flow.inputs.push(FlowInput::new(format!("input{}", flow.inputs.len() + 1), Value::Null));
+            }
         });
-        ui.add_space(6.0);
-    }
-    if let Some(i) = remove {
-        flow.inputs.remove(i);
-    }
-    if kit::ghost(ui, Some(icons::PLUS), tr("Add input")).clicked() {
-        flow.inputs.push(FlowInput::new(format!("input{}", flow.inputs.len() + 1), Value::Null));
-    }
+    });
 
-    section_gap(ui);
-    section_head(ui, tr("Run settings"), None);
-    setting_row(ui, tr("Limit steps"), |ui| {
-        if let Some(n) = &mut flow.settings.max_steps {
-            let r = ui.add(egui::DragValue::new(n).range(1..=1_000_000));
-            widgets::a11y_name(&r, tr("Max steps"));
-        }
-        let mut on = flow.settings.max_steps.is_some();
-        if ui.checkbox(&mut on, "").changed() {
-            flow.settings.max_steps = on.then_some(ternarywire_flows::DEFAULT_MAX_STEPS);
-        }
+    section(ui, |ui| {
+        ui.label(kit::section_title(tr("Run settings")));
+        setting_row(
+            ui,
+            tr("Limit steps"),
+            tr("Stops a run after this many block runs (protects against endless loops)."),
+            95.0,
+            |ui| {
+                let on = flow.settings.max_steps.is_some();
+                let mut n = flow.settings.max_steps.unwrap_or(ternarywire_flows::DEFAULT_MAX_STEPS);
+                let r = ui
+                    .add_enabled_ui(on, |ui| {
+                        num_input(ui, "flow-max-steps", tr("Max steps"), &mut n, 1.0..=1_000_000.0, 72.0)
+                    })
+                    .inner;
+                if r.changed() && on {
+                    flow.settings.max_steps = Some(n);
+                }
+                let mut checked = on;
+                if kit::check(ui, &mut checked, tr("Limit steps")).changed() {
+                    flow.settings.max_steps = checked.then_some(ternarywire_flows::DEFAULT_MAX_STEPS);
+                }
+            },
+        );
+        setting_row(
+            ui,
+            tr("Parallel branches at once"),
+            tr("Branches of a Parallel block that run at the same time; 0 runs them all at once."),
+            72.0,
+            |ui| {
+                num_input(
+                    ui,
+                    "flow-max-concurrent",
+                    tr("Parallel branches at once"),
+                    &mut flow.settings.max_concurrent,
+                    0.0..=64.0,
+                    72.0,
+                );
+            },
+        );
+        check_wrap(
+            ui,
+            &mut flow.settings.continue_on_failure,
+            tr("Continue after a failed block without a failure connection"),
+        );
     });
-    ui.label(kit::hint(ui, tr("Stops a run after this many block runs (protects against endless loops).")));
-    ui.add_space(6.0);
-    setting_row(ui, tr("Parallel branches at once"), |ui| {
-        let r = ui.add(egui::DragValue::new(&mut flow.settings.max_concurrent).range(0..=64));
-        widgets::a11y_name(&r, tr("Parallel branches at once"));
-    });
-    ui.label(kit::hint(ui, tr("Branches of a Parallel block that run at the same time; 0 runs them all at once.")));
-    ui.add_space(6.0);
-    ui.checkbox(
-        &mut flow.settings.continue_on_failure,
-        tr("Continue after a failed block without a failure connection"),
-    );
 
     if flow != tab.flow {
         tab.flow = flow;
@@ -2216,57 +2494,98 @@ fn flow_settings(ui: &mut Ui, tab: &mut FlowTab) {
     }
 
     if !tab.diagnostics.is_empty() {
-        section_gap(ui);
-        let errors = tab.diagnostics.iter().filter(|d| d.severity == Severity::Error).count();
-        ui.horizontal(|ui| {
-            ui.label(kit::section_title(tr("Problems")));
-            kit::pill(ui, &tab.diagnostics.len().to_string(), if errors > 0 { p.err } else { p.warn });
-        });
-        ui.label(kit::hint(ui, tr("Click a problem to select its block.")));
-        ui.add_space(6.0);
         let mut select = None;
-        for d in &tab.diagnostics {
-            let who = d.block.as_deref().and_then(|b| tab.flow.block(b)).map(|b| b.display_name().to_string());
-            if problem_row(ui, d.severity, who.as_deref(), &d.message).clicked() {
-                select = d
-                    .block
-                    .clone()
-                    .map(Selection::Block)
-                    .or_else(|| d.edge.filter(|e| *e < tab.flow.edges.len()).map(Selection::Edge));
+        section(ui, |ui| {
+            let errors = tab.diagnostics.iter().filter(|d| d.severity == Severity::Error).count();
+            row(ui, 20.0, |ui| {
+                ui.label(kit::section_title(tr("Problems")));
+                kit::tone_pill(ui, &tab.diagnostics.len().to_string(), if errors > 0 { Tone::Err } else { Tone::Warn });
+            });
+            ui.label(kit::hint(ui, tr("Click a problem to select its block.")));
+            for d in &tab.diagnostics {
+                let who = d.block.as_deref().and_then(|b| tab.flow.block(b)).map(|b| b.display_name().to_string());
+                if problem_row(ui, d.severity, who.as_deref(), &d.message).clicked() {
+                    select = d
+                        .block
+                        .clone()
+                        .map(Selection::Block)
+                        .or_else(|| d.edge.filter(|e| *e < tab.flow.edges.len()).map(Selection::Edge));
+                }
             }
-        }
+        });
         if select.is_some() {
             tab.selected = select;
         }
     }
 
-    section_gap(ui);
-    section_head(ui, tr("Keyboard"), None);
-    for (keys, what) in [
-        ("⌫", tr("Delete the selection")),
-        ("⌘D", tr("Duplicate the block")),
-        ("← ↑ → ↓", tr("Move the block (⇧ for bigger steps)")),
-        ("Esc", tr("Clear the selection")),
-        ("⌘ + scroll", tr("Zoom around the pointer")),
-    ] {
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(vec2(86.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
+    section(ui, |ui| {
+        ui.label(kit::section_title(tr("Keyboard")));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (keys, what) in [
+            ("⌫", tr("Delete the selection")),
+            ("⌘D", tr("Duplicate the block")),
+            ("← ↑ → ↓", tr("Move the block (⇧ for bigger steps)")),
+            ("Esc", tr("Clear the selection")),
+            ("⌘ + scroll", tr("Zoom around the pointer")),
+        ] {
+            row(ui, 24.0, |ui| {
                 kit::kbd(ui, keys);
+                ui.label(RichText::new(what).size(12.0).color(p.text_muted));
             });
-            ui.label(RichText::new(what).color(p.text_muted).small());
-        });
-    }
+        }
+    });
 }
 
-/// Picker for saved requests of the given protocols ("Collection / name").
+/// Picker for saved requests of the given protocols ("Collection / name"),
+/// with the method in its color.
 fn request_picker(app: &TernaryWireApp, ui: &mut Ui, id: &str, current: &mut ItemRef, want_ai: bool) -> bool {
+    let p = theme::pal(ui);
+    let dark = ui.visuals().dark_mode;
     let mut changed = false;
+    let badge = app
+        .ws
+        .data
+        .collections
+        .iter()
+        .filter(|c| current.collection_id.is_empty() || c.id == current.collection_id)
+        .find_map(|c| c.find_request(&current.request_id).map(|i| i.request.badge()));
     let shown = request_name(app, current).unwrap_or_else(|| tr("Choose a request").into());
-    let r = egui::ComboBox::from_id_salt(id)
-        .icon(crate::kit::combo_caret)
-        .width(ui.available_width())
-        .selected_text(crate::dialogs::ellipsize(&shown, 44))
-        .show_ui(ui, |ui| {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, enabled, tr("Request")));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let stroke = if resp.hovered() { p.text_faint } else { p.border_strong };
+        painter.rect(rect, CornerRadius::same(RADIUS_SM), p.surface, Stroke::new(1.0, stroke), StrokeKind::Inside);
+        if resp.has_focus() {
+            kit::focus_ring(ui, rect, RADIUS_SM);
+        }
+        let mut x = rect.left() + 8.0;
+        if let Some(m) = &badge {
+            let g = painter.layout_no_wrap(
+                widgets::method_short(m).to_string(),
+                theme::semibold(10.5),
+                theme::method_color(m, dark),
+            );
+            let gw = g.size().x;
+            painter.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, p.text);
+            x += gw + 6.0;
+        }
+        let color = if badge.is_some() { p.text } else { p.text_muted };
+        let g = one_line(painter, &shown, FontId::proportional(12.0), color, rect.right() - 26.0 - x);
+        painter.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
+        painter.text(
+            pos2(rect.right() - 12.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icons::CARET_DOWN,
+            theme::icon_font(12.0),
+            p.text_faint,
+        );
+    }
+    egui::Popup::menu(&resp).id(ui.make_persistent_id(("request-picker", id))).width(w.max(240.0)).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for c in &app.ws.data.collections {
                 for r in c.requests() {
                     let ok = if want_ai {
@@ -2277,27 +2596,65 @@ fn request_picker(app: &TernaryWireApp, ui: &mut Ui, id: &str, current: &mut Ite
                     if !ok {
                         continue;
                     }
-                    let sel = current.request_id == r.id;
-                    if ui.selectable_label(sel, format!("{} / {} {}", c.name, r.request.badge(), r.name)).clicked() {
+                    let badge = r.request.badge();
+                    let label = format!("{} / {}", c.name, r.name);
+                    let item = kit::MenuItem {
+                        method: Some(&badge),
+                        label: &label,
+                        selected: current.request_id == r.id,
+                        ..Default::default()
+                    };
+                    if kit::menu_item_ex(ui, item).clicked() {
                         *current = ItemRef::new(&c.id, &r.id);
                         changed = true;
                     }
                 }
             }
         });
-    widgets::a11y_name(&r.response, tr("Request"));
+    });
     changed
 }
 
-/// A field label and a full-width `{{variable}}` line.
-fn var_field(ui: &mut Ui, vars: &widgets::VarCtx, label: &str, id: &str, value: &mut String, hint: &str) {
-    field_label(ui, label);
-    widgets::var_line(ui, id, value, vars, hint, ui.available_width());
+/// A small drop-down at full width whose menu lists `choices`; returns the
+/// chosen one.
+fn select_menu<T: PartialEq + Copy>(ui: &mut Ui, name: &str, current: T, choices: &[(T, &str)]) -> Option<T> {
+    let text = choices.iter().find(|(v, _)| *v == current).map(|(_, l)| *l).unwrap_or_default();
+    let w = ui.available_width();
+    let r = kit::select_box(ui, None, text, w, true);
+    widgets::a11y_name(&r, name);
+    let mut chosen = None;
+    egui::Popup::menu(&r).width(w.max(200.0)).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (v, label) in choices {
+                let item = kit::MenuItem { checked: Some(*v == current), label, ..Default::default() };
+                if kit::menu_item_ex(ui, item).clicked() {
+                    chosen = Some(*v);
+                }
+            }
+        });
+    });
+    chosen
 }
 
-fn text_field(ui: &mut Ui, label: &str, value: &mut String, hint: &str) {
-    field_label(ui, label);
-    ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(f32::INFINITY));
+/// A labeled 26 px `{{variable}}` field.
+fn var_field(ui: &mut Ui, vars: &widgets::VarCtx, label: &str, id: &str, value: &mut String, hint: &str) {
+    field(ui, label, "", |ui| var_input(ui, vars, id, value, hint));
+}
+
+fn text_field(ui: &mut Ui, label: &str, id: &str, value: &mut String, hint: &str) {
+    field(ui, label, "", |ui| {
+        let id = ui.make_persistent_id(id);
+        input_sm(ui, id, value, hint, ui.available_width(), false, false);
+    });
+}
+
+/// A small segmented control on a track as wide as the section.
+fn segmented_full<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, items: &[(T, &str)]) -> bool {
+    let p = theme::pal(ui);
+    let track = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 26.0));
+    ui.painter().rect_filled(track, CornerRadius::same(8), p.subtle);
+    kit::segmented_sm(ui, current, items)
 }
 
 fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &widgets::VarCtx) {
@@ -2316,69 +2673,70 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
         BlockConfig::Request(c) => {
             section_head(ui, tr("Request"), None);
             let mut saved = matches!(c.source, RequestSource::Saved(_));
-            if kit::segmented(ui, &mut saved, &[(true, tr("Saved request")), (false, tr("Inline request"))]) {
+            if segmented_full(ui, &mut saved, &[(true, tr("Saved request")), (false, tr("Inline request"))]) {
                 c.source = if saved { RequestSource::Saved(ItemRef::default()) } else { RequestSource::default() };
             }
             match &mut c.source {
                 RequestSource::Saved(r) => {
-                    field_label(ui, tr("Request"));
-                    request_picker(app, ui, &format!("flow-req-{id}"), r, false);
-                    ui.label(kit::hint(
-                        ui,
-                        tr("Runs with the collection's auth, scripts and variables (HTTP, gRPC, MCP)."),
-                    ));
+                    field(ui, tr("Request"), tr("Runs the saved request with its auth, scripts and tests."), |ui| {
+                        request_picker(app, ui, &format!("flow-req-{id}"), r, false);
+                    });
                 }
                 RequestSource::Inline { request, .. } => {
-                    field_label(ui, tr("URL"));
-                    ui.horizontal(|ui| {
-                        widgets::method_picker(ui, &mut request.method);
-                        let mut url = request.url.clone();
-                        if widgets::var_line(
+                    field(ui, tr("URL"), "", |ui| {
+                        ui.horizontal(|ui| {
+                            widgets::method_picker(ui, &mut request.method);
+                            let mut url = request.url.clone();
+                            if widgets::var_line(
+                                ui,
+                                ("flow-url", &id),
+                                &mut url,
+                                vars,
+                                "https://api.example.com/items",
+                                ui.available_width(),
+                            )
+                            .changed()
+                            {
+                                request.set_url(url);
+                            }
+                        });
+                    });
+                    field(ui, tr("Headers"), "", |ui| {
+                        let mut h = request.headers.clone();
+                        if widgets::kv_table(
                             ui,
-                            ("flow-url", &id),
-                            &mut url,
+                            ("flow-headers", &id),
+                            &mut h,
                             vars,
-                            "https://api.example.com/items",
-                            ui.available_width(),
-                        )
-                        .changed()
-                        {
-                            request.set_url(url);
+                            KvOptions { allow_add: true, ..Default::default() },
+                        ) {
+                            request.headers = h;
                         }
                     });
-                    field_label(ui, tr("Headers"));
-                    let mut h = request.headers.clone();
-                    if widgets::kv_table(
-                        ui,
-                        ("flow-headers", &id),
-                        &mut h,
-                        vars,
-                        KvOptions { allow_add: true, ..Default::default() },
-                    ) {
-                        request.headers = h;
-                    }
-                    field_label(ui, tr("Body (JSON)"));
-                    let mut raw = request.body.raw.clone();
-                    if widgets::code_editor(ui, ("flow-body", &id), &mut raw, Lang::Json, Some(vars), 3, false)
-                        .changed()
-                    {
-                        request.body = if raw.trim().is_empty() {
-                            ternarywire_core::model::Body::default()
-                        } else {
-                            ternarywire_core::model::Body::raw_json(raw)
-                        };
-                    }
+                    field(ui, tr("Body (JSON)"), "", |ui| {
+                        let mut raw = request.body.raw.clone();
+                        if widgets::code_editor(ui, ("flow-body", &id), &mut raw, Lang::Json, Some(vars), 3, false)
+                            .changed()
+                        {
+                            request.body = if raw.trim().is_empty() {
+                                ternarywire_core::model::Body::default()
+                            } else {
+                                ternarywire_core::model::Body::raw_json(raw)
+                            };
+                        }
+                    });
                 }
             }
-            var_field(ui, vars, tr("Success status"), &format!("flow-st-{id}"), &mut c.success_status, "2xx");
-            ui.label(kit::hint(
+            field(
                 ui,
-                tr("Statuses that count as success, like 2xx or 200-299. Empty: any status below 400."),
-            ));
+                tr("Success status"),
+                tr("Statuses that leave through **success**; any other status leaves through **failure**."),
+                |ui| var_input(ui, vars, &format!("flow-st-{id}"), &mut c.success_status, "2xx"),
+            );
         }
         BlockConfig::Condition(c) => {
             section_head(ui, tr("Condition"), Some(tr("Continues on “true” or “false”.")));
-            kit::segmented(
+            segmented_full(
                 ui,
                 &mut c.mode,
                 &[(ConditionMode::Compare, tr("Compare")), (ConditionMode::Expression, tr("JavaScript"))],
@@ -2393,25 +2751,29 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                         &mut c.left,
                         "{{blocks.list.output.status}}",
                     );
-                    field_label(ui, tr("Operator"));
-                    let r = egui::ComboBox::from_id_salt(("flow-op", &id))
-                        .icon(crate::kit::combo_caret)
-                        .width(ui.available_width())
-                        .selected_text(tr(c.op.label()))
-                        .show_ui(ui, |ui| {
-                            for op in CompareOp::ALL {
-                                ui.selectable_value(&mut c.op, op, tr(op.label()));
-                            }
-                        });
-                    widgets::a11y_name(&r.response, tr("Operator"));
+                    field(ui, tr("Operator"), "", |ui| {
+                        let ops: Vec<(CompareOp, &str)> =
+                            CompareOp::ALL.iter().map(|op| (*op, tr(op.label()))).collect();
+                        if let Some(op) = select_menu(ui, tr("Operator"), c.op, &ops) {
+                            c.op = op;
+                        }
+                    });
                     if !c.op.is_unary() {
                         var_field(ui, vars, tr("Compared with"), &format!("flow-right-{id}"), &mut c.right, "200");
                     }
                 }
                 ConditionMode::Expression => {
-                    field_label(ui, tr("Expression"));
-                    widgets::code_editor(ui, ("flow-expr", &id), &mut c.expression, Lang::JavaScript, None, 3, false);
-                    ui.label(kit::hint(ui, tr("input.status === 200 && input.json.items.length > 0")));
+                    field(ui, tr("Expression"), tr("input.status === 200 && input.json.items.length > 0"), |ui| {
+                        widgets::code_editor(
+                            ui,
+                            ("flow-expr", &id),
+                            &mut c.expression,
+                            Lang::JavaScript,
+                            None,
+                            3,
+                            false,
+                        );
+                    });
                 }
             }
         }
@@ -2423,7 +2785,7 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                     "Blocks connected to “item” run once per element ({{loop.item}}, {{loop.index}}); “done” runs after the last one.",
                 )),
             );
-            kit::segmented(ui, &mut c.mode, &[(LoopMode::ForEach, tr("For each")), (LoopMode::Count, tr("Count"))]);
+            segmented_full(ui, &mut c.mode, &[(LoopMode::ForEach, tr("For each")), (LoopMode::Count, tr("Count"))]);
             match c.mode {
                 LoopMode::ForEach => var_field(
                     ui,
@@ -2435,12 +2797,10 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                 ),
                 LoopMode::Count => var_field(ui, vars, tr("Times"), &format!("flow-count-{id}"), &mut c.count, "5"),
             }
-            ui.add_space(6.0);
-            setting_row(ui, tr("Max iterations"), |ui| {
+            setting_row(ui, tr("Max iterations"), "", 90.0, |ui| {
                 let mut n = c.max_iterations.unwrap_or(ternarywire_flows::DEFAULT_MAX_ITERATIONS);
-                let r = ui.add(egui::DragValue::new(&mut n).range(1..=1_000_000));
-                widgets::a11y_name(&r, tr("Max iterations"));
-                if r.changed() {
+                let salt = format!("flow-max-iter-{id}");
+                if num_input(ui, salt.as_str(), tr("Max iterations"), &mut n, 1.0..=1_000_000.0, 90.0).changed() {
                     c.max_iterations = Some(n);
                 }
             });
@@ -2456,27 +2816,21 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
         BlockConfig::Ai(c) => {
             section_head(ui, tr("AI"), None);
             let mut saved = c.request.is_some();
-            if ui.checkbox(&mut saved, tr("Based on a saved AI request")).changed() {
+            if kit::checkbox(ui, &mut saved, tr("Based on a saved AI request")).changed() {
                 c.request = saved.then(ItemRef::default);
             }
             if let Some(r) = &mut c.request {
-                field_label(ui, tr("Request"));
-                request_picker(app, ui, &format!("flow-ai-{id}"), r, true);
+                field(ui, tr("Request"), "", |ui| {
+                    request_picker(app, ui, &format!("flow-ai-{id}"), r, true);
+                });
             } else {
                 let current = c.provider.unwrap_or_default();
-                field_label(ui, tr("Provider"));
-                let r = egui::ComboBox::from_id_salt(("flow-ai-provider", &id))
-                    .icon(crate::kit::combo_caret)
-                    .width(ui.available_width())
-                    .selected_text(current.label())
-                    .show_ui(ui, |ui| {
-                        for p in AiProvider::ALL {
-                            if ui.selectable_label(current == p, p.label()).clicked() {
-                                c.provider = Some(p);
-                            }
-                        }
-                    });
-                widgets::a11y_name(&r.response, tr("Provider"));
+                field(ui, tr("Provider"), "", |ui| {
+                    let choices: Vec<(AiProvider, &str)> = AiProvider::ALL.iter().map(|p| (*p, p.label())).collect();
+                    if let Some(p) = select_menu(ui, tr("Provider"), current, &choices) {
+                        c.provider = Some(p);
+                    }
+                });
                 var_field(ui, vars, tr("Model"), &format!("flow-ai-model-{id}"), &mut c.model, "gpt-5-mini");
                 var_field(
                     ui,
@@ -2488,13 +2842,14 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                 );
                 var_field(ui, vars, tr("API key"), &format!("flow-ai-key-{id}"), &mut c.api_key, "{{vault:openai}}");
             }
-            field_label(ui, tr("System prompt"));
-            widgets::code_editor(ui, ("flow-ai-system", &id), &mut c.system, Lang::Text, Some(vars), 2, false);
-            field_label(ui, tr("Prompt"));
-            widgets::code_editor(ui, ("flow-ai-prompt", &id), &mut c.prompt, Lang::Text, Some(vars), 4, false);
-            ui.add_space(4.0);
-            ui.checkbox(&mut c.require_json, tr("Fail unless the answer is JSON"));
-            ui.checkbox(&mut c.stream, tr("Stream the answer (shown live while the flow runs)"));
+            field(ui, tr("System prompt"), "", |ui| {
+                widgets::code_editor(ui, ("flow-ai-system", &id), &mut c.system, Lang::Text, Some(vars), 2, false);
+            });
+            field(ui, tr("Prompt"), "", |ui| {
+                widgets::code_editor(ui, ("flow-ai-prompt", &id), &mut c.prompt, Lang::Text, Some(vars), 4, false);
+            });
+            check_wrap(ui, &mut c.require_json, tr("Fail unless the answer is JSON"));
+            check_wrap(ui, &mut c.stream, tr("Stream the answer (shown live while the flow runs)"));
         }
         BlockConfig::Parallel(_) => {
             section_head(
@@ -2522,9 +2877,11 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                 (format!("{{{{blocks.{key}.output.items}}}}"), tr("all outputs as a list")),
                 (format!("{{{{blocks.{key}.output.count}}}}"), tr("number of branches that arrived")),
             ] {
-                ui.add_space(4.0);
-                ui.label(RichText::new(r).font(theme::mono(12.0)));
-                ui.label(kit::hint(ui, what));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    reference_tag(ui, &r);
+                    ui.label(kit::hint(ui, what));
+                });
             }
         }
         BlockConfig::Delay(c) => {
@@ -2533,7 +2890,7 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
         }
         BlockConfig::SetVariable(c) => {
             section_head(ui, tr("Set variable"), None);
-            text_field(ui, tr("Name"), &mut c.name, "token");
+            text_field(ui, tr("Name"), &format!("flow-var-name-{id}"), &mut c.name, "token");
             var_field(
                 ui,
                 vars,
@@ -2542,29 +2899,29 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                 &mut c.value,
                 "{{blocks.login.output.json.token}}",
             );
-            field_label(ui, tr("Scope"));
-            kit::segmented(
-                ui,
-                &mut c.scope,
-                &[
-                    (VariableScope::Flow, tr("Flow")),
-                    (VariableScope::Environment, tr("Environment")),
-                    (VariableScope::Global, tr("Global")),
-                ],
-            );
+            field(ui, tr("Scope"), "", |ui| {
+                segmented_full(
+                    ui,
+                    &mut c.scope,
+                    &[
+                        (VariableScope::Flow, tr("Flow")),
+                        (VariableScope::Environment, tr("Environment")),
+                        (VariableScope::Global, tr("Global")),
+                    ],
+                );
+            });
         }
         BlockConfig::Template(c) => {
             section_head(ui, tr("Template"), None);
-            kit::segmented(
+            segmented_full(
                 ui,
                 &mut c.mode,
                 &[(TemplateMode::Template, tr("Template")), (TemplateMode::Expression, tr("JavaScript"))],
             );
-            ui.add_space(6.0);
             match c.mode {
                 TemplateMode::Template => {
                     widgets::code_editor(ui, ("flow-tpl", &id), &mut c.template, Lang::Json, Some(vars), 4, false);
-                    ui.checkbox(&mut c.parse_json, tr("Parse the result as JSON"));
+                    check_wrap(ui, &mut c.parse_json, tr("Parse the result as JSON"));
                 }
                 TemplateMode::Expression => {
                     widgets::code_editor(ui, ("flow-tpl-js", &id), &mut c.expression, Lang::JavaScript, None, 4, false);
@@ -2577,7 +2934,7 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                 tr("Output"),
                 Some(tr("Named results appear in the run log and in `ternarywire flow run`.")),
             );
-            text_field(ui, tr("Name"), &mut c.name, "summary");
+            text_field(ui, tr("Name"), &format!("flow-out-name-{id}"), &mut c.name, "summary");
             var_field(
                 ui,
                 vars,
@@ -2586,24 +2943,24 @@ fn config_editor(app: &TernaryWireApp, ui: &mut Ui, block: &mut Block, vars: &wi
                 &mut c.value,
                 "{{blocks.summary.output.text}}",
             );
-            ui.add_space(4.0);
-            ui.checkbox(&mut c.fail, tr("Mark the run as failed when reached"));
+            check_wrap(ui, &mut c.fail, tr("Mark the run as failed when reached"));
         }
         BlockConfig::Log(c) => {
             section_head(ui, tr("Log"), None);
             var_field(ui, vars, tr("Message"), &format!("flow-log-msg-{id}"), &mut c.message, "{{loop.item.name}}");
-            field_label(ui, tr("Level"));
-            kit::segmented(
-                ui,
-                &mut c.level,
-                &[
-                    (LogLevelConfig::Info, tr("Info")),
-                    (LogLevelConfig::Log, tr("Log")),
-                    (LogLevelConfig::Warn, tr("Warn")),
-                    (LogLevelConfig::Error, tr("Error")),
-                    (LogLevelConfig::Debug, tr("Debug")),
-                ],
-            );
+            field(ui, tr("Level"), "", |ui| {
+                segmented_full(
+                    ui,
+                    &mut c.level,
+                    &[
+                        (LogLevelConfig::Info, tr("Info")),
+                        (LogLevelConfig::Log, tr("Log")),
+                        (LogLevelConfig::Warn, tr("Warn")),
+                        (LogLevelConfig::Error, tr("Error")),
+                        (LogLevelConfig::Debug, tr("Debug")),
+                    ],
+                );
+            });
         }
     }
 }
@@ -2638,6 +2995,7 @@ enum ListAct {
     New,
     Open(PathBuf),
     Run(PathBuf),
+    Stop(PathBuf),
     Rename(String, String),
     Duplicate(PathBuf),
     Delete(String, String, PathBuf),
@@ -2648,7 +3006,7 @@ enum ListAct {
 pub(crate) struct SidebarRow<'a> {
     pub icon: &'a str,
     pub icon_color: Color32,
-    /// Spinner instead of the icon.
+    /// A spinning icon instead of `icon` (running).
     pub busy: bool,
     pub name: &'a str,
     pub detail: &'a str,
@@ -2666,66 +3024,40 @@ pub(crate) struct SidebarRowOut {
     pub action: Option<Response>,
 }
 
+/// A sidebar list row drawn with [`kit::tree_row`] (28 high), with its hover
+/// actions (the extra action and "More actions"), which stay while the
+/// row's menu is open.
 pub(crate) fn sidebar_row(
     ui: &mut Ui,
     key: impl std::hash::Hash + std::fmt::Debug,
     spec: &SidebarRow,
 ) -> SidebarRowOut {
     let p = theme::pal(ui);
-    let w = ui.available_width();
-    let (rect, row) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
-    widgets::a11y_button(&row, spec.name);
     let popup_id = ui.scope_id().with(("sidebar-row-menu", key));
     let menu_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-    let hovered = ui.rect_contains_pointer(rect) || menu_open;
-    let painter = ui.painter().clone();
-    let fill = if spec.active {
-        Some(p.accent_soft)
-    } else if hovered {
-        Some(p.hover)
-    } else {
-        None
+    let actions_w = 22.0 * (1.0 + spec.action.is_some() as u8 as f32);
+    let row = kit::TreeRow {
+        icon: Some(if spec.busy { icons::CIRCLE_NOTCH } else { spec.icon }),
+        icon_color: Some(if spec.busy || spec.active { p.accent_text } else { spec.icon_color }),
+        spinning: spec.busy,
+        label: spec.name,
+        meta: (!spec.detail.is_empty()).then_some(spec.detail),
+        unsaved: spec.dirty,
+        selected: spec.active,
+        actions_width: actions_w,
+        force_actions: menu_open,
+        ..Default::default()
     };
-    if let Some(f) = fill {
-        painter.rect_filled(rect, CornerRadius::same(RADIUS), f);
-    }
-    let ic = Pos2::new(rect.left() + 16.0, rect.center().y);
-    if spec.busy {
-        spinner(ui, &painter, ic, 5.5, p.accent);
-    } else {
-        let color = if spec.active { p.accent_text } else { spec.icon_color };
-        painter.text(ic, Align2::CENTER_CENTER, spec.icon, theme::icon_font(15.0), color);
-    }
-    let buttons_w = if hovered { 4.0 + 26.0 * (1.0 + spec.action.is_some() as u8 as f32) } else { 0.0 };
-    let detail = if hovered || spec.detail.is_empty() {
-        None
-    } else {
-        Some(painter.layout_no_wrap(spec.detail.to_string(), FontId::proportional(11.5), p.text_faint))
-    };
-    let detail_w = detail.as_ref().map_or(0.0, |g| g.size().x + 10.0);
-    let name_x = rect.left() + 32.0;
-    let dot_w = if spec.dirty { 12.0 } else { 0.0 };
-    let max_w = rect.right() - 8.0 - buttons_w.max(detail_w) - dot_w - name_x;
-    let font = if spec.active { theme::medium(13.5) } else { FontId::proportional(13.5) };
-    let g = one_line(&painter, spec.name, font, p.text, max_w);
-    let name_w = g.size().x;
-    painter.galley(Pos2::new(name_x, rect.center().y - g.size().y / 2.0), g, p.text);
-    if spec.dirty {
-        painter.circle_filled(Pos2::new(name_x + name_w + 8.0, rect.center().y), 3.0, p.accent);
-    }
-    if let Some(g) = detail {
-        painter.galley(Pos2::new(rect.right() - 8.0 - g.size().x, rect.center().y - g.size().y / 2.0), g, p.text_faint);
-    }
-    let mut out = SidebarRowOut { row, more: None, action: None };
-    if hovered {
-        let br =
-            Rect::from_min_max(Pos2::new(rect.right() - buttons_w, rect.top()), rect.right_bottom() - vec2(2.0, 0.0));
-        let mut c = ui.new_child(UiBuilder::new().max_rect(br).layout(Layout::right_to_left(Align::Center)));
+    let (resp, actions) = kit::tree_row(ui, row, |_| {});
+    widgets::a11y_button(&resp, spec.name);
+    let mut out = SidebarRowOut { row: resp, more: None, action: None };
+    if let Some(r) = actions {
+        let mut c = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)));
         c.spacing_mut().item_spacing.x = 0.0;
-        let more = kit::icon_button_ex(&mut c, icons::DOTS_THREE, tr("More actions"), menu_open, 26.0);
+        let more = kit::icon_button_ex(&mut c, icons::DOTS_THREE, tr("More actions"), menu_open, 22.0);
         out.more = Some((more, popup_id));
         if let Some((icon, name)) = spec.action {
-            out.action = Some(kit::icon_button_ex(&mut c, icon, name, false, 26.0));
+            out.action = Some(kit::icon_button_sm(&mut c, icon, name));
         }
     }
     out
@@ -2772,7 +3104,23 @@ pub(crate) fn confirm_dialog(ctx: &egui::Context, id: &str, title: &str, body: &
     answer
 }
 
-/// The "Flows" sidebar list.
+/// The actions of the Flows sidebar header (drawn by `sidebar.rs` in a
+/// right-to-left layout): New flow.
+pub fn sidebar_actions(app: &mut TernaryWireApp, ui: &mut Ui) {
+    if kit::icon_button_sm(ui, icons::PLUS, tr("New flow")).clicked() {
+        new_flow(app);
+    }
+}
+
+/// Opens a new, blank flow in a tab.
+fn new_flow(app: &mut TernaryWireApp) {
+    let n = app.sidebar.flows.as_ref().map(|f| f.len()).unwrap_or(0) + 1;
+    let tab = FlowTab::blank(&format!("{} {n}", tr("Flow")));
+    app.add_tab(TabKind::Flow(Box::new(tab)));
+}
+
+/// The "Flows" sidebar list: a filter, the flows (running ones spin, unsaved
+/// ones have a dot) and a note at the bottom.
 pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
     let p = theme::pal(ui);
     let meta_id = egui::Id::unique("flow-list-meta");
@@ -2797,6 +3145,7 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
     let mut act: Option<ListAct> = None;
     let delete_id = egui::Id::unique("flow-list-delete");
     let rename_id = egui::Id::unique("flow-list-rename");
+    let note = tr("Flows are saved in flows/ and also run with ternarywire flow run.");
 
     if flows.is_empty() {
         kit::empty_state(
@@ -2813,17 +3162,12 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
     } else {
         let filter_id = egui::Id::unique("flow-list-filter");
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let w = ui.available_width() - 32.0;
-            let r = kit::search_field(ui, "flow-filter", &mut filter, tr("Filter flows"), w);
-            widgets::a11y_name(&r, tr("Filter flows"));
-            if kit::icon_button(ui, icons::PLUS, tr("New flow")).clicked() {
-                act = Some(ListAct::New);
-            }
-        });
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add_space(4.0);
+        let r = kit::search_field_sm(ui, "flow-filter", &mut filter, tr("Filter flows"), ui.available_width());
+        widgets::a11y_name(&r, tr("Filter flows"));
         ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         let active_path = app.tabs.get(app.active).and_then(|t| match &t.kind {
             TabKind::Flow(f) => f.path.clone(),
             _ => None,
@@ -2838,97 +3182,109 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
             .collect();
         let mut renaming: Option<(String, String)> = ui.data(|d| d.get_temp(rename_id));
         let q = filter.trim().to_lowercase();
-        egui::ScrollArea::vertical().id_salt("flow-list").auto_shrink([false; 2]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            let mut shown = 0;
-            for (id, name, path) in &flows {
-                if !q.is_empty() && !name.to_lowercase().contains(&q) {
-                    continue;
-                }
-                shown += 1;
-                if let Some((rid, buf)) = &mut renaming
-                    && rid == id
-                {
-                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(ui.available_width()));
-                    r.request_focus();
-                    let escape = ui.input(|i| i.key_pressed(Key::Escape));
-                    if r.lost_focus() || escape {
-                        if !escape && !buf.trim().is_empty() && buf.trim() != name {
-                            act = Some(ListAct::Rename(id.clone(), buf.trim().to_string()));
+        let list_h = (ui.max_rect().bottom()
+            - crate::sidebar::sidebar_footer_height(ui, note, ui.max_rect().width())
+            - ui.cursor().top()
+            - 4.0)
+            .max(40.0);
+        egui::ScrollArea::vertical().id_salt("flow-list").auto_shrink([false, true]).max_height(list_h).show(
+            ui,
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let mut shown = 0;
+                for (id, name, path) in &flows {
+                    if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    shown += 1;
+                    if let Some((rid, buf)) = &mut renaming
+                        && rid == id
+                    {
+                        let r = ui.add(egui::TextEdit::singleline(buf).desired_width(ui.available_width()));
+                        r.request_focus();
+                        let escape = ui.input(|i| i.key_pressed(Key::Escape));
+                        if r.lost_focus() || escape {
+                            if !escape && !buf.trim().is_empty() && buf.trim() != name {
+                                act = Some(ListAct::Rename(id.clone(), buf.trim().to_string()));
+                            }
+                            ui.data_mut(|d| {
+                                d.remove_temp::<(String, String)>(rename_id);
+                            });
                         }
-                        ui.data_mut(|d| {
-                            d.remove_temp::<(String, String)>(rename_id);
-                        });
+                        continue;
                     }
-                    continue;
-                }
-                let m = meta.get(path).cloned().unwrap_or_default();
-                let (busy, dirty) = open.get(path).copied().unwrap_or_default();
-                let detail = blocks_text(m.blocks);
-                let out = sidebar_row(
-                    ui,
-                    id,
-                    &SidebarRow {
-                        icon: icons::FLOW_ARROW,
-                        icon_color: p.text_muted,
-                        busy,
-                        name,
-                        detail: &detail,
-                        active: active_path.as_ref() == Some(path),
-                        dirty,
-                        action: Some((icons::PLAY, tr("Run"))),
-                    },
-                );
-                let row =
-                    if m.description.trim().is_empty() { out.row } else { out.row.on_hover_text(m.description.trim()) };
-                if row.clicked() {
-                    act = Some(ListAct::Open(path.clone()));
-                }
-                if row.double_clicked() {
-                    ui.data_mut(|d| d.insert_temp(rename_id, (id.clone(), name.clone())));
-                }
-                if out.action.is_some_and(|r| r.clicked()) {
-                    act = Some(ListAct::Run(path.clone()));
-                }
-                let mut menu = |ui: &mut Ui| {
-                    if ui.button(kit::with_icon(icons::FOLDER_OPEN, tr("Open"))).clicked() {
+                    let m = meta.get(path).cloned().unwrap_or_default();
+                    let (busy, dirty) = open.get(path).copied().unwrap_or_default();
+                    let detail = blocks_text(m.blocks);
+                    let out = sidebar_row(
+                        ui,
+                        id,
+                        &SidebarRow {
+                            icon: icons::FLOW_ARROW,
+                            icon_color: p.text_muted,
+                            busy,
+                            name,
+                            detail: &detail,
+                            active: active_path.as_ref() == Some(path),
+                            dirty,
+                            action: Some(if busy { (icons::STOP, tr("Stop")) } else { (icons::PLAY, tr("Run")) }),
+                        },
+                    );
+                    let row = if m.description.trim().is_empty() {
+                        out.row
+                    } else {
+                        out.row.on_hover_text(m.description.trim())
+                    };
+                    if row.clicked() {
                         act = Some(ListAct::Open(path.clone()));
-                        ui.close();
                     }
-                    if ui.button(kit::with_icon(icons::PLAY, tr("Run"))).clicked() {
-                        act = Some(ListAct::Run(path.clone()));
-                        ui.close();
-                    }
-                    if ui.button(kit::with_icon(icons::PENCIL_SIMPLE, tr("Rename"))).clicked() {
+                    if row.double_clicked() {
                         ui.data_mut(|d| d.insert_temp(rename_id, (id.clone(), name.clone())));
-                        ui.close();
                     }
-                    if ui.button(kit::with_icon(icons::COPY, tr("Duplicate"))).clicked() {
-                        act = Some(ListAct::Duplicate(path.clone()));
-                        ui.close();
+                    if out.action.is_some_and(|r| r.clicked()) {
+                        act = Some(if busy { ListAct::Stop(path.clone()) } else { ListAct::Run(path.clone()) });
                     }
-                    ui.separator();
-                    if ui.button(RichText::new(kit::with_icon(icons::TRASH, tr("Delete…"))).color(p.err)).clicked() {
-                        act = Some(ListAct::Delete(id.clone(), name.clone(), path.clone()));
-                        ui.close();
+                    let mut menu = |ui: &mut Ui| {
+                        if kit::menu_item(ui, Some(icons::FOLDER_OPEN), tr("Open"), None).clicked() {
+                            act = Some(ListAct::Open(path.clone()));
+                        }
+                        if busy {
+                            if kit::menu_item(ui, Some(icons::STOP), tr("Stop"), None).clicked() {
+                                act = Some(ListAct::Stop(path.clone()));
+                            }
+                        } else if kit::menu_item(ui, Some(icons::PLAY), tr("Run"), None).clicked() {
+                            act = Some(ListAct::Run(path.clone()));
+                        }
+                        if kit::menu_item(ui, Some(icons::PENCIL_SIMPLE), tr("Rename"), None).clicked() {
+                            ui.data_mut(|d| d.insert_temp(rename_id, (id.clone(), name.clone())));
+                        }
+                        if kit::menu_item(ui, Some(icons::COPY), tr("Duplicate"), None).clicked() {
+                            act = Some(ListAct::Duplicate(path.clone()));
+                        }
+                        kit::menu_sep(ui);
+                        let del = kit::MenuItem {
+                            icon: Some(icons::TRASH),
+                            label: tr("Delete…"),
+                            danger: true,
+                            ..Default::default()
+                        };
+                        if kit::menu_item_ex(ui, del).clicked() {
+                            act = Some(ListAct::Delete(id.clone(), name.clone(), path.clone()));
+                        }
+                    };
+                    if let Some((more, popup_id)) = &out.more {
+                        egui::Popup::menu(more).id(*popup_id).show(&mut menu);
                     }
-                };
-                if let Some((more, popup_id)) = &out.more {
-                    egui::Popup::menu(more).id(*popup_id).show(&mut menu);
+                    row.context_menu(&mut menu);
                 }
-                row.context_menu(&mut menu);
-            }
-            if shown == 0 {
-                ui.add_space(8.0);
-                ui.label(RichText::new(trf("No flows match “{}”", &[&filter.trim()])).color(p.text_muted));
-            }
-            ui.add_space(12.0);
-            ui.label(kit::hint(
-                ui,
-                tr("Flows are saved in flows/ inside the workspace and also run with `ternarywire flow run`."),
-            ));
-        });
+                if shown == 0 {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(trf("No flows match “{}”", &[&filter.trim()])).color(p.text_muted));
+                }
+            },
+        );
     }
+    crate::sidebar::sidebar_footer(ui, note);
 
     // Delete confirmation.
     if let Some((id, name, path)) = ui.data(|d| d.get_temp::<(String, String, PathBuf)>(delete_id)) {
@@ -2960,11 +3316,7 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
 
     match act {
         None => {}
-        Some(ListAct::New) => {
-            let n = app.sidebar.flows.as_ref().map(|f| f.len()).unwrap_or(0) + 1;
-            let tab = FlowTab::blank(&format!("{} {n}", tr("Flow")));
-            app.add_tab(TabKind::Flow(Box::new(tab)));
-        }
+        Some(ListAct::New) => new_flow(app),
         Some(ListAct::Open(path)) => open_flow(app, path),
         Some(ListAct::Run(path)) => {
             open_flow(app, path.clone());
@@ -2972,6 +3324,15 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
                 && t.path.as_ref() == Some(&path)
             {
                 t.auto_run = true;
+            }
+        }
+        Some(ListAct::Stop(path)) => {
+            for t in app.tabs.iter_mut() {
+                if let TabKind::Flow(f) = &mut t.kind
+                    && f.path.as_ref() == Some(&path)
+                {
+                    f.stop();
+                }
             }
         }
         Some(ListAct::Rename(id, name)) => match ternarywire_flows::storage::rename(app.ws.root(), &id, &name) {
@@ -3007,6 +3368,239 @@ pub fn sidebar_list(app: &mut TernaryWireApp, ui: &mut Ui) {
             ui.data_mut(|d| d.insert_temp(delete_id, (id, name, path)));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Small controls of the redesign shared by the flow and runner views (they
+// belong in kit.rs; see the report).
+// ---------------------------------------------------------------------------
+
+/// A left-to-right row of exactly `height` with its content centered
+/// (`ui.horizontal` is at least `interact_size.y`, 30, high).
+pub(crate) fn row<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), height), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_height(height);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        add(ui)
+    })
+    .inner
+}
+
+/// A thin vertical divider (1 px wide, the row's gap on both sides).
+pub(crate) fn vdiv(ui: &mut Ui, height: f32) {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, height), Sense::hover());
+    ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, p.border));
+}
+
+/// The small input of the prototype (`.input.sm`): 26 high, 12 px text,
+/// radius 6, 8 px side padding.
+pub(crate) fn input_sm(
+    ui: &mut Ui,
+    id: egui::Id,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    mono: bool,
+    right: bool,
+) -> Response {
+    let p = theme::pal(ui);
+    let font = if mono { theme::mono(12.0) } else { FontId::proportional(12.0) };
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 26.0;
+        let r = CornerRadius::same(RADIUS_SM);
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.corner_radius = r;
+        w.hovered.corner_radius = r;
+        w.active.corner_radius = r;
+        ui.add(
+            egui::TextEdit::singleline(text)
+                .id(id)
+                .hint_text(RichText::new(hint).color(p.text_faint).font(font.clone()))
+                .font(font)
+                .desired_width(width)
+                .min_size(vec2(0.0, 26.0))
+                .margin(egui::Margin::symmetric(8, 0))
+                .align(if right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER }),
+        )
+    })
+    .inner
+}
+
+/// A number in a small right-aligned input: typed text is kept while the
+/// field has focus; the value follows every valid number (clamped to
+/// `range`), ↑ and ↓ step it.
+pub(crate) fn num_input<T: egui::emath::Numeric>(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    name: &str,
+    value: &mut T,
+    range: std::ops::RangeInclusive<f64>,
+    width: f32,
+) -> Response {
+    let id = ui.make_persistent_id(salt);
+    let buf_id = id.with("text");
+    let show = |v: f64| if T::INTEGRAL { format!("{}", v.round() as i64) } else { format!("{v}") };
+    let focused = ui.ctx().memory(|m| m.has_focus(id));
+    let mut text = if focused {
+        ui.data(|d| d.get_temp::<String>(buf_id)).unwrap_or_else(|| show(value.to_f64()))
+    } else {
+        show(value.to_f64())
+    };
+    let mut r = input_sm(ui, id, &mut text, "", width, false, true);
+    widgets::a11y_name(&r, name);
+    let clamp = |v: f64| v.clamp(*range.start(), *range.end());
+    if r.changed()
+        && let Ok(v) = text.trim().parse::<f64>()
+    {
+        *value = T::from_f64(clamp(v));
+    }
+    if r.has_focus() {
+        let step = ui.input(|i| (i.key_pressed(Key::ArrowUp) as i32 - i.key_pressed(Key::ArrowDown) as i32) as f64);
+        if step != 0.0 {
+            let v = clamp(value.to_f64() + step);
+            *value = T::from_f64(v);
+            text = show(v);
+            r.mark_changed();
+        }
+        ui.data_mut(|d| d.insert_temp(buf_id, text));
+    } else {
+        ui.data_mut(|d| d.remove_temp::<String>(buf_id));
+    }
+    r
+}
+
+/// A 26 px `{{variable}}` input with its frame (`var_line` is 30 high).
+fn var_input(ui: &mut Ui, vars: &widgets::VarCtx, id: &str, text: &mut String, hint: &str) -> Response {
+    let p = theme::pal(ui);
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
+    let frame = ui.painter().add(Shape::Noop);
+    let inner = rect.shrink2(vec2(0.0, 1.0));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+    let r = widgets::var_cell(&mut c, id, text, vars, hint, w);
+    let stroke = if r.has_focus() {
+        p.accent
+    } else if r.hovered() {
+        p.text_faint
+    } else {
+        p.border_strong
+    };
+    ui.painter().set(frame, Shape::rect_filled(rect, CornerRadius::same(RADIUS_SM), p.surface));
+    ui.painter().rect_stroke(rect, CornerRadius::same(RADIUS_SM), Stroke::new(1.0, stroke), StrokeKind::Inside);
+    if r.has_focus() {
+        kit::focus_ring(ui, rect, RADIUS_SM);
+    }
+    r
+}
+
+/// A checkbox followed by a label of `size` (the label toggles it too).
+fn check_label(ui: &mut Ui, on: &mut bool, text: &str, size: f32) -> Response {
+    let p = theme::pal(ui);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        // Right to left: the label first.
+        let label = ui.add(
+            egui::Label::new(RichText::new(text).size(size).color(p.text)).sense(Sense::click()).selectable(false),
+        );
+        let mut r = kit::check(ui, on, text);
+        if label.clicked() {
+            *on = !*on;
+            r.mark_changed();
+        }
+        r
+    })
+    .inner
+}
+
+/// A checkbox with a label that wraps (the label toggles it too).
+fn check_wrap(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
+    let p = theme::pal(ui);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let mut r = ui
+            .vertical(|ui| {
+                ui.add_space(1.0);
+                kit::check(ui, on, text)
+            })
+            .inner;
+        let label =
+            ui.add(egui::Label::new(RichText::new(text).color(p.text)).sense(Sense::click()).selectable(false).wrap());
+        if label.clicked() {
+            *on = !*on;
+            r.mark_changed();
+        }
+        r
+    })
+    .inner
+}
+
+/// Appends `text` to `job` with its `{{variables}}` drawn as chips (`bad`:
+/// the undefined-variable colors).
+fn append_vars(job: &mut LayoutJob, text: &str, font: FontId, color: Color32, dark: bool, bad: bool) {
+    let p = theme::palette(dark);
+    let (vc, vbg) = if bad { (theme::var_undefined(dark), p.var_bad_bg) } else { (p.var_ok, p.var_ok_bg) };
+    let mut rest = text;
+    while let Some(s) = rest.find("{{") {
+        let Some(e) = rest[s..].find("}}").map(|e| s + e + 2) else { break };
+        if s > 0 {
+            job.append(&rest[..s], 0.0, TextFormat::simple(font.clone(), color));
+        }
+        let chip = TextFormat { background: vbg, ..TextFormat::simple(font.clone(), vc) };
+        job.append(&rest[s..e], 0.0, chip);
+        rest = &rest[e..];
+    }
+    if !rest.is_empty() {
+        job.append(rest, 0.0, TextFormat::simple(font, color));
+    }
+}
+
+/// One line of text with its `{{variables}}` as chips.
+fn var_job(text: &str, font: FontId, color: Color32, dark: bool, bad: bool) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    append_vars(&mut job, &text.replace('\n', " "), font, color, dark, bad);
+    job
+}
+
+/// Wrapped text of `size` where `**words**` are semibold (in the text color)
+/// and `{{variables}}` are chips.
+fn rich_job(text: &str, size: f32, color: Color32, strong: Color32, dark: bool) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    for (i, part) in text.split("**").enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i % 2 == 1 {
+            job.append(part, 0.0, TextFormat::simple(theme::semibold(size), strong));
+        } else {
+            append_vars(&mut job, part, FontId::proportional(size), color, dark, false);
+        }
+    }
+    // CSS line height 1.45.
+    for s in &mut job.sections {
+        s.format.line_height = Some((size * 1.45).round());
+    }
+    job
+}
+
+fn rich_label(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Response {
+    let p = theme::pal(ui);
+    let strong = if color == p.text_muted { p.text } else { color };
+    let mut job = rich_job(text, size, color, strong, ui.visuals().dark_mode);
+    job.wrap.max_width = ui.available_width();
+    ui.add(egui::Label::new(job).wrap())
+}
+
+/// Covers `rect` with `color`, opaque at the top and clear at the bottom.
+fn vfade(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), color);
+    mesh.colored_vertex(rect.right_top(), color);
+    mesh.colored_vertex(rect.right_bottom(), Color32::TRANSPARENT);
+    mesh.colored_vertex(rect.left_bottom(), Color32::TRANSPARENT);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
 }
 
 #[cfg(test)]

@@ -1,10 +1,37 @@
-//! Ready-made script snippets (FR-S6).
+//! Ready-made script snippets (FR-S6), grouped for the Snippets menu.
+
+use crate::i18n::tr;
+
+/// The groups of the Snippets menu, in menu order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Group {
+    Tests,
+    Variables,
+    Request,
+    Flow,
+    Visualize,
+}
+
+impl Group {
+    pub const ALL: [Group; 5] = [Group::Tests, Group::Variables, Group::Request, Group::Flow, Group::Visualize];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Tests => tr("Tests"),
+            Group::Variables => tr("Variables"),
+            Group::Request => tr("Request"),
+            Group::Flow => tr("Flow"),
+            Group::Visualize => tr("Visualize"),
+        }
+    }
+}
 
 pub struct Snippet {
     pub title: &'static str,
     pub code: &'static str,
     /// Only relevant after a response.
     pub post_only: bool,
+    pub group: Group,
 }
 
 pub const SNIPPETS: &[Snippet] = &[
@@ -12,93 +39,116 @@ pub const SNIPPETS: &[Snippet] = &[
         title: "Status code is 200",
         code: "pm.test(\"Status code is 200\", function () {\n    pm.response.to.have.status(200);\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Response time is below 500ms",
         code: "pm.test(\"Response time is less than 500ms\", function () {\n    pm.expect(pm.response.responseTime).to.be.below(500);\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Response body: JSON value check",
         code: "pm.test(\"Your test name\", function () {\n    const jsonData = pm.response.json();\n    pm.expect(jsonData.value).to.eql(100);\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Response body: contains string",
         code: "pm.test(\"Body matches string\", function () {\n    pm.expect(pm.response.text()).to.include(\"string_you_want_to_search\");\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Content-Type header is present",
         code: "pm.test(\"Content-Type is present\", function () {\n    pm.response.to.have.header(\"Content-Type\");\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Successful POST request",
         code: "pm.test(\"Successful POST request\", function () {\n    pm.expect(pm.response.code).to.be.oneOf([201, 202]);\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Use Tiny Validator for JSON data",
         code: "const schema = {\n    type: \"object\",\n    required: [\"id\"],\n    properties: { id: { type: \"number\" } }\n};\n\npm.test(\"Schema is valid\", function () {\n    pm.response.to.have.jsonSchema(schema);\n});\n",
         post_only: true,
+        group: Group::Tests,
     },
     Snippet {
         title: "Save token from response to environment",
         code: "const json = pm.response.json();\npm.environment.set(\"token\", json.token);\n",
         post_only: true,
+        group: Group::Variables,
     },
     Snippet {
         title: "Set an environment variable",
         code: "pm.environment.set(\"variable_key\", \"variable_value\");\n",
         post_only: false,
+        group: Group::Variables,
     },
     Snippet {
         title: "Get an environment variable",
         code: "const value = pm.environment.get(\"variable_key\");\n",
         post_only: false,
+        group: Group::Variables,
     },
     Snippet {
         title: "Set a global variable",
         code: "pm.globals.set(\"variable_key\", \"variable_value\");\n",
         post_only: false,
+        group: Group::Variables,
     },
     Snippet {
         title: "Set a collection variable",
         code: "pm.collectionVariables.set(\"variable_key\", \"variable_value\");\n",
         post_only: false,
+        group: Group::Variables,
     },
     Snippet {
         title: "Clear an environment variable",
         code: "pm.environment.unset(\"variable_key\");\n",
         post_only: false,
+        group: Group::Variables,
     },
     Snippet {
         title: "Add a request header",
         code: "pm.request.headers.add({ key: \"X-Request-Id\", value: pm.variables.replaceIn(\"{{$guid}}\") });\n",
         post_only: false,
+        group: Group::Request,
     },
     Snippet {
         title: "Send a request",
         code: "pm.sendRequest(\"https://postman-echo.com/get\", function (err, response) {\n    console.log(response.json());\n});\n",
         post_only: false,
+        group: Group::Request,
     },
     Snippet {
         title: "HMAC signature with CryptoJS",
         code: "const signature = CryptoJS.HmacSHA256(pm.request.url.toString(), pm.environment.get(\"secret\")).toString(CryptoJS.enc.Hex);\npm.request.headers.upsert({ key: \"X-Signature\", value: signature });\n",
         post_only: false,
+        group: Group::Request,
     },
-    Snippet { title: "Skip this request", code: "pm.execution.skipRequest();\n", post_only: false },
+    Snippet { title: "Skip this request", code: "pm.execution.skipRequest();\n", post_only: false, group: Group::Flow },
     Snippet {
         title: "Set next request (runner)",
         code: "pm.execution.setNextRequest(\"Request name\");\n",
         post_only: false,
+        group: Group::Flow,
     },
-    Snippet { title: "Stop the run", code: "pm.execution.setNextRequest(null);\n", post_only: false },
+    Snippet {
+        title: "Stop the run",
+        code: "pm.execution.setNextRequest(null);\n",
+        post_only: false,
+        group: Group::Flow,
+    },
     Snippet {
         title: "Visualize response as a table",
         code: "const template = `<table>{{#each items}}<tr><td>{{name}}</td></tr>{{/each}}</table>`;\npm.visualizer.set(template, { items: pm.response.json() });\n",
         post_only: true,
+        group: Group::Visualize,
     },
 ];
 
