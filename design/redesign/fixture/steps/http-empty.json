@@ -3,6 +3,7 @@
   {"theme": "@THEME"},
   {"expand": "Bookstore API"},
   {"expand": "Realtime & AI"},
+  {"collapse": "Bookstore API/Orders"},
   {"new_request": true},
   {"wait_ms": 800},
   {"screenshot": "@OUT"},

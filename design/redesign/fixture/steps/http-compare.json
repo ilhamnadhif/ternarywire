@@ -3,6 +3,7 @@
   {"theme": "@THEME"},
   {"expand": "Bookstore API"},
   {"expand": "Realtime & AI"},
+  {"collapse": "Bookstore API/Orders"},
   {"open": "List books"},
   {"url": "{{baseUrl}}/books?page=1&limit={{pageSize}}&sort=title&snapshot=previous"},
   {"send": true},
