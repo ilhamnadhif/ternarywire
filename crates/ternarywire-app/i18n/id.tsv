@@ -1969,6 +1969,7 @@ Paste a Set-Cookie value. Hover a row to see its Set-Cookie text.	Tempel nilai S
 Settings are per user and apply to every workspace.	Pengaturan berlaku per pengguna dan untuk setiap workspace.
 Shell	Shell
 The format is detected as you paste. A file dropped anywhere on the window is imported too.	Formatnya dikenali saat Anda menempel. File yang dijatuhkan di mana saja pada jendela juga diimpor.
+Clear the file to paste content instead.	Hapus file untuk menempel konten.
 Your own modules in packages/, shared by every script in the workspace.	Modul Anda sendiri di packages/, dipakai bersama oleh setiap skrip di workspace.
 Changes	Perubahan
 {} from “{}” to “{}”, 1 conflict: choose a side to include it	{} dari “{}” ke “{}”, 1 konflik: pilih satu sisi untuk menyertakannya

@@ -46,6 +46,25 @@ pub struct SetVarDialog {
     focus_name: bool,
 }
 
+impl SetVarDialog {
+    /// UI automation: sets the fields named in `v` (`name`, `secret`,
+    /// `also_script`, `scope` index).
+    pub fn automation(&mut self, v: &serde_json::Value) {
+        if let Some(n) = v.get("name").and_then(|n| n.as_str()) {
+            self.name = n.to_string();
+        }
+        if let Some(b) = v.get("secret").and_then(|b| b.as_bool()) {
+            self.secret = b;
+        }
+        if let Some(b) = v.get("also_script").and_then(|b| b.as_bool()) {
+            self.also_script = b;
+        }
+        if let Some(i) = v.get("scope").and_then(|i| i.as_u64()) {
+            self.scope = i as usize;
+        }
+    }
+}
+
 pub struct GenDialog {
     code: String,
     count: usize,
@@ -243,7 +262,8 @@ pub fn dialogs(
             .show(ctx, |ui| {
                 body(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 10.0;
-                    ui.label(kit::hint(ui, tr("Review or edit the tests, then add them to the Post-response script.")));
+                    let hint = tr("Review or edit the tests, then add them to the Post-response script.");
+                    ui.label(kit::hint(ui, hint).line_height(Some(12.0 * 1.45)));
                     // The code in a well: line numbers, 20 px lines, at most 380 high.
                     let max_h = crate::dialogs::fit_height(ctx, 300.0, 380.0);
                     let rows = ((max_h - 16.0) / 20.0) as usize;
@@ -312,6 +332,7 @@ fn set_var_dialog(
     let out = Modal::new("set-variable", 540.0)
         .title(tr("Set as variable"))
         .subtitle(d.json_path.clone())
+        .mono_subtitle()
         .icon(icons::BRACKETS_CURLY)
         .show(ctx, |ui| {
             body(ui, |ui| {
@@ -375,8 +396,20 @@ fn set_var_dialog(
                 script_line(ui, &line, d.also_script);
             });
             footer(ui, |ui| {
-                ui.label(kit::hint(ui, tr("Saved as the current value, which stays on this computer.")));
-                trailing(ui, |ui| {
+                // The hint wraps to leave the buttons their room (`.mf`: 8 px
+                // gaps around a spacer); their width is from the last frame.
+                let id = ui.scope_id().with("set-var-buttons");
+                let buttons_w: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(170.0);
+                let hint_w = (ui.available_width() - buttons_w - 16.0).max(80.0);
+                let hint = kit::hint(ui, tr("Saved as the current value, which stays on this computer."));
+                let hint = egui::WidgetText::from(hint.line_height(Some(12.0 * 1.45))).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Wrap),
+                    hint_w,
+                    egui::TextStyle::Body,
+                );
+                ui.add(egui::Label::new(hint));
+                let buttons = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_enabled_ui(valid, |ui| {
                         if kit::primary(ui, tr("Set variable")).clicked() {
                             apply = true;
@@ -386,7 +419,12 @@ fn set_var_dialog(
                         return Outcome::Close;
                     }
                     Outcome::Keep
-                })
+                });
+                let w = buttons.response.rect.width();
+                if (w - buttons_w).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(id, w));
+                }
+                buttons.inner
             })
         });
     if apply && valid {
@@ -480,7 +518,9 @@ fn script_line(ui: &mut Ui, line: &str, on: bool) {
             for section in &mut job.sections {
                 section.format.line_height = Some(20.0);
             }
-            job.wrap.max_width = ui.available_width();
+            // Inside the 1 px border (`.dl-codebox`); egui lets a row run
+            // 0.5 past the wrap width.
+            job.wrap.max_width = ui.available_width() - 2.5;
             job.wrap.break_anywhere = true;
             ui.add(egui::Label::new(job).wrap());
         });

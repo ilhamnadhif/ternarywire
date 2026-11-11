@@ -365,6 +365,14 @@ impl RequestTab {
                     self.tools.generate(resp);
                 }
             }
+            // `set_var_draft:{"name": …, "also_script": true}`: edits the open
+            // "Set as variable" dialog.
+            a if a.starts_with("set_var_draft:") => {
+                let json = serde_json::from_str(&a["set_var_draft:".len()..]);
+                if let (Some(d), Ok(v)) = (self.tools.set_var.as_mut(), json) {
+                    d.automation(&v);
+                }
+            }
             other => {
                 let Some((kind, path)) = other.split_once(':') else { return };
                 let json: Option<serde_json::Value> = self
