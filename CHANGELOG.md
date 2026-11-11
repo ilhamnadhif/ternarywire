@@ -2,6 +2,33 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.1 — 2026-11-12
+
+Every screen of the new design checked against the design once more and matched to it, and
+upgrades from 0.2 now open with the response on the right.
+
+### Fixed
+- **Upgrading from 0.2 opens side by side.** Settings from before 0.3 kept the old default
+  (response below the request), so upgraded installs stayed stacked. That old setting is now
+  ignored; choosing Stacked in the status bar still sticks.
+- **Every screen matches the design** in light and dark: sizes, gaps, line heights, colors and
+  fonts of all screens and dialogs. Among others: buttons count their border, placeholders are
+  faint, scroll areas no longer fade at their edges, icons sit centered, text fields show a focus
+  halo, menu rows touch, stacked panes are parted by a hairline, tabs shrink when they don't fit
+  and Indonesian auth labels are translated.
+- Code shows what was typed: `=>` no longer turns into an arrow.
+- A tab opened from History is named by its path and isn't marked unsaved until you edit it.
+- A refused connection says that nothing is listening on that host and port.
+- The mock server log shows the client's address, and a request dropped by failure simulation
+  shows the route it would have hit.
+- gRPC: when the server hits the deadline first, the call shows DEADLINE_EXCEEDED instead of
+  CANCELLED.
+
+### Added
+- Key/value tables have a menu: copy as text, remove disabled rows, remove all rows.
+- Markdown colors in collection descriptions and shell colors in cURL, HTTPie and Wget snippets.
+- The Spec Hub editor keeps long lines on one line and scrolls sideways.
+
 ## 0.3.0 — 2026-11-11
 
 A new design for the whole app: request on the left, response on the right, and every screen redrawn

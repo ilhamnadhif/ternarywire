@@ -67,7 +67,7 @@ Skrip ini mengunduh rilis terbaru, memeriksanya (SHA-256 yang diterbitkan GitHub
 dan tanda tangan kode), menutup TernaryWire yang sedang berjalan, memasang `TernaryWire.app` ke
 `/Applications`, lalu membukanya. Kalau ada yang gagal, salinan lama tetap di tempatnya. Jalankan
 lagi untuk memperbarui. Untuk versi tertentu, berikan versinya sebagai argumen:
-`… | bash -s -- v0.3.0`. Untuk memasang di folder lain, atur `TERNARYWIRE_APP_DIR` untuk bash:
+`… | bash -s -- v0.3.1`. Untuk memasang di folder lain, atur `TERNARYWIRE_APP_DIR` untuk bash:
 `… | TERNARYWIRE_APP_DIR=~/Applications bash`.
 
 ### Disk image
@@ -150,7 +150,7 @@ CLI juga berupa satu binary. Untuk macOS, ambil `ternarywire-cli-<versi>-macos-u
 rilis (arsip Linux dan Windows di atas juga berisi CLI):
 
 ```sh
-curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.0/ternarywire-cli-0.3.0-macos-universal.tar.gz | tar -xz
+curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.1/ternarywire-cli-0.3.1-macos-universal.tar.gz | tar -xz
 sudo mv ternarywire /usr/local/bin/
 ternarywire --version
 ```
@@ -440,7 +440,7 @@ menjalankan koleksi, lalu menulis laporan JUnit:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: ilhamnadhif/ternarywire@v0.3.0
+- uses: ilhamnadhif/ternarywire@v0.3.1
   with:
     collection: api/                 # berkas koleksi Postman, workspace, atau folder koleksi
     environment: Staging             # berkas environment Postman atau nama environment di workspace

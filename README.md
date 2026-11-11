@@ -65,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternarywire/master/scri
 The script downloads the latest release, checks it (the SHA-256 GitHub publishes, the bundle id,
 the version and the code signature), quits a running TernaryWire, installs `TernaryWire.app` into
 `/Applications` and opens it. If anything fails, the copy you had stays in place. Run it again to
-update. To install a specific version, pass it as an argument: `… | bash -s -- v0.3.0`. To install
+update. To install a specific version, pass it as an argument: `… | bash -s -- v0.3.1`. To install
 somewhere else, set `TERNARYWIRE_APP_DIR` for bash: `… | TERNARYWIRE_APP_DIR=~/Applications bash`.
 
 ### Disk image
@@ -148,7 +148,7 @@ The CLI is a single binary as well. For macOS, take `ternarywire-cli-<version>-m
 from the release (the Linux and Windows archives above contain it too):
 
 ```sh
-curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.0/ternarywire-cli-0.3.0-macos-universal.tar.gz | tar -xz
+curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.1/ternarywire-cli-0.3.1-macos-universal.tar.gz | tar -xz
 sudo mv ternarywire /usr/local/bin/
 ternarywire --version
 ```
@@ -438,7 +438,7 @@ collection, writing a JUnit report:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: ilhamnadhif/ternarywire@v0.3.0
+- uses: ilhamnadhif/ternarywire@v0.3.1
   with:
     collection: api/                 # Postman collection file, workspace or collection folder
     environment: Staging             # Postman environment file or workspace environment name
