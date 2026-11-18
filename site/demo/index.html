@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1280">
+<meta name="robots" content="noindex">
+<title>TernaryWire · live demo</title>
+<link rel="stylesheet" href="fonts.css">
+<link rel="stylesheet" href="styles.css">
+<style>
+  /* only the window, at 1:1; the page scales the frame */
+  html, body { background: transparent; }
+  .win.bare { border-radius: 0; box-shadow: none; }
+  /* here no window draws the traffic lights over the title bar, so the prototype does */
+  .win.bare .lights span { visibility: visible; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<!-- the prototype's files (scripts/build-site.py copies them from design/redesign), in its order -->
+<script src="icons.js"></script>
+<script src="data.js"></script>
+<script src="kit.js"></script>
+<script src="runtime.js"></script>
+<script src="shell.js"></script>
+<script src="screens-http.js"></script>
+<script src="screens-proto.js"></script>
+<script src="screens-work.js"></script>
+<script src="screens-flow.js"></script>
+<script src="screens-tools.js"></script>
+<script src="dialogs.js"></script>
+</body>
+</html>

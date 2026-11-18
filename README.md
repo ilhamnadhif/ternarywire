@@ -8,7 +8,7 @@ It draws its first frame in about 40 ms, idles at 0 % CPU and uses under 90 MB o
 folder you can commit to Git, and Postman collections, environments and `pm.*` scripts import and
 run unchanged for common use.
 
-[Bahasa Indonesia](README.id.md)
+**Website: [ilhamnadhif.github.io/ternarywire](https://ilhamnadhif.github.io/ternarywire/)**, with a live demo you can click through · [Bahasa Indonesia](README.id.md)
 
 ![TernaryWire: a collection, a request and its response with test results](docs/screenshots/hero.png)
 

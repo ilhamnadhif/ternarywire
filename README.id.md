@@ -8,7 +8,7 @@ memori, dan respons 100 MB dialirkan ke disk, bukan ke memori. Koleksi berupa be
 folder yang bisa Anda commit ke Git, dan koleksi, environment, serta skrip `pm.*` dari Postman bisa
 diimpor dan dijalankan apa adanya untuk pemakaian umum.
 
-[English](README.md)
+**Situs web: [ilhamnadhif.github.io/ternarywire](https://ilhamnadhif.github.io/ternarywire/)**, dengan demo langsung yang bisa Anda klik · [English](README.md)
 
 ![TernaryWire dalam bahasa Indonesia: koleksi, request, dan hasil tesnya](docs/screenshots/indonesian.png)
 

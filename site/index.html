@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TernaryWire — every API, one native window</title>
+<meta name="description" content="A lightweight API client written in Rust: HTTP, GraphQL, gRPC, WebSocket, Socket.IO, MQTT, MCP and AI requests in one native app. Runs Postman collections and scripts, keeps your workspace in Git, and has a newman-compatible CLI. Free and open source for macOS, Windows and Linux.">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://ilhamnadhif.github.io/ternarywire/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="TernaryWire">
+<meta property="og:title" content="TernaryWire — every API, one native window">
+<meta property="og:description" content="HTTP, GraphQL, gRPC, WebSocket, MQTT, MCP and AI requests in one small app written in Rust. Free and open source for macOS, Windows and Linux.">
+<meta property="og:url" content="https://ilhamnadhif.github.io/ternarywire/">
+<meta property="og:image" content="https://ilhamnadhif.github.io/ternarywire/assets/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://ilhamnadhif.github.io/ternarywire/assets/img/og.png">
+<link rel="icon" href="assets/img/icon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/img/favicon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="assets/img/icon-180.png">
+<link rel="preload" href="assets/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/jbm-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/site.css">
+<script>document.documentElement.classList.replace('no-js', 'js')</script>
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="TernaryWire, back to top"><img src="assets/img/icon.svg" alt="" width="26" height="26">TernaryWire</a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#protocols">Protocols</a>
+      <a href="#cli">CLI</a>
+      <a href="#install">Install</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="nav-r">
+      <a class="nav-gh" href="https://github.com/ilhamnadhif/ternarywire"><i class="ic" data-i="github-logo"></i><span>GitHub</span></a>
+      <a class="pb pb-pri pb-sm" href="#install" data-dl-nav>Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============================================================ hero -->
+<section class="hero">
+  <div class="field" id="field-hero" aria-hidden="true"></div>
+  <div class="wrap hero-in">
+    <a class="announce" href="https://github.com/ilhamnadhif/ternarywire/releases/latest" data-release-link>
+      <span class="wire" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
+      <span><b>TernaryWire <span data-version>0.3.1</span></b> is out</span><span class="sep"></span><span>What’s new</span><i class="ic" data-i="arrow-right"></i>
+    </a>
+    <h1>Every API.<br>One native window.</h1>
+    <p class="lede">HTTP, GraphQL, gRPC, WebSocket, MQTT, MCP and AI requests in one small app, written in Rust. It opens in <b>40&nbsp;ms</b>, runs your <b>Postman collections and scripts</b> as they are, and keeps your work as plain files in Git.</p>
+    <div class="cta">
+      <a class="pb pb-pri" href="#install" id="cta-main"><i class="ic" data-i="download-simple"></i><span>Download for macOS</span></a>
+      <a class="pb pb-sec" href="https://github.com/ilhamnadhif/ternarywire"><i class="ic" data-i="github-logo"></i>View on GitHub</a>
+    </div>
+    <p class="cta-note" id="cta-note">Free and open source · macOS, <a href="#install" data-os-link="win">Windows</a> and <a href="#install" data-os-link="linux">Linux</a></p>
+  </div>
+
+  <div class="demo" id="demo" role="region" aria-label="Live demo of TernaryWire with a sample workspace">
+    <div class="demo-bar">
+      <span class="live"><b></b>Live demo</span><span class="hint">· the app’s own design, running in this page. Click anything; <span id="try-k"><kbd>⌘</kbd><kbd>↵</kbd></span> sends.</span>
+      <span class="sp"></span>
+      <span class="seg-mini" role="group" aria-label="Theme of the demo">
+        <button type="button" data-theme="dark" aria-pressed="true"><i class="ic" data-i="moon"></i><span>Dark</span></button>
+        <button type="button" data-theme="light" aria-pressed="false"><i class="ic" data-i="sun"></i><span>Light</span></button>
+      </span>
+      <button type="button" class="demo-reset" id="demo-reset"><i class="ic" data-i="arrow-counter-clockwise"></i><span>Reset</span></button>
+    </div>
+    <div class="demo-frame">
+      <div class="scaler" id="demo-scaler">
+        <iframe id="demo-if" src="demo/index.html?theme=dark" title="TernaryWire, live: a sample Bookstore workspace you can click through" width="1280" height="820"></iframe>
+      </div>
+      <noscript><img src="assets/img/shots/http.webp" alt="TernaryWire: the List books request on the left and its JSON response on the right" width="1800" height="1125"></noscript>
+    </div>
+    <div class="try" id="try">
+      <span class="try-l">Open</span>
+      <div class="try-row" role="group" aria-label="Show a screen in the demo">
+        <button type="button" data-go="http"><span class="m" style="--c:var(--m-get)">GET</span>HTTP</button>
+        <button type="button" data-go="http-graphql"><span class="m" style="--c:var(--m-gql)">GQL</span>GraphQL</button>
+        <button type="button" data-go="grpc"><span class="m" style="--c:var(--m-grpc)">gRPC</span>gRPC</button>
+        <button type="button" data-go="ws"><span class="m" style="--c:var(--m-ws)">WS</span>WebSocket</button>
+        <button type="button" data-go="sio"><span class="m" style="--c:var(--m-sio)">SIO</span>Socket.IO</button>
+        <button type="button" data-go="mqtt"><span class="m" style="--c:var(--m-mqtt)">MQTT</span>MQTT</button>
+        <button type="button" data-go="mcp"><span class="m" style="--c:var(--m-mcp)">MCP</span>MCP</button>
+        <button type="button" data-go="ai"><span class="m" style="--c:var(--m-ai)">AI</span>AI</button>
+        <button type="button" data-go="runner"><i class="ic" data-i="play-circle"></i>Runner</button>
+        <button type="button" data-go="flow"><i class="ic" data-i="flow-arrow"></i>Flows</button>
+        <button type="button" data-go="mock"><i class="ic" data-i="cube"></i>Mock server</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ protocols strip -->
+<section class="strip">
+  <div class="wrap strip-in rv">
+    <div class="strip-t">One app for every protocol your stack speaks. Nothing to sign in to.</div>
+    <div class="strip-row">
+      <span class="pp"><span class="m" style="--c:var(--m-get)">GET</span>HTTP</span>
+      <span class="pp"><span class="m" style="--c:var(--m-gql)">GQL</span>GraphQL</span>
+      <span class="pp"><span class="m" style="--c:var(--m-grpc)">gRPC</span>gRPC</span>
+      <span class="pp"><span class="m" style="--c:var(--m-ws)">WS</span>WebSocket</span>
+      <span class="pp"><span class="m" style="--c:var(--m-sio)">SIO</span>Socket.IO</span>
+      <span class="pp"><span class="m" style="--c:var(--m-mqtt)">MQTT</span>MQTT</span>
+      <span class="pp"><span class="m" style="--c:var(--m-soap)">SOAP</span>SOAP</span>
+      <span class="pp"><span class="m" style="--c:var(--m-mcp)">MCP</span>MCP</span>
+      <span class="pp"><span class="m" style="--c:var(--m-ai)">AI</span>OpenAI, Anthropic, Gemini, Ollama</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ native -->
+<section class="sec" id="native">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="lightning"></i>Rust, drawn by the GPU</div>
+        <h2>Light enough <span class="q">to leave open all day.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>No Electron, no Node.js, no account. TernaryWire is one small binary that opens before you’ve looked away, and draws <b>nothing at all</b> when nothing changes.</p>
+      </div>
+    </div>
+    <div class="stats rv">
+      <div class="stat"><div class="n">40<small>ms</small></div><div class="l">to the first frame, with your open tabs where you left them</div><div class="bar"><i style="--w:8%;--c:var(--ok)"></i></div></div>
+      <div class="stat"><div class="n">0<small>%</small></div><div class="l">CPU when idle. No frames are drawn until something changes.</div><div class="bar"><i style="--w:2%;--c:var(--ok)"></i></div></div>
+      <div class="stat"><div class="n">&lt;90<small>MB</small></div><div class="l">of memory with a workspace and five request tabs open</div><div class="bar"><i style="--w:30%;--c:var(--info)"></i></div></div>
+      <div class="stat"><div class="n">100<small>MB</small></div><div class="l">response streamed to disk. Half a million lines still scroll.</div><div class="bar"><i style="--w:100%;--c:var(--accent)"></i></div></div>
+    </div>
+    <p class="foot">Measured with <span class="mono">scripts/bench.sh</span> on an Apple Silicon MacBook with the release build.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 1. request · response -->
+<section class="sec" id="features">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><span data-k="send"><kbd>⌘</kbd><kbd>↵</kbd></span>Send</div>
+        <h2>Request on the left. <span class="q">Answer on the right.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Every tab is two panes side by side: what you send, and what came back, with the <b>status, time, size and test results</b> in one line. Narrow the window and the response moves below.</p>
+        <ul class="facts">
+          <li><b>{{variables}}</b> light up as you type; hover one for its value and the scope it comes from.</li>
+          <li>Pretty, Raw, Preview and Tree views, with <b>folding</b>, search and the timings: TTFB and total.</li>
+        </ul>
+      </div>
+    </div>
+    <figure class="shot rv">
+      <img src="assets/img/shots/http.webp" alt="The List books request: query parameters on the left, the JSON response with 3 of 3 tests passed on the right" width="1800" height="1125" loading="lazy" decoding="async">
+      <span class="pin" style="--x:38.9%;--y:14.8%"><i tabindex="0">1</i><span><b>{{baseUrl}}</b> and <b>{{pageSize}}</b> resolve from the active environment, <b>Local</b>.</span></span>
+      <span class="pin r" style="--x:83%;--y:17.6%"><i tabindex="0">2</i><span>200 OK in 1 ms, 820 B, <b>3/3 tests</b> passed.</span></span>
+      <span class="pin r" style="--x:79.2%;--y:82.4%"><i tabindex="0">3</i><span>Fold any object. A 100 MB response is shown virtually, so it scrolls like this one.</span></span>
+      <span class="pin" style="--x:20.6%;--y:30.1%"><i tabindex="0">4</i><span>Each request is a JSON file in the workspace folder.</span></span>
+      <figcaption><b></b>The real app, on macOS</figcaption>
+    </figure>
+    <ol class="pins-legend">
+      <li>1. Variables resolve from the active environment.</li>
+      <li>2. Status, time, size and tests in one line.</li>
+      <li>3. Fold any object; big responses are shown virtually.</li>
+      <li>4. Each request is a JSON file in the workspace folder.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ 2. response tools -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="funnel"></i>Response tools</div>
+        <h2>Answers you can <span class="q">work with.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Filter a response with JSONPath, compare it with the one before, or right-click any value to turn it into a <b>variable</b> or a <b>test</b>. Fewer round trips to the docs and the clipboard.</p>
+      </div>
+    </div>
+    <div class="show rv" data-show>
+      <div class="show-tabs" role="tablist" aria-label="Response tools">
+        <button type="button" role="tab" aria-selected="true" data-shot="http-filter" data-alt="A JSONPath filter on the response: 3 matches" data-cap="<b>JSONPath filter</b>: <code>$.data[?(@.inStock)].title</code> narrows the response to what you need, with a match count. Recursive descent, slices, unions and regex filters work too."><i class="ic" data-i="funnel"></i>JSONPath filter</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="http-compare" data-alt="Compare: the response next to the previous one, with changed lines marked" data-cap="<b>Compare</b> with the previous response: status, time, size, the headers that changed and a line diff of the body, with JSON keys sorted. Pin one to keep it as the baseline."><i class="ic" data-i="git-diff"></i>Compare</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="dlg-set-var" data-alt="Set as variable: firstTitle from $.data[0].title" data-cap="<b>Set as variable</b> from a right-click: pick the scope, and optionally add the line to the post-response script so every run sets it."><i class="ic" data-i="brackets-curly"></i>Set as variable</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="dlg-gen-tests" data-alt="Generate tests: status, response time, content type and a JSON schema" data-cap="<b>Generate tests</b> from a response: status, response time, Content-Type and a JSON schema, previewed before they go into the script."><i class="ic" data-i="list-checks"></i>Generate tests</button>
+      </div>
+      <figure class="shot">
+        <img src="assets/img/shots/http-filter.webp" alt="A JSONPath filter on the response: 3 matches" width="1800" height="1125" loading="lazy" decoding="async">
+        <figcaption><b></b>The real app, on macOS</figcaption>
+      </figure>
+      <p class="show-cap" aria-live="polite"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 3. protocols -->
+<section class="sec" id="protocols">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="plugs-connected"></i>Protocols</div>
+        <h2>One tab per protocol, <span class="q">one way to work.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Each protocol gets the same layout, its own message log and its own scripts, and all of them run in the Collection Runner. Logs are virtualized, so <b>tens of thousands of messages</b> stay smooth.</p>
+      </div>
+    </div>
+    <div class="show rv" data-show>
+      <div class="show-tabs" role="tablist" aria-label="Protocols">
+        <button type="button" role="tab" aria-selected="true" data-shot="grpc" data-alt="A unary gRPC call to Greeter.SayHello with its reply" data-cap="<b>gRPC</b> from <code>.proto</code> files, compiled in the app, or from server reflection. Unary, client, server and bidirectional streaming, metadata, deadlines, TLS and mTLS."><span class="m" style="--c:var(--m-grpc)">gRPC</span>gRPC</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="ws" data-alt="A WebSocket connection with sent and received messages" data-cap="<b>WebSocket</b> with headers, subprotocols, text and binary messages, saved messages and a timestamped log. Click a message to read it in full."><span class="m" style="--c:var(--m-ws)">WS</span>WebSocket</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="sio" data-alt="A Socket.IO session with events and an acknowledgement" data-cap="<b>Socket.IO</b> v2 to v4: polling with upgrade or WebSocket only, namespaces, the auth payload, events, acknowledgements and binary attachments."><span class="m" style="--c:var(--m-sio)">SIO</span>Socket.IO</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="mqtt" data-alt="MQTT: publishing to a topic with active subscriptions" data-cap="<b>MQTT</b> 3.1.1 and 5 over TCP, TLS and WebSocket: subscriptions per QoS, publish with QoS and retain, last will and MQTT 5 user properties."><span class="m" style="--c:var(--m-mqtt)">MQTT</span>MQTT</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="mcp" data-alt="An MCP server's tools, with the result of search_books" data-cap="<b>MCP</b> servers over stdio, Streamable HTTP or SSE: call tools, read resources and prompts, with OAuth, sampling, elicitation and roots."><span class="m" style="--c:var(--m-mcp)">MCP</span>MCP</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="ai" data-alt="An AI conversation that calls MCP tools before it answers" data-cap="<b>AI requests</b> to OpenAI, Anthropic, Gemini and OpenAI-compatible servers like Ollama: streaming, time to first token, token counts, and your MCP requests as tools."><span class="m" style="--c:var(--m-ai)">AI</span>AI</button>
+        <button type="button" role="tab" aria-selected="false" data-shot="http-graphql" data-alt="A GraphQL query with the schema explorer" data-cap="<b>GraphQL</b> queries, mutations and subscriptions, with variables, introspection, a schema explorer and autocomplete in the editor."><span class="m" style="--c:var(--m-gql)">GQL</span>GraphQL</button>
+      </div>
+      <figure class="shot">
+        <img src="assets/img/shots/grpc.webp" alt="A unary gRPC call to Greeter.SayHello with its reply" width="1800" height="1125" loading="lazy" decoding="async">
+        <figcaption><b></b>The real app, on macOS</figcaption>
+      </figure>
+      <p class="show-cap" aria-live="polite"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 4. postman -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="download-simple"></i>Import</div>
+        <h2>Bring your collections. <span class="q">They just run.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Postman collections v2.0 and v2.1, environments and globals import as they are, and <b>pm.*</b> scripts run on an embedded engine with the real Chai, lodash, moment, crypto-js and tv4. A corpus of 50 real-world Postman scripts passes <b>50 of 50</b>.</p>
+        <ul class="facts">
+          <li>Export back to Postman v2.1: a round trip gives the same file.</li>
+          <li>Scripts run in a separate process with time and memory limits, so a runaway loop can’t freeze the app.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="pm rv">
+      <div class="code-card">
+        <div class="cc-h"><span class="cc-tab on">Post-response</span><span class="cc-tab">Pre-request</span><span class="sp"></span><span class="cc-n">list-books.request.json</span></div>
+<pre class="cc-b"><span class="ln">1</span><span class="f">pm</span>.<span class="f">test</span>(<span class="s">"Status code is 200"</span>, () <span class="p">=&gt;</span> {
+<span class="ln">2</span>  <span class="f">pm</span>.response.to.have.<span class="f">status</span>(<span class="n">200</span>);
+<span class="ln">3</span>});
+<span class="ln">4</span>
+<span class="ln">5</span><span class="k">const</span> books <span class="p">=</span> <span class="f">pm</span>.response.<span class="f">json</span>().data;
+<span class="ln">6</span><span class="f">pm</span>.<span class="f">test</span>(<span class="s">"Every book has a title"</span>, () <span class="p">=&gt;</span> {
+<span class="ln">7</span>  <span class="f">pm</span>.<span class="f">expect</span>(books.<span class="f">every</span>(b <span class="p">=&gt;</span> b.title)).to.be.<span class="k">true</span>;
+<span class="ln">8</span>});
+<span class="ln">9</span>
+<span class="ln">10</span><span class="c">// the next request reads {{firstId}}</span>
+<span class="ln">11</span><span class="f">pm</span>.collectionVariables.<span class="f">set</span>(<span class="s">"firstId"</span>, books[<span class="n">0</span>].id);</pre>
+      </div>
+      <div class="pm-side">
+        <div class="res-card">
+          <div class="rc-h"><span class="pill ok">200 OK</span><span class="mono t3">1 ms · 820 B</span><span class="sp"></span><span class="rc-t"><i class="icf" data-i="check-circle"></i>3/3 tests</span></div>
+          <div class="rc-row"><i class="icf ok" data-i="check-circle"></i>No server errors<span class="sp"></span><span class="tag">PASS</span></div>
+          <div class="rc-row"><i class="icf ok" data-i="check-circle"></i>Status code is 200<span class="sp"></span><span class="tag">PASS</span></div>
+          <div class="rc-row"><i class="icf ok" data-i="check-circle"></i>Every book has a title<span class="sp"></span><span class="tag">PASS</span></div>
+        </div>
+        <div class="fmt">
+          <div class="fmt-t">Imports from</div>
+          <div class="fmt-row">
+            <span>Postman v2.0 · v2.1</span><span>Environments · globals</span><span>OpenAPI 3 · Swagger 2</span><span>Insomnia</span><span>HAR</span><span>cURL</span><span>Hoppscotch</span><span>Thunder Client</span><span>WSDL</span><span>Smithy</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 5. runner + cli -->
+<section class="sec" id="cli">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="terminal-window"></i>Runner &amp; CLI</div>
+        <h2>The same run, <span class="q">in the app and in CI.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>The Collection Runner runs a collection or folder with a data file, iterations and delays, and exports <b>JUnit, HTML or JSON</b>. In a terminal, <span class="mono">ternarywire run</span> takes newman’s options, so it can replace <span class="mono">newman run</span> in your pipeline.</p>
+        <ul class="facts">
+          <li>Performance tests with virtual users and ramp-up: p50 to p99, throughput and errors.</li>
+          <li>Exits with <b>1</b> when a test fails, so it gates CI. Credentials are masked in every report.</li>
+        </ul>
+      </div>
+    </div>
+    <figure class="shot rv">
+      <img src="assets/img/shots/runner.webp" alt="The Collection Runner: 12 iterations of 10 requests from a CSV file, 203 tests passed and 1 failed" width="1800" height="1125" loading="lazy" decoding="async">
+      <span class="pin" style="--x:52.7%;--y:20.2%"><i tabindex="0">1</i><span>12 iterations, one per row of <b>books.csv</b>: 120 requests in 923 ms.</span></span>
+      <span class="pin r" style="--x:88.3%;--y:88.3%"><i tabindex="0">2</i><span>The one failure, with the assertion that failed and the response it got.</span></span>
+      <span class="pin" style="--x:36%;--y:86.4%"><i tabindex="0">3</i><span>Simulate network failures to see how your scripts cope.</span></span>
+      <figcaption><b></b>The real app, on macOS</figcaption>
+    </figure>
+    <div class="cli rv">
+      <div class="term">
+        <div class="term-h"><span class="dots"><b></b><b></b><b></b></span><span>~/code/bookstore</span></div>
+<pre class="term-b"><span class="g">$</span> ternarywire run api -e Staging --folder Books -r cli,junit
+<span class="b">Bookstore API</span>
+
+<span class="d">❏</span> Books
+<span class="d">↳</span> List books
+  <span class="d">GET https://staging.example.com/books?page=1&amp;limit=5 [200 OK, 820 B, 48 ms]</span>
+  <span class="g">✓</span> No server errors
+  <span class="g">✓</span> Status code is 200
+  <span class="g">✓</span> Every book has a title
+<span class="d">↳</span> Create book
+  <span class="d">POST https://staging.example.com/books [201 Created, 379 B, 61 ms]</span>
+  <span class="g">✓</span> Status code is 201
+<span class="d">↳</span> Get book
+  <span class="d">GET https://staging.example.com/books/99 [404 Not Found, 96 B, 39 ms]</span>
+  <span class="r">1. Book exists</span>
+
+<span class="d">┌───────────────────────────┬──────────┬──────────┐</span>
+<span class="d">│</span>                           <span class="d">│</span> executed <span class="d">│</span>   failed <span class="d">│</span>
+<span class="d">├───────────────────────────┼──────────┼──────────┤</span>
+<span class="d">│</span>                  requests <span class="d">│</span>        3 <span class="d">│</span>        0 <span class="d">│</span>
+<span class="d">│</span> test-scripts / assertions <span class="d">│</span>        5 <span class="d">│</span>        <span class="r">1</span> <span class="d">│</span>
+<span class="d">└───────────────────────────┴──────────┴──────────┘</span>
+<span class="r">#  failure        detail</span>
+<span class="r">1. AssertionError Book exists: expected response to have status code 200 but got 404</span>
+<span class="g">$</span> echo $?
+1</pre>
+      </div>
+      <div class="cli-side">
+        <div class="yaml">
+          <div class="term-h"><i class="ic" data-i="github-logo"></i><span>.github/workflows/api.yml</span></div>
+<pre class="term-b"><span class="d">- uses:</span> actions/checkout@v4
+<span class="d">- uses:</span> <span class="y">ilhamnadhif/ternarywire@v<span data-version>0.3.1</span></span>
+  <span class="d">with:</span>
+    <span class="d">collection:</span> api/
+    <span class="d">environment:</span> Staging
+    <span class="d">reporters:</span> cli,junit
+    <span class="d">args:</span> --bail</pre>
+        </div>
+        <div class="cmds">
+          <div class="cmds-t">Also in the CLI</div>
+          <div class="cmd-l"><span class="mono">mock</span>a mock server from a collection’s examples</div>
+          <div class="cmd-l"><span class="mono">perf</span>a load test with virtual users</div>
+          <div class="cmd-l"><span class="mono">flow run</span>a Flow, as on the canvas</div>
+          <div class="cmd-l"><span class="mono">docs</span>a static HTML site or Markdown</div>
+          <div class="cmd-l"><span class="mono">schedule</span>a collection every 5 minutes</div>
+          <div class="cmd-l"><span class="mono">convert</span>any import format to Postman or OpenAPI</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 6. flows -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="flow-arrow"></i>Flows</div>
+        <h2>Chain requests <span class="q">on a canvas.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Requests, conditions, loops, scripts and AI calls, joined by wires. Parallel branches <b>really run at the same time</b>, each block shows its status and timing while the flow runs, and problems are flagged before you press Run.</p>
+        <ul class="facts">
+          <li>Saved as <span class="mono">flows/*.flow.json</span> in the workspace, and run in CI with <span class="mono">ternarywire flow run</span>.</li>
+        </ul>
+      </div>
+    </div>
+    <figure class="shot rv">
+      <img src="assets/img/shots/flow.webp" alt="A flow that runs three requests in parallel, joins them and asks an AI model for a summary" width="1800" height="1125" loading="lazy" decoding="async">
+      <span class="pin" style="--x:39.3%;--y:36.9%"><i tabindex="0">1</i><span>Three requests in parallel; the Join waits for every branch that can reach it.</span></span>
+      <span class="pin r" style="--x:70.2%;--y:36.9%"><i tabindex="0">2</i><span>An AI block summarises what the requests returned.</span></span>
+      <span class="pin" style="--x:44.2%;--y:94.8%"><i tabindex="0">3</i><span>The run log: 7 steps and 8 of 8 tests in 776 ms.</span></span>
+      <figcaption><b></b>The real app, on macOS</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================================================ 7. in the box -->
+<section class="sec">
+  <div class="wrap">
+    <div class="rv">
+      <div class="eyebrow"><i class="ic" data-i="sparkle"></i>Also in the box</div>
+      <h2>Everything around the request, <span class="q">on your machine.</span></h2>
+    </div>
+    <div class="bento">
+      <div class="tile-c rv">
+        <div class="vis"><span class="mini"><span class="dot"></span>Running<span class="mono">127.0.0.1:3150</span></span><span class="mini t2">Use as <span class="mono var">{{baseUrl}}</span></span></div>
+        <h3><i class="ic" data-i="cube"></i>Mock server</h3>
+        <p>Served from a collection’s examples, with latency, bandwidth and failure simulation. One click points <span class="mono">{{baseUrl}}</span> at it.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis"><span class="mini"><span class="mth" style="--c:var(--m-post)">POST</span><span class="mono">/stripe/webhook</span><span class="t3">252 B</span></span><span class="mini t2"><i class="ic" data-i="arrow-clockwise"></i>Replay</span></div>
+        <h3><i class="ic" data-i="webhooks-logo"></i>Webhook listener</h3>
+        <p>A local endpoint that records every request, answers with the response you set, and replays events to another URL.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis"><span class="mini"><span class="dot rec"></span>Recording<span class="mono">:8888</span></span><span class="mini t2"><i class="ic" data-i="export"></i>Export HAR</span></div>
+        <h3><i class="ic" data-i="broadcast"></i>Capture proxy</h3>
+        <p>Record what other apps send, decrypt HTTPS per host with a local CA whose key stays in the Keychain, and save requests to a collection.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis"><span class="mini"><i class="ic" data-i="file-code"></i><span class="mono">bookstore.yaml</span><span class="ok-t"><i class="icf" data-i="check-circle"></i>Valid</span></span><span class="mini t2">Generate collection</span></div>
+        <h3><i class="ic" data-i="book-open"></i>Spec Hub</h3>
+        <p>OpenAPI, AsyncAPI, Protobuf, GraphQL and Smithy with live validation and docs beside the editor, and sync between spec and collection.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis wrapv"><span class="tag2">OAuth 2.0 + PKCE</span><span class="tag2">AWS SigV4</span><span class="tag2">NTLM</span><span class="tag2">Digest</span><span class="tag2">JWT</span><span class="tag2">Hawk</span><span class="tag2">EdgeGrid</span><span class="tag2">+5</span></div>
+        <h3><i class="ic" data-i="key"></i>Twelve auth types</h3>
+        <p>Checked against the official test vectors where they exist, inherited from collection and folder, with OAuth tokens kept in the Keychain.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis"><span class="mini"><span class="mono var">{{vault:stripe-key}}</span><i class="ic" data-i="arrow-right" style="color:var(--fg-3);font-size:12px"></i><i class="ic" data-i="lock-key"></i>Keychain</span></div>
+        <h3><i class="ic" data-i="vault"></i>A vault for secrets</h3>
+        <p>Read values from the Keychain, HashiCorp Vault, AWS Secrets Manager, Azure Key Vault or 1Password, never from a file you commit.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis wrapv"><span class="tag2">cURL</span><span class="tag2">fetch</span><span class="tag2">axios</span><span class="tag2">Python</span><span class="tag2">Go</span><span class="tag2">Rust</span><span class="tag2">Swift</span><span class="tag2">+11</span></div>
+        <h3><i class="ic" data-i="code"></i>Code in 18 flavours</h3>
+        <p>Copy any request as code, or as the exact cURL that was sent, with every variable resolved.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis"><div class="pal"><div class="pal-q"><i class="ic" data-i="magnifying-glass"></i>env<span class="caret"></span></div><div class="pal-r on"><i class="ic" data-i="globe"></i>Switch environment…<span class="k">⌘E</span></div><div class="pal-r"><i class="ic" data-i="eye"></i>Environment quick look</div></div></div>
+        <h3><i class="ic" data-i="command"></i>Keyboard first</h3>
+        <p>Quick search <span data-k="search"><kbd>⌘</kbd><kbd>K</kbd></span> finds any request; the command palette lists every command with its shortcut.</p>
+      </div>
+      <div class="tile-c rv">
+        <div class="vis"><span class="mini">English</span><span class="mini">Bahasa Indonesia</span><span class="mini"><i class="ic" data-i="circle-half"></i>Light · Dark</span></div>
+        <h3><i class="ic" data-i="translate"></i>Two languages, two themes</h3>
+        <p>Every button, tab and field has a name for screen readers, and the whole app works from the keyboard.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 8. git -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="git-branch"></i>Workspaces</div>
+        <h2>Your workspace is <span class="q">a folder in Git.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>One pretty-printed file per request, in a stable order, so a change to a header is a one-line diff your team can review. Share a workspace the way you share code: <b>commit it</b>.</p>
+        <ul class="facts">
+          <li>Secrets never reach the files: they go to the <b>Keychain</b>. Current values, cookies and history stay in a local folder Git ignores.</li>
+          <li>Fork a collection, then pull from it or merge back with a three-way diff.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="git rv">
+      <div class="tree">
+<pre><span class="d">~/code/bookstore/</span>
+  ternarywire.json            <span class="d">manifest</span>
+  environments/
+    staging.json              <span class="d">secrets left blank</span>
+  collections/bookstore-api/
+    collection.json           <span class="d">auth, scripts, variables</span>
+    books/
+      list-books.request.json
+      <span class="hl">create-book.request.json</span>
+  flows/catalog-summary.flow.json
+  specs/bookstore.yaml
+  <span class="d">.ternarywire/                local only, ignored by Git</span></pre>
+      </div>
+      <div class="diff">
+        <div class="diff-h"><i class="ic" data-i="git-diff"></i><span class="mono">collections/bookstore-api/books/create-book.request.json</span><span class="sp"></span><span class="mono add">+5</span><span class="mono del">−1</span></div>
+<pre><span class="ln">4</span>  "request": {
+<span class="ln">5</span>    "protocol": "http",
+<span class="ln">6</span>    "method": "POST",
+<span class="ln">7</span>    "url": "{{baseUrl}}/books",
+<span class="ln">8</span>    "headers": [
+<span class="ln">9</span>      {
+<span class="ln">10</span>        "key": "Content-Type",
+<span class="ln">11</span>        "value": "application/json"
+<span class="ln del">12</span><span class="del">-     }</span>
+<span class="ln add">12</span><span class="add">+     },</span>
+<span class="ln add">13</span><span class="add">+     {</span>
+<span class="ln add">14</span><span class="add">+       "key": "Idempotency-Key",</span>
+<span class="ln add">15</span><span class="add">+       "value": "{{$guid}}"</span>
+<span class="ln add">16</span><span class="add">+     }</span>
+<span class="ln">17</span>    ],
+<span class="ln">18</span>    "body": {
+<span class="ln">19</span>      "mode": "raw",</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ shortcuts -->
+<section class="sec" id="shortcuts">
+  <div class="wrap">
+    <div class="keys-top rv">
+      <div>
+        <div class="eyebrow"><i class="ic" data-i="keyboard"></i>Shortcuts</div>
+        <h2>Your hands <span class="q">stay on the keys.</span></h2>
+      </div>
+      <div class="seg-os" role="group" aria-label="Keyboard of">
+        <button type="button" data-keys="mac" aria-pressed="true">macOS</button>
+        <button type="button" data-keys="pc" aria-pressed="false">Windows &amp; Linux</button>
+      </div>
+    </div>
+    <div class="keygrid rv" id="keygrid"></div>
+    <p class="keys-note rv" id="keys-note">The command palette, <kbd>⇧</kbd><kbd>⌘</kbd><kbd>P</kbd>, lists all of them.</p>
+  </div>
+</section>
+
+<!-- ============================================================ private -->
+<section class="sec">
+  <div class="wrap">
+    <div class="rv">
+      <div class="eyebrow"><i class="ic" data-i="lock-simple"></i>Private by design</div>
+      <h2>Your APIs, <span class="q">your machine.</span></h2>
+    </div>
+    <div class="trio rv">
+      <div><h3><i class="ic" data-i="user-circle-dashed"></i>No account</h3><p>Download it and send a request. There is no sign-in, no plan, no trial and no cloud sync. Your workspaces are folders you own.</p></div>
+      <div><h3><i class="ic" data-i="eye-slash"></i>No telemetry</h3><p>TernaryWire connects to the servers you send requests to and, once at start, to GitHub to check for updates, which you can turn off. Nothing else.</p></div>
+      <div><h3><i class="ic" data-i="code"></i>Open source</h3><p>MIT or Apache-2.0, built in the open with <a class="ul" href="https://github.com/emilk/egui">egui</a>, reqwest, tonic and boa. Read it, build it, change it.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ install -->
+<section class="sec" id="install">
+  <div class="wrap">
+    <div class="rv">
+      <div class="eyebrow"><i class="ic" data-i="download-simple"></i>Install</div>
+      <h2>A minute <span class="q">from here.</span></h2>
+      <p class="sub">TernaryWire checks for updates after that, and one click installs the new version. Then <b>Import</b> a Postman collection, an OpenAPI file or a cURL command, or start a new request.</p>
+    </div>
+    <div class="inst rv">
+      <div class="tabs-os" role="tablist" aria-label="System">
+        <button type="button" role="tab" id="tab-mac" aria-controls="os-mac" aria-selected="true"><i class="ic" data-i="apple-logo"></i>macOS</button>
+        <button type="button" role="tab" id="tab-win" aria-controls="os-win" aria-selected="false"><i class="ic" data-i="windows-logo"></i>Windows</button>
+        <button type="button" role="tab" id="tab-linux" aria-controls="os-linux" aria-selected="false"><i class="ic" data-i="linux-logo"></i>Linux</button>
+        <button type="button" role="tab" id="tab-cli" aria-controls="os-cli" aria-selected="false"><i class="ic" data-i="terminal-window"></i>CLI only</button>
+        <span class="ver">v<span data-version>0.3.1</span></span>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-mac" aria-labelledby="tab-mac">
+        <div class="step"><span class="no">1</span><div>
+          <h3>Run this in Terminal <span>recommended</span></h3>
+          <p>It checks the download’s SHA-256, bundle id and signature, then installs into <b>/Applications</b>. Run it again to update. macOS 12 or later, Apple Silicon and Intel.</p>
+          <div class="cmd"><span class="ps">$</span><code id="cmd-mac">curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternarywire/master/scripts/install.sh | bash</code><button class="copy" type="button" data-copy="cmd-mac"><i class="ic" data-i="copy"></i><span>Copy</span></button></div>
+        </div></div>
+        <div class="step"><span class="no">2</span><div>
+          <h3>Or download the disk image</h3>
+          <div class="dls">
+            <a class="dl-b" data-asset="dmg" href="https://github.com/ilhamnadhif/ternarywire/releases/latest"><i class="ic" data-i="download-simple"></i><span class="t"><b>TernaryWire.dmg</b><span data-size>Universal</span></span></a>
+            <a class="dl-b" data-asset="cask" href="https://github.com/ilhamnadhif/ternarywire/releases/latest"><i class="ic" data-i="beer-bottle"></i><span class="t"><b>Homebrew cask</b><span data-size>ternarywire.rb</span></span></a>
+          </div>
+          <div class="note"><i class="icf" data-i="warning"></i><span>Releases aren’t notarized by Apple yet, so macOS blocks a <b>.dmg</b> downloaded in a browser. Click <b>Done</b>, then <b>System Settings → Privacy &amp; Security → Open Anyway</b>. The command above isn’t affected.</span></div>
+        </div></div>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-win" aria-labelledby="tab-win" hidden>
+        <div class="step"><span class="no">1</span><div>
+          <h3>Download the installer</h3>
+          <p>Windows 10 or 11, x64. It installs for your user without administrator rights, can add the <span class="mono">ternarywire</span> CLI to <b>PATH</b>, and installs over an older version when you update.</p>
+          <div class="dls">
+            <a class="dl-b hi" data-asset="win-setup" href="https://github.com/ilhamnadhif/ternarywire/releases/latest"><i class="ic" data-i="download-simple"></i><span class="t"><b>Installer (.exe)</b><span data-size>x64</span></span></a>
+            <a class="dl-b" data-asset="win-zip" href="https://github.com/ilhamnadhif/ternarywire/releases/latest"><i class="ic" data-i="file-zip"></i><span class="t"><b>Portable (.zip)</b><span data-size>x64</span></span></a>
+          </div>
+          <div class="note"><i class="icf" data-i="warning"></i><span>The installer isn’t code-signed yet, so SmartScreen may ask once: <b>More info → Run anyway</b>.</span></div>
+        </div></div>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-linux" aria-labelledby="tab-linux" hidden>
+        <div class="step"><span class="no">1</span><div>
+          <h3>Pick your package</h3>
+          <div class="linux">
+            <div class="lx"><div class="w"><b>.deb</b><span>Ubuntu 20.04+, Debian 11+, Mint, Pop!_OS</span></div><div class="arch"><a data-asset="deb-x64" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">x86_64</a><a data-asset="deb-arm" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">ARM64</a></div></div>
+            <div class="lx"><div class="w"><b>.rpm</b><span>Fedora, RHEL, Rocky, Alma, openSUSE</span></div><div class="arch"><a data-asset="rpm-x64" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">x86_64</a><a data-asset="rpm-arm" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">ARM64</a></div></div>
+            <div class="lx"><div class="w"><b>AppImage</b><span>Arch, Manjaro and the rest; updates itself</span></div><div class="arch"><a data-asset="appimage-x64" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">x86_64</a><a data-asset="appimage-arm" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">ARM64</a></div></div>
+            <div class="lx"><div class="w"><b>.tar.gz</b><span>Any distribution, by hand</span></div><div class="arch"><a data-asset="tar-x64" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">x86_64</a><a data-asset="tar-arm" href="https://github.com/ilhamnadhif/ternarywire/releases/latest">ARM64</a></div></div>
+          </div>
+        </div></div>
+        <div class="step"><span class="no">2</span><div>
+          <h3>Install it</h3>
+          <div class="cmd"><span class="ps">$</span><code id="cmd-deb">sudo apt install ./ternarywire_<span data-version>0.3.1</span>_amd64.deb</code><button class="copy" type="button" data-copy="cmd-deb"><i class="ic" data-i="copy"></i><span>Copy</span></button></div>
+          <p>Or <span class="mono">sudo dnf install ./ternarywire-<span data-version>0.3.1</span>-1.x86_64.rpm</span>. The packages put <span class="mono">ternarywire-app</span> and the <span class="mono">ternarywire</span> CLI in <b>/usr/bin</b>. glibc 2.28 or later; the AppImage needs FUSE.</p>
+        </div></div>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-cli" aria-labelledby="tab-cli" hidden>
+        <div class="step"><span class="no">1</span><div>
+          <h3>With Cargo <span>any system, Rust 1.88+</span></h3>
+          <div class="cmd"><span class="ps">$</span><code id="cmd-cargo">cargo install --locked --git https://github.com/ilhamnadhif/ternarywire ternarywire-cli</code><button class="copy" type="button" data-copy="cmd-cargo"><i class="ic" data-i="copy"></i><span>Copy</span></button></div>
+        </div></div>
+        <div class="step"><span class="no">2</span><div>
+          <h3>Or take the binary</h3>
+          <p>A single binary of about 21 MB. The macOS archive holds only the CLI; the Windows and Linux downloads include it next to the app.</p>
+          <div class="dls">
+            <a class="dl-b" data-asset="cli-mac" href="https://github.com/ilhamnadhif/ternarywire/releases/latest"><i class="ic" data-i="terminal-window"></i><span class="t"><b>CLI for macOS</b><span data-size>Universal</span></span></a>
+          </div>
+        </div></div>
+        <div class="step"><span class="no">3</span><div>
+          <h3>Or in Docker</h3>
+          <div class="cmd"><span class="ps">$</span><code id="cmd-docker">docker run --rm -v "$PWD:/work" ternarywire run collection.json -e env.json</code><button class="copy" type="button" data-copy="cmd-docker"><i class="ic" data-i="copy"></i><span>Copy</span></button></div>
+          <p>Build the image once with <span class="mono">docker build -f docker/Dockerfile -t ternarywire .</span> in a clone of the repository.</p>
+        </div></div>
+      </div>
+
+      <div class="inst-f">
+        <span>Already on Postman? <b>Import</b> takes the collection file you export from it.</span>
+        <span class="sp"></span>
+        <a href="https://github.com/ilhamnadhif/ternarywire/releases" data-release-link>Release notes</a>
+        <a href="https://github.com/ilhamnadhif/ternarywire#building-from-source">Build from source</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ faq -->
+<section class="sec" id="faq">
+  <div class="wrap faq-cols">
+    <div class="rv">
+      <div class="eyebrow"><i class="ic" data-i="question"></i>FAQ</div>
+      <h2>Fair <span class="q">questions.</span></h2>
+      <p class="sub">Something else? <a class="ul" href="https://github.com/ilhamnadhif/ternarywire/issues">Open an issue</a> with your version, system and the steps.</p>
+    </div>
+    <div class="faq-l rv">
+      <details><summary>Is it really free?<i class="ic" data-i="plus"></i></summary><div class="a"><p>Yes. TernaryWire is open source under MIT or Apache-2.0, with no account, no paid tier and no telemetry.</p></div></details>
+      <details><summary>Will my Postman collections work?<i class="ic" data-i="plus"></i></summary><div class="a"><p>Collections v2.0 and v2.1, environments and globals import as they are, and export back to v2.1. Scripts run on an embedded JavaScript engine with <b>pm.test</b>, <b>pm.expect</b>, <b>pm.sendRequest</b>, the variable scopes and the real Chai, lodash, moment, crypto-js and tv4; a corpus of 50 realistic scripts passes 50 of 50.</p><p>Hosted team features such as cloud sync, monitors and public workspaces are out of scope: workspaces are folders you share with Git.</p></div></details>
+      <details><summary>Can I run it in CI?<i class="ic" data-i="plus"></i></summary><div class="a"><p>Yes. <span class="mono">ternarywire run</span> takes a Postman collection file, a workspace or a collection folder with newman’s options (<span class="mono">-e</span>, <span class="mono">-d</span>, <span class="mono">-n</span>, <span class="mono">--folder</span>, <span class="mono">-r cli,junit</span>…) and exits with 1 when a test fails. The repository is also a <b>GitHub Action</b>, and there’s a Dockerfile.</p></div></details>
+      <details><summary>Where do my secrets go?<i class="ic" data-i="plus"></i></summary><div class="a"><p>Secret variables, passwords, tokens, client secrets and OAuth tokens go to the <b>macOS Keychain</b> (or your keyring on Linux), never to workspace files, exports, history or run reports. On machines without a keychain, such as CI, they go to <span class="mono">.ternarywire/secrets.json</span>, which the workspace’s <span class="mono">.gitignore</span> keeps out of Git.</p></div></details>
+      <details><summary>How does my team share a workspace?<i class="ic" data-i="plus"></i></summary><div class="a"><p>Put it in a Git repository. Each request is its own pretty-printed file in a stable order, so changes review and merge like code. Initial values are shared; current values stay on each machine.</p></div></details>
+      <details><summary>Why does my system warn me about it?<i class="ic" data-i="plus"></i></summary><div class="a"><p>The builds aren’t notarized by Apple or code-signed for Windows yet. On macOS, the one-line installer checks the download itself; with the <b>.dmg</b>, use <b>Open Anyway</b> in Privacy &amp; Security. On Windows, SmartScreen asks once.</p></div></details>
+      <details><summary>Does it work on Windows and Linux?<i class="ic" data-i="plus"></i></summary><div class="a"><p>Yes: a Windows installer, and <span class="mono">.deb</span>, <span class="mono">.rpm</span>, AppImage and <span class="mono">.tar.gz</span> for Linux on x86_64 and ARM64. macOS is where it’s built and tested by hand; every release installs the Linux packages on six distributions and the Windows installer on Windows before it’s published. Reports are welcome.</p></div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ final -->
+<section class="final">
+  <div class="field" id="field-final" aria-hidden="true"></div>
+  <div class="wrap rv">
+    <img class="final-icon" src="assets/img/icon.svg" alt="" width="76" height="76">
+    <h2>Send your first request<br><span class="q">a minute from now.</span></h2>
+    <div class="cta">
+      <a class="pb pb-pri" href="#install" data-cta-main><i class="ic" data-i="download-simple"></i><span>Download for macOS</span></a>
+      <a class="pb pb-sec" href="https://github.com/ilhamnadhif/ternarywire"><i class="ic" data-i="github-logo"></i>View on GitHub</a>
+    </div>
+    <p class="cta-note">Free and open source · v<span data-version>0.3.1</span></p>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot-site">
+  <div class="wrap foot-g">
+    <div>
+      <div class="brand"><img src="assets/img/icon.svg" alt="" width="22" height="22">TernaryWire</div>
+      <p>A lightweight API client, written entirely in Rust with egui. MIT or Apache-2.0.</p>
+      <p class="tm">Postman is a trademark of Postman, Inc. TernaryWire is not affiliated with Postman.</p>
+    </div>
+    <div>
+      <h4>TernaryWire</h4>
+      <ul>
+        <li><a href="https://github.com/ilhamnadhif/ternarywire">Source</a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternarywire/releases">Releases</a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternarywire/blob/master/docs/scripting.md">Scripting guide</a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternarywire/issues">Issues</a></li>
+      </ul>
+    </div>
+    <div class="fam">
+      <h4>The Ternary family</h4>
+      <ul>
+        <li><a href="https://ilhamnadhif.github.io/ternarycode/">TernaryCode <span>· AI agents</span></a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternarygrid">TernaryGrid <span>· SQL</span></a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternaryshell">TernaryShell <span>· SSH</span></a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/icons.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

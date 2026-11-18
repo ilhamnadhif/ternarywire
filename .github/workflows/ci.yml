@@ -4,6 +4,8 @@ on:
   push:
     # Branches only: a release tag points at a commit CI already checked.
     branches: ["**"]
+    # the website alone (pages.yml publishes it) needs no Rust build
+    paths-ignore: ["site/**", "scripts/build-site.py", ".github/workflows/pages.yml"]
   pull_request:
 
 jobs:
