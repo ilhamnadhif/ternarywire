@@ -118,6 +118,9 @@ egui notes:
 ## Rules
 
 - One primary (accent) button per view.
+- The accent marks actions, focus and the active tab, not selection: a
+  selected sidebar row is a neutral card (`Palette::selected`, a ring in
+  light), so it never sits next to the method colours (POST is amber).
 - Every icon-only control has a tooltip and an accessible name.
 - Empty, loading and error states are designed (empty state with an action,
   spinner with text, error with icon, cause and next step).

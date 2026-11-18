@@ -1071,6 +1071,24 @@ fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, 
         job.wrap.max_width = text_w;
         measure.layout_job(job)
     };
+    // The value stays on one line ("862 ms", not "862" over "ms"): in a narrow
+    // card its font shrinks to fit, down to 14 px.
+    let lay_value = |text: &str, color: Color32| {
+        let full = measure.layout_no_wrap(text.to_string(), theme::semibold(22.0), color).size().x;
+        let size = if full > text_w { (22.0 * text_w / full).floor().max(14.0) } else { 22.0 };
+        let mut job = LayoutJob::default();
+        job.append(
+            text,
+            0.0,
+            TextFormat {
+                line_height: Some(31.9),
+                valign: Align::Center,
+                ..TextFormat::simple(theme::semibold(size), color)
+            },
+        );
+        job.wrap.max_width = f32::INFINITY;
+        measure.layout_job(job)
+    };
     for (r, chunk) in cards.chunks(cols).enumerate() {
         if r > 0 {
             ui.add_space(gap);
@@ -1080,7 +1098,7 @@ fn stat_grid(ui: &mut Ui, cols: usize, cards: &[(&str, String, Option<Color32>, 
             .map(|(label, value, color, sub)| {
                 (
                     lay(label, FontId::proportional(11.5), p.text_muted, 16.7),
-                    lay(value, theme::semibold(22.0), color.unwrap_or(p.text), 31.9),
+                    lay_value(value, color.unwrap_or(p.text)),
                     lay(if sub.is_empty() { " " } else { sub }, FontId::proportional(11.5), p.text_faint, 16.7),
                 )
             })
@@ -1486,7 +1504,7 @@ fn results_table_rows(ui: &mut Ui, tab: &mut RunnerTab, filtered: &[usize], heig
             let (rect, resp) = ui.allocate_exact_size(vec2(width, TABLE_ROW), Sense::click());
             let painter = ui.painter();
             if tab.selected == Some(i) {
-                painter.rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, p.accent_soft);
+                painter.rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, p.subtle);
             } else if resp.hovered() {
                 painter.rect_filled(rect.shrink2(vec2(1.0, 0.0)), 0.0, p.well);
             }

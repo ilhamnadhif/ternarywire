@@ -591,17 +591,17 @@ pub fn check_line(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let p = theme::pal(ui);
     let mut g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(13.0), p.text);
     let wide = 15.0 + 8.0 + g.size().x <= ui.available_width();
-    // Wrapped: the box, 8 apart, then the label on 13 × 1.45 lines.
+    // Too long for the line: the label wraps beside the box (13 × 1.45 lines),
+    // the box level with its first line.
     let line_h = 13.0 * 1.45;
     if !wide {
         let format =
             egui::TextFormat { line_height: Some(line_h), ..TextFormat::simple(FontId::proportional(13.0), p.text) };
         let mut job = LayoutJob::single_section(label.to_string(), format);
-        job.wrap.max_width = ui.available_width();
+        job.wrap.max_width = (ui.available_width() - 15.0 - 8.0).max(40.0);
         g = ui.painter().layout_job(job);
     }
-    let size =
-        if wide { vec2(15.0 + 8.0 + g.size().x, 26.0) } else { vec2(ui.available_width(), 15.0 + 8.0 + g.size().y) };
+    let size = if wide { vec2(15.0 + 8.0 + g.size().x, 26.0) } else { vec2(ui.available_width(), g.size().y + 8.0) };
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -613,13 +613,13 @@ pub fn check_line(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let b = if wide {
         Rect::from_min_size(pos2(rect.left(), rect.center().y - 7.5), vec2(15.0, 15.0))
     } else {
-        Rect::from_min_size(rect.min, vec2(15.0, 15.0))
+        Rect::from_min_size(pos2(rect.left(), rect.top() + 4.0 + line_h / 2.0 - 7.5), vec2(15.0, 15.0))
     };
     kit::paint_check(ui, b, *on, false, resp.hovered(), true);
     let pos = if wide {
         pos2(b.right() + 8.0, b.center().y - g.size().y / 2.0)
     } else {
-        pos2(rect.left(), rect.top() + 15.0 + 8.0)
+        pos2(b.right() + 8.0, rect.top() + 4.0)
     };
     ui.painter().galley(pos, g, p.text);
     if resp.has_focus() {
@@ -803,9 +803,7 @@ pub fn list_row(
     }
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, 0.0, p.accent_soft);
-        let bar = Rect::from_min_max(pos2(rect.left(), rect.top() + 6.0), pos2(rect.left() + 3.0, rect.bottom() - 7.0));
-        painter.rect_filled(bar, CornerRadius { nw: 0, sw: 0, ne: 2, se: 2 }, p.accent);
+        painter.rect_filled(rect, 0.0, p.subtle);
     } else if ui.rect_contains_pointer(rect) {
         painter.rect_filled(rect, 0.0, p.well);
     }

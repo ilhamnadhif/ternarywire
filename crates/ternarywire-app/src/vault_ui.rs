@@ -42,6 +42,9 @@ struct LinkForm {
     reference: String,
     ttl_secs: u64,
     browse_path: Vec<String>,
+    /// Scrolled into view once: under a long list of secrets the form opens
+    /// below the visible part of the dialog.
+    shown: bool,
 }
 
 struct ProviderForm {
@@ -418,7 +421,7 @@ fn link_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &Exter
     let mut browse: Option<String> = None;
     let mut preview = false;
     let p = theme::pal(ui);
-    egui::Frame::new()
+    let card = egui::Frame::new()
         .fill(p.surface)
         .stroke(Stroke::new(1.0, p.accent))
         .corner_radius(CornerRadius::same(theme::RADIUS_CARD))
@@ -469,7 +472,7 @@ fn link_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &Exter
                     text_field(ui, tr("Reference"), &mut form.reference, provider.settings.reference_hint(), true);
                     return;
                 }
-                kit::field(ui, tr("Cache"), tr("0 fetches on every use"), |ui| {
+                kit::field(ui, tr("Cache"), tr("0 = fetch on every use"), |ui| {
                     row(ui, 26.0, |ui| number(ui, tr("Cache"), &mut form.ttl_secs, 0..=86_400, "s", 80.0));
                 });
             });
@@ -545,6 +548,10 @@ fn link_form(app: &TernaryWireApp, ui: &mut Ui, d: &mut VaultDialog, ext: &Exter
                 });
             });
         });
+    if !form.shown {
+        form.shown = true;
+        card.response.scroll_to_me(Some(egui::Align::Max));
+    }
     if let Some(path) = browse {
         let (ext, id) = (ext.clone(), provider.id.clone());
         run(&d.pending, app, async move {

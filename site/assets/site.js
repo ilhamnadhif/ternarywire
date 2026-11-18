@@ -34,7 +34,7 @@
   const NAME = { mac: 'macOS', win: 'Windows', linux: 'Linux' };
 
   /* ---------------------------------------------------------- release: version, files, sizes */
-  const FALLBACK = '0.3.1';
+  const FALLBACK = '0.3.2';
   const FILE = {
     'dmg': v => `TernaryWire-${v}-universal.dmg`,
     'cask': () => 'ternarywire.rb',

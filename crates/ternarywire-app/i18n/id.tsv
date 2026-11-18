@@ -238,7 +238,7 @@ Duration (s)	Durasi (dtk)
 (binary)	(biner)
 (missing request)	(request tidak ditemukan)
 .proto files	Berkas .proto
-0 fetches on every use	0 = ambil setiap kali dipakai
+0 = fetch on every use	0 = ambil setiap kali dipakai
 0 picks a free port	0 memilih port yang kosong
 A PKCS#12 bundle replaces the PEM files. The passphrase is stored in the Keychain, not in the settings file.	Bundel PKCS#12 menggantikan berkas PEM. Frasa sandi disimpan di Keychain, bukan di berkas pengaturan.
 A lightweight API client written in Rust. No account, no telemetry: data stays in your workspace folder.	Klien API ringan yang ditulis dengan Rust. Tanpa akun, tanpa telemetri: data tetap di folder workspace Anda.

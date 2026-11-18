@@ -417,15 +417,10 @@ fn method_picker(ui: &mut Ui, picker: Picker<'_>, service: &str, method: &str) -
                         ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.0), egui::Sense::click());
                     widgets::a11y_button(&r, &format!("{} {}", svc.name, m.name));
                     let painter = ui.painter();
-                    if selected || r.hovered() {
-                        painter.rect_filled(rect, egui::CornerRadius::same(7), p.hover);
-                    }
                     if selected {
-                        painter.rect_filled(
-                            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-                            egui::CornerRadius { nw: 7, sw: 7, ne: 0, se: 0 },
-                            p.accent,
-                        );
+                        painter.rect_filled(rect, egui::CornerRadius::same(7), p.subtle);
+                    } else if r.hovered() {
+                        painter.rect_filled(rect, egui::CornerRadius::same(7), p.hover);
                     }
                     let (kind, tone) = kind_look(m.kind);
                     let (fg, bg) = p.tone(tone);

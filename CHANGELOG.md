@@ -2,6 +2,29 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.2 — 2026-11-18
+
+Calmer colors: selection is neutral, so the coral accent no longer clashes with the method colors.
+
+### Changed
+- **Selected rows are neutral.** The selected request, environment, flow or spec in the sidebar
+  is a plain card instead of a card with a coral bar sticking out of its edge, and the selected
+  row of a list or table (message logs, mock server and webhook logs, captured traffic, Runner
+  results, the command palette, the gRPC method picker, vault rows, the Save dialog's folder) is
+  gray instead of coral. Coral is left for actions, focus and the active tab.
+- The selected MCP tool and your own messages in an AI conversation are gray as well.
+
+### Fixed
+- Text selected in a field keeps its color instead of turning coral, so a focused field with
+  selected text no longer looks like an error.
+- Collection Runner: the numbers in its summary stay on one line ("862 ms") in a narrow window
+  instead of breaking after the number.
+- Vault: **Link external secret…** scrolls its form into view; with many secrets it opened below
+  the visible part of the dialog, so the button seemed to do nothing. Its cache hint reads
+  "0 = fetch on every use".
+- A checkbox whose label is too long for its column (the mock server's "Resolve variables with the
+  active environment") keeps the label beside the box instead of dropping it below.
+
 ## 0.3.1 — 2026-11-12
 
 Every screen of the new design checked against the design once more and matched to it, and

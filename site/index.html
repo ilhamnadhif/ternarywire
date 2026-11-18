@@ -53,7 +53,7 @@
   <div class="wrap hero-in">
     <a class="announce" href="https://github.com/ilhamnadhif/ternarywire/releases/latest" data-release-link>
       <span class="wire" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
-      <span><b>TernaryWire <span data-version>0.3.1</span></b> is out</span><span class="sep"></span><span>What’s new</span><i class="ic" data-i="arrow-right"></i>
+      <span><b>TernaryWire <span data-version>0.3.2</span></b> is out</span><span class="sep"></span><span>What’s new</span><i class="ic" data-i="arrow-right"></i>
     </a>
     <h1>Every API.<br>One native window.</h1>
     <p class="lede">HTTP, GraphQL, gRPC, WebSocket, MQTT, MCP and AI requests in one small app, written in Rust. It opens in <b>40&nbsp;ms</b>, runs your <b>Postman collections and scripts</b> as they are, and keeps your work as plain files in Git.</p>
@@ -158,7 +158,7 @@
     <figure class="shot rv">
       <img src="assets/img/shots/http.webp" alt="The List books request: query parameters on the left, the JSON response with 3 of 3 tests passed on the right" width="1800" height="1125" loading="lazy" decoding="async">
       <span class="pin" style="--x:38.9%;--y:14.8%"><i tabindex="0">1</i><span><b>{{baseUrl}}</b> and <b>{{pageSize}}</b> resolve from the active environment, <b>Local</b>.</span></span>
-      <span class="pin r" style="--x:83%;--y:17.6%"><i tabindex="0">2</i><span>200 OK in 1 ms, 820 B, <b>3/3 tests</b> passed.</span></span>
+      <span class="pin r" style="--x:83%;--y:17.6%"><i tabindex="0">2</i><span>Status, time, size and <b>3/3 tests</b> passed, in one line.</span></span>
       <span class="pin r" style="--x:79.2%;--y:82.4%"><i tabindex="0">3</i><span>Fold any object. A 100 MB response is shown virtually, so it scrolls like this one.</span></span>
       <span class="pin" style="--x:20.6%;--y:30.1%"><i tabindex="0">4</i><span>Each request is a JSON file in the workspace folder.</span></span>
       <figcaption><b></b>The real app, on macOS</figcaption>
@@ -298,7 +298,7 @@
     </div>
     <figure class="shot rv">
       <img src="assets/img/shots/runner.webp" alt="The Collection Runner: 12 iterations of 10 requests from a CSV file, 203 tests passed and 1 failed" width="1800" height="1125" loading="lazy" decoding="async">
-      <span class="pin" style="--x:52.7%;--y:20.2%"><i tabindex="0">1</i><span>12 iterations, one per row of <b>books.csv</b>: 120 requests in 923 ms.</span></span>
+      <span class="pin" style="--x:52.7%;--y:20.2%"><i tabindex="0">1</i><span>12 iterations, one per row of <b>books.csv</b>: 120 requests.</span></span>
       <span class="pin r" style="--x:88.3%;--y:88.3%"><i tabindex="0">2</i><span>The one failure, with the assertion that failed and the response it got.</span></span>
       <span class="pin" style="--x:36%;--y:86.4%"><i tabindex="0">3</i><span>Simulate network failures to see how your scripts cope.</span></span>
       <figcaption><b></b>The real app, on macOS</figcaption>
@@ -337,7 +337,7 @@
         <div class="yaml">
           <div class="term-h"><i class="ic" data-i="github-logo"></i><span>.github/workflows/api.yml</span></div>
 <pre class="term-b"><span class="d">- uses:</span> actions/checkout@v4
-<span class="d">- uses:</span> <span class="y">ilhamnadhif/ternarywire@v<span data-version>0.3.1</span></span>
+<span class="d">- uses:</span> <span class="y">ilhamnadhif/ternarywire@v<span data-version>0.3.2</span></span>
   <span class="d">with:</span>
     <span class="d">collection:</span> api/
     <span class="d">environment:</span> Staging
@@ -377,7 +377,7 @@
       <img src="assets/img/shots/flow.webp" alt="A flow that runs three requests in parallel, joins them and asks an AI model for a summary" width="1800" height="1125" loading="lazy" decoding="async">
       <span class="pin" style="--x:39.3%;--y:36.9%"><i tabindex="0">1</i><span>Three requests in parallel; the Join waits for every branch that can reach it.</span></span>
       <span class="pin r" style="--x:70.2%;--y:36.9%"><i tabindex="0">2</i><span>An AI block summarises what the requests returned.</span></span>
-      <span class="pin" style="--x:44.2%;--y:94.8%"><i tabindex="0">3</i><span>The run log: 7 steps and 8 of 8 tests in 776 ms.</span></span>
+      <span class="pin" style="--x:44.2%;--y:94.8%"><i tabindex="0">3</i><span>The run log: 7 steps, 8 of 8 tests passed.</span></span>
       <figcaption><b></b>The real app, on macOS</figcaption>
     </figure>
   </div>
@@ -542,7 +542,7 @@
         <button type="button" role="tab" id="tab-win" aria-controls="os-win" aria-selected="false"><i class="ic" data-i="windows-logo"></i>Windows</button>
         <button type="button" role="tab" id="tab-linux" aria-controls="os-linux" aria-selected="false"><i class="ic" data-i="linux-logo"></i>Linux</button>
         <button type="button" role="tab" id="tab-cli" aria-controls="os-cli" aria-selected="false"><i class="ic" data-i="terminal-window"></i>CLI only</button>
-        <span class="ver">v<span data-version>0.3.1</span></span>
+        <span class="ver">v<span data-version>0.3.2</span></span>
       </div>
 
       <div class="pane-os" role="tabpanel" id="os-mac" aria-labelledby="tab-mac">
@@ -585,8 +585,8 @@
         </div></div>
         <div class="step"><span class="no">2</span><div>
           <h3>Install it</h3>
-          <div class="cmd"><span class="ps">$</span><code id="cmd-deb">sudo apt install ./ternarywire_<span data-version>0.3.1</span>_amd64.deb</code><button class="copy" type="button" data-copy="cmd-deb"><i class="ic" data-i="copy"></i><span>Copy</span></button></div>
-          <p>Or <span class="mono">sudo dnf install ./ternarywire-<span data-version>0.3.1</span>-1.x86_64.rpm</span>. The packages put <span class="mono">ternarywire-app</span> and the <span class="mono">ternarywire</span> CLI in <b>/usr/bin</b>. glibc 2.28 or later; the AppImage needs FUSE.</p>
+          <div class="cmd"><span class="ps">$</span><code id="cmd-deb">sudo apt install ./ternarywire_<span data-version>0.3.2</span>_amd64.deb</code><button class="copy" type="button" data-copy="cmd-deb"><i class="ic" data-i="copy"></i><span>Copy</span></button></div>
+          <p>Or <span class="mono">sudo dnf install ./ternarywire-<span data-version>0.3.2</span>-1.x86_64.rpm</span>. The packages put <span class="mono">ternarywire-app</span> and the <span class="mono">ternarywire</span> CLI in <b>/usr/bin</b>. glibc 2.28 or later; the AppImage needs FUSE.</p>
         </div></div>
       </div>
 
@@ -649,7 +649,7 @@
       <a class="pb pb-pri" href="#install" data-cta-main><i class="ic" data-i="download-simple"></i><span>Download for macOS</span></a>
       <a class="pb pb-sec" href="https://github.com/ilhamnadhif/ternarywire"><i class="ic" data-i="github-logo"></i>View on GitHub</a>
     </div>
-    <p class="cta-note">Free and open source · v<span data-version>0.3.1</span></p>
+    <p class="cta-note">Free and open source · v<span data-version>0.3.2</span></p>
   </div>
 </section>
 

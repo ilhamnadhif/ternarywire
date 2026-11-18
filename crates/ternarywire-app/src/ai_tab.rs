@@ -185,7 +185,7 @@ fn bubble<R>(
     };
     let (fill_c, stroke) = match who {
         // The border is transparent, but still 1 px wide.
-        Who::User => (p.accent_soft, Stroke::new(1.0, Color32::TRANSPARENT)),
+        Who::User => (p.subtle, Stroke::new(1.0, Color32::TRANSPARENT)),
         Who::Assistant => (p.surface, Stroke::new(1.0, p.border)),
         Who::Tool => (p.well, Stroke::new(1.0, p.border)),
     };

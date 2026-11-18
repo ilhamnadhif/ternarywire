@@ -33,7 +33,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-proto">
 .lrow .ra { display: flex; gap: 0; opacity: .55; } .lrow:hover .ra { opacity: 1; }
 .tcard { padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; display: flex; flex-direction: column; gap: 3px; }
 .tcard:hover { background: var(--hover); }
-.tcard.sel { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.tcard.sel { background: var(--sel-row); border-color: var(--border-strong); }
 .tcard .td { font-size: 11.5px; color: var(--text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
 .bubrow { display: flex; gap: 8px; align-items: flex-start; }
 .bubrow.me { flex-direction: row-reverse; }
@@ -42,7 +42,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-proto">
 .av.me { background: var(--accent-soft); color: var(--accent-text); }
 .bub { max-width: 86%; border-radius: 12px; padding: 8px 12px 10px; border: 1px solid var(--border); background: var(--surface); line-height: 1.55; position: relative; }
 .bub .bl { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 2px; display: flex; align-items: center; gap: 6px; }
-.bubrow.me .bub { background: var(--accent-soft); border-color: transparent; }
+.bubrow.me .bub { background: var(--subtle); border-color: transparent; }
 .bub .bact { position: absolute; top: 4px; right: 4px; display: flex; gap: 0; }
 .bub.tool { background: var(--well); font-size: 12px; }
 .bub.tool .bl { text-transform: none; letter-spacing: 0; font-size: 11.5px; color: var(--text-muted); }
@@ -55,7 +55,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-proto">
 .mpop { position: absolute; z-index: 30; width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 6px; }
 .mpop .mrow { display: flex; align-items: center; gap: 10px; height: 42px; padding: 0 10px; border-radius: 7px; }
 .mpop .mrow:hover, .mpop .mrow.on { background: var(--hover); }
-.mpop .mrow.on { box-shadow: inset 2px 0 0 var(--accent); }
+.mpop .mrow.on { background: var(--sel-row); }
 .subchip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 4px 0 9px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); font-size: 11.5px; white-space: nowrap; }
 .subchip .x { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; color: var(--text-faint); font-size: 10px; }
 .subchip .x:hover { background: var(--hover); color: var(--text); }

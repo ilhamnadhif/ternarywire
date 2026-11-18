@@ -1751,15 +1751,10 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>, trailing: impl FnOnce(&mut Ui)) -
                 color: Color32::from_black_alpha(if ui.visuals().dark_mode { 0 } else { 10 }),
             };
             painter.add(shadow.as_shape(rect, CornerRadius::same(6)));
-            // The ring sits outside the row (`box-shadow: 0 0 0 1px`); the
-            // dark prototype has none (its shadow list is invalid there).
+            // A neutral card (`--sel`): white with a ring in light, a lighter
+            // fill in dark. No accent marker beside the method colours.
             let ring = if ui.visuals().dark_mode { Stroke::NONE } else { Stroke::new(1.0, p.border) };
-            painter.rect(rect, CornerRadius::same(6), p.surface, ring, StrokeKind::Outside);
-            painter.rect_filled(
-                Rect::from_min_size(pos2(rect.left() - 2.0, rect.top() + 7.0), vec2(3.0, rect.height() - 14.0)),
-                CornerRadius::same(2),
-                p.accent,
-            );
+            painter.rect(rect, CornerRadius::same(6), p.selected, ring, StrokeKind::Outside);
         } else if hovered {
             painter.rect_filled(rect, CornerRadius::same(6), p.hover);
         }

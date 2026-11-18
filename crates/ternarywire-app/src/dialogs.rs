@@ -740,7 +740,7 @@ pub(crate) fn vrow<R>(
         se: if index + 1 == count { r } else { 0 },
     };
     if selected {
-        ui.painter().rect_filled(rect, corners, p.accent_soft);
+        ui.painter().rect_filled(rect, corners, p.subtle);
     } else if hovered {
         ui.painter().rect_filled(rect, corners, p.well);
     }
@@ -2274,7 +2274,7 @@ fn palette_row(ui: &mut Ui, e: &PaletteEntry, query: &str, selected: bool, end: 
     }
     let radius = CornerRadius::same(theme::RADIUS);
     if selected {
-        ui.painter().rect_filled(rect, radius, p.accent_soft);
+        ui.painter().rect_filled(rect, radius, p.subtle);
     } else if resp.hovered() {
         ui.painter().rect_filled(rect, radius, p.hover);
     }
@@ -3889,7 +3889,7 @@ fn cookie_table(
                 let corners = if last { CornerRadius { nw: 0, ne: 0, sw: r, se: r } } else { CornerRadius::ZERO };
                 let hovered = ui.rect_contains_pointer(rect);
                 if selected {
-                    ui.painter().rect_filled(rect, corners, p.accent_soft);
+                    ui.painter().rect_filled(rect, corners, p.subtle);
                 } else if hovered {
                     ui.painter().rect_filled(rect, corners, p.well);
                 }
@@ -4584,13 +4584,13 @@ fn tree_row(ui: &mut Ui, depth: usize, icon: &str, label: &str, selected: bool) 
     if ui.is_rect_visible(rect) {
         let radius = CornerRadius::same(theme::RADIUS_SM);
         if selected {
-            ui.painter().rect_filled(rect, radius, p.accent_soft);
+            ui.painter().rect_filled(rect, radius, p.subtle);
         } else if resp.hovered() {
             ui.painter().rect_filled(rect, radius, p.hover);
         }
         let cy = rect.center().y;
         let x = rect.left() + 10.0 + 18.0 * depth as f32;
-        let (color, icon_c) = if selected { (p.accent_text, p.accent_text) } else { (p.text, p.text_muted) };
+        let (color, icon_c) = if selected { (p.text, p.accent_text) } else { (p.text, p.text_muted) };
         let ig = ui.painter().layout_no_wrap(icon.to_string(), theme::icon_font(15.0), icon_c);
         let iw = ig.size().x;
         ui.painter().galley(pos2(x, cy - ig.size().y / 2.0), ig, icon_c);

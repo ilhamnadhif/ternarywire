@@ -31,6 +31,7 @@ import http.server
 import json
 import os
 import random
+import re
 import signal
 import socket
 import socketserver
@@ -148,6 +149,20 @@ def gql_introspection():
 # HTTP servers
 # ---------------------------------------------------------------------------
 
+
+def next_version():
+    """The minor version after the repository's own (Cargo.toml), so the update dialog always
+    offers something newer than the app it runs in."""
+    cargo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "Cargo.toml")
+    try:
+        with open(cargo, encoding="utf-8") as f:
+            m = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.\d+"', f.read(), re.M)
+        if m:
+            return f"{m.group(1)}.{int(m.group(2)) + 1}.0"
+    except OSError:
+        pass
+    return "9.9.0"
+
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -241,9 +256,10 @@ class BookstoreHandler(Base):
         body = self.body_json() if method in ("POST", "PUT", "PATCH") else None
 
         if path == "/__fixture/update.json":
+            newer = next_version()
             return self.reply(200, {
-                "version": "0.3.0", "published_at": "2026-11-10T09:00:00Z",
-                "url": "https://github.com/ilhamnadhif/ternarywire/releases/tag/v0.3.0",
+                "version": newer, "published_at": "2026-11-10T09:00:00Z",
+                "url": f"https://github.com/ilhamnadhif/ternarywire/releases/tag/v{newer}",
                 "notes": "## Workbench\n- Request on the left, response on the right, with a status row that always shows code, "
                          "time, size and tests.\n- Local servers (mock, webhooks, capture) get their own sidebar section.\n\n"
                          "## Fixes\n- Large responses no longer freeze the tree view.\n- OAuth 2.0 tokens refresh before a "

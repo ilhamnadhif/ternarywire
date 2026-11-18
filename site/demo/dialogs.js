@@ -19,7 +19,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-dialogs">
 .dl-pal-grp { padding: 10px 10px 4px; font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); }
 .dl-pal-row { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; border-radius: 7px; font-size: 13px; }
 .dl-pal-row:hover { background: var(--hover); }
-.dl-pal-row.on { background: var(--accent-soft); }
+.dl-pal-row.on { background: var(--sel-row); }
 .dl-pal-row .lead { width: 38px; display: flex; justify-content: center; flex: none; }
 .dl-pal-row .lead > .i { font-size: 16px; color: var(--text-muted); }
 .dl-pal-row .det { color: var(--text-faint); font-size: 12px; }
@@ -48,7 +48,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-dialogs">
 .dl-vrow .dl-ra { display: flex; gap: 2px; visibility: hidden; }
 .dl-vrow:hover .dl-ra, .dl-vrow.hov .dl-ra { visibility: visible; }
 .dl-vrow:hover, .dl-vrow.hov { background: var(--well); }
-.dl-vrow.sel { background: var(--accent-soft); }
+.dl-vrow.sel { background: var(--sel-row); }
 .dl-tile { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; background: var(--well); border: 1px solid var(--border); color: var(--text-muted); font-size: 15px; flex: none; }
 .dl-tile.acc { background: var(--accent-soft); border-color: transparent; color: var(--accent-text); }
 .dl-lpane { width: 230px; flex: none; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--well); }
@@ -78,7 +78,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-dialogs">
 .dl-pathbox { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--border); background: var(--well); font-family: "JBMono", monospace; font-size: 12px; min-width: 0; flex: 1; }
 .dl-tree-pick .tp { display: flex; align-items: center; gap: 8px; height: 30px; padding-right: 10px; border-radius: 6px; font-size: 12.5px; }
 .dl-tree-pick .tp:hover { background: var(--hover); }
-.dl-tree-pick .tp.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 500; }
+.dl-tree-pick .tp.on { background: var(--sel-row); color: var(--text); font-weight: 500; }
 .dl-tree-pick .tp .i { color: var(--text-muted); font-size: 15px; }
 .dl-tree-pick .tp.on .i { color: var(--accent-text); }
 .dl-codebox { border: 1px solid var(--border); border-radius: 8px; background: var(--well); overflow: hidden; }
@@ -279,7 +279,7 @@ function vaultSecrets() {
   const linkForm = `<div class="card" style="padding:14px 16px;border-color:var(--accent)">
       <div class="row" style="margin-bottom:10px">${I("LINK", "accent")}<span class="section-title grow">Link a vault name to an external secret</span>${ibtn("X", "Cancel", { sm: true, set: "sel=" })}</div>
       <div class="grid2">${field("Name", input("db_password", { sm: true, mono: true }))}${field("Provider", selectbox("corp-vault (HashiCorp Vault)", { sm: true, icon: "VAULT" }))}</div>
-      <div class="grid2" style="grid-template-columns:1fr 150px;margin-top:10px">${field("Reference", input("apps/bookstore/db#password", { sm: true, mono: true, ph: "path/to/secret#field (KV v2: path?version=3#field)" }))}${field("Cache", numUnit("300", "s", 80), "0 fetches on every use")}</div>
+      <div class="grid2" style="grid-template-columns:1fr 150px;margin-top:10px">${field("Reference", input("apps/bookstore/db#password", { sm: true, mono: true, ph: "path/to/secret#field (KV v2: path?version=3#field)" }))}${field("Cache", numUnit("300", "s", 80), "0 = fetch on every use")}</div>
       <div class="well" style="margin-top:10px;padding:4px">
         ${[["ARROW_BEND_UP_LEFT", "Up", ""], ["FOLDER_SIMPLE", "apps/bookstore/", ""], ["FOLDER_SIMPLE", "apps/payments/", ""], ["KEY", "apps/bookstore/db", "use"]].map(([ic, n, u]) => `<div class="dl-lrow">${I(ic, "muted")}<span class="mono small grow">${n}</span>${u ? btn("Use", { size: "sm" }) : ""}</div>`).join("")}</div>
       <div class="row" style="margin-top:12px">${btn("Browse…", { size: "sm", icon: "FOLDER_OPEN" })}${btn("Preview", { size: "sm", icon: "EYE", title: "Fetch once without showing the value" })}<span class="ok small row" style="gap:4px">${I("CHECK_CIRCLE")}Resolved (24 characters)</span><span class="spacer"></span>${btn("Cancel", { size: "sm", set: "sel=" })}${primary("Save link", { size: "sm" })}</div></div>`;

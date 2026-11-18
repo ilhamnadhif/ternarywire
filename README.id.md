@@ -67,7 +67,7 @@ Skrip ini mengunduh rilis terbaru, memeriksanya (SHA-256 yang diterbitkan GitHub
 dan tanda tangan kode), menutup TernaryWire yang sedang berjalan, memasang `TernaryWire.app` ke
 `/Applications`, lalu membukanya. Kalau ada yang gagal, salinan lama tetap di tempatnya. Jalankan
 lagi untuk memperbarui. Untuk versi tertentu, berikan versinya sebagai argumen:
-`… | bash -s -- v0.3.1`. Untuk memasang di folder lain, atur `TERNARYWIRE_APP_DIR` untuk bash:
+`… | bash -s -- v0.3.2`. Untuk memasang di folder lain, atur `TERNARYWIRE_APP_DIR` untuk bash:
 `… | TERNARYWIRE_APP_DIR=~/Applications bash`.
 
 ### Disk image
@@ -150,7 +150,7 @@ CLI juga berupa satu binary. Untuk macOS, ambil `ternarywire-cli-<versi>-macos-u
 rilis (arsip Linux dan Windows di atas juga berisi CLI):
 
 ```sh
-curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.1/ternarywire-cli-0.3.1-macos-universal.tar.gz | tar -xz
+curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.2/ternarywire-cli-0.3.2-macos-universal.tar.gz | tar -xz
 sudo mv ternarywire /usr/local/bin/
 ternarywire --version
 ```
@@ -440,7 +440,7 @@ menjalankan koleksi, lalu menulis laporan JUnit:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: ilhamnadhif/ternarywire@v0.3.1
+- uses: ilhamnadhif/ternarywire@v0.3.2
   with:
     collection: api/                 # berkas koleksi Postman, workspace, atau folder koleksi
     environment: Staging             # berkas environment Postman atau nama environment di workspace
@@ -579,7 +579,7 @@ aksesibilitas), `packaging/` (Info.plist, ikon, cask Homebrew, `.desktop` Linux)
 ## Pengembangan
 
 ```sh
-cargo test --workspace                       # sekitar 1.065 tes, dengan server uji HTTP/WS/gRPC/MQTT/Socket.IO/MCP/proxy lokal
+cargo test --workspace                       # sekitar 1.270 tes, dengan server uji HTTP/WS/gRPC/MQTT/Socket.IO/MCP/proxy lokal
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 scripts/bench.sh                             # target performa di atas (macOS)
@@ -594,7 +594,7 @@ yang butuh layanan sungguhan (socket.io, mosquitto, HashiCorp Vault, Ollama, reg
 - **UI**: baca [docs/design.md](docs/design.md) dulu; semua layar memakai token dan komponen
   bersama.
 - **Terjemahan**: teks yang dibaca pengguna lewat `tr()`/`trf()` dengan entri bahasa Indonesia di
-  `crates/ternarywire-app/i18n/id.tsv` (sekitar 1.670 entri); sebuah tes gagal bila ada yang belum
+  `crates/ternarywire-app/i18n/id.tsv` (sekitar 2.200 entri); sebuah tes gagal bila ada yang belum
   diterjemahkan.
 - **Variabel lingkungan**: `TERNARYWIRE_CONFIG_DIR` (folder pengaturan lain),
   `TERNARYWIRE_SECRETS=file|memory` (tanpa prompt Keychain untuk build yang tidak ditandatangani), dan

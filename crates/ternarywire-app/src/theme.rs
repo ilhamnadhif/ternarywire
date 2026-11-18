@@ -31,7 +31,7 @@ pub struct Palette {
     pub accent_hover: Color32,
     /// Text on an accent fill.
     pub on_accent: Color32,
-    /// Background of selected rows and accent pills.
+    /// Accent pills, badges and tiles. Not selection: see `selected`.
     pub accent_soft: Color32,
     /// Accent-colored text on light backgrounds.
     pub accent_text: Color32,
@@ -48,6 +48,10 @@ pub struct Palette {
     pub var_ok: Color32,
     pub var_ok_bg: Color32,
     pub var_bad_bg: Color32,
+    /// The selected sidebar row (a card; light adds a ring). Lists and tables
+    /// mark their selected row with `subtle`. Neither uses the accent, which
+    /// would sit next to the method colours.
+    pub selected: Color32,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -82,6 +86,7 @@ const LIGHT: Palette = Palette {
     var_ok: rgb(20, 130, 70),
     var_ok_bg: rgb(227, 244, 234),
     var_bad_bg: rgb(252, 232, 232),
+    selected: rgb(255, 255, 255),
 };
 
 const DARK: Palette = Palette {
@@ -112,6 +117,7 @@ const DARK: Palette = Palette {
     var_ok: rgb(110, 200, 140),
     var_ok_bg: rgb(27, 51, 38),
     var_bad_bg: rgb(61, 31, 31),
+    selected: rgb(45, 46, 52),
 };
 
 /// Which status color a pill, banner or badge uses.
@@ -365,8 +371,10 @@ impl egui::theme::StyleProvider<egui::widget_style::TextEditStyle> for FieldStyl
         let mut s: egui::widget_style::TextEditStyle = egui::theme::DefaultStyle.style(args);
         let frame = &mut s.atom_layout.frame;
         if args.state == egui::widget_style::WidgetState::Active && frame.stroke.width > 0.0 {
-            let accent = palette(args.style.visuals.dark_mode).accent;
-            frame.shadow = Shadow { offset: [0, 0], blur: 0, spread: 3, color: soft(accent, 0.16) };
+            let dark = args.style.visuals.dark_mode;
+            let p = palette(dark);
+            frame.stroke.color = if dark { p.accent } else { p.accent_text };
+            frame.shadow = Shadow { offset: [0, 0], blur: 0, spread: 3, color: soft(p.accent, 0.16) };
         }
         s
     }
@@ -413,8 +421,9 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             // Placeholders of text fields (`.input::placeholder`).
             v.weak_text_color = Some(p.text_faint);
             v.selection.bg_fill = if dark { soft(p.accent, 0.32) } else { soft(p.accent, 0.18) };
-            // Also the border of a focused text field: accent in both themes.
-            v.selection.stroke = Stroke::new(1.0, if dark { p.accent } else { p.accent_text });
+            // Selected text keeps the text colour (egui paints it with this stroke); the
+            // focused field's accent border comes from `FieldStyle`.
+            v.selection.stroke = Stroke::new(1.0, p.text);
             v.text_cursor.stroke = Stroke::new(1.5, p.accent);
             v.window_corner_radius = CornerRadius::same(RADIUS_DIALOG);
             v.menu_corner_radius = CornerRadius::same(RADIUS_LG);

@@ -581,13 +581,7 @@ fn entry_card(ui: &mut Ui, e: &Entry, selected: bool) -> egui::Response {
         let painter = ui.painter();
         let r = egui::CornerRadius::same(8);
         if selected {
-            painter.rect_stroke(
-                rect,
-                r,
-                egui::Stroke::new(3.0, theme::soft(p.accent, 0.12)),
-                egui::StrokeKind::Outside,
-            );
-            painter.rect(rect, r, p.surface, egui::Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+            painter.rect(rect, r, p.subtle, egui::Stroke::new(1.0, p.border_strong), egui::StrokeKind::Inside);
         } else if resp.hovered() {
             painter.rect_filled(rect, r, p.hover);
         }

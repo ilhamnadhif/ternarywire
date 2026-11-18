@@ -2651,7 +2651,7 @@ fn insert_snippet(code: &mut String, snippet: &str) {
     code.push_str(snippet);
 }
 
-/// A clickable row of a side list: icon, text, hover fill (accent fill when
+/// A clickable row of a side list: icon, text, hover fill (`subtle` when
 /// `selected`).
 #[allow(dead_code)] // Shared with the other views' side lists.
 pub(crate) fn list_row(ui: &mut Ui, icon: &str, text: &str, selected: bool) -> egui::Response {
@@ -2661,7 +2661,7 @@ pub(crate) fn list_row(ui: &mut Ui, icon: &str, text: &str, selected: bool) -> e
     if ui.is_rect_visible(rect) {
         let hovered = resp.hovered();
         if selected {
-            ui.painter().rect_filled(rect, CornerRadius::same(6), p.accent_soft);
+            ui.painter().rect_filled(rect, CornerRadius::same(6), p.subtle);
         } else if hovered {
             ui.painter().rect_filled(rect, CornerRadius::same(6), p.hover);
         }

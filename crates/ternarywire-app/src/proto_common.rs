@@ -1953,7 +1953,7 @@ fn log_row(ui: &mut Ui, l: &LogLine, selected: bool) -> egui::Response {
     let p = theme::pal(ui);
     let painter = ui.painter_at(rect.intersect(ui.clip_rect()));
     if selected {
-        painter.rect_filled(rect, 0.0, p.accent_soft);
+        painter.rect_filled(rect, 0.0, p.subtle);
     } else if response.hovered() {
         painter.rect_filled(rect, 0.0, p.well);
     } else if l.error {

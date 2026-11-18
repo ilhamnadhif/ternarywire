@@ -14,6 +14,10 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-tools">
 .tw-grp { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .tw-grp .eyebrow { display: flex; align-items: center; gap: 6px; }
 .tw-f { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 26px; }
+/* A check and its label stay side by side; a long label wraps beside the box. */
+.tw-chk { flex-wrap: nowrap; align-items: flex-start; padding: 4px 0; }
+.tw-chk > .check { flex: none; margin-top: 2px; }
+.tw-chk > span { min-width: 0; line-height: 1.45; }
 .tw-f > label { font-size: 12px; color: var(--text-muted); }
 .tw-num { width: 70px; text-align: right; }
 .tw-head { display: grid; align-items: center; gap: 10px; height: 28px; padding: 0 12px; background: var(--well); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 500; color: var(--text-muted); flex: none; }
@@ -21,8 +25,7 @@ document.head.insertAdjacentHTML("beforeend", `<style id="css-tools">
 .tw-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-head > .r, .tw-row > .r { text-align: right; }
 .tw-row:hover { background: var(--well); }
-.tw-row.sel { background: var(--accent-soft); }
-.tw-row.sel::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 0 2px 2px 0; background: var(--accent); }
+.tw-row.sel { background: var(--sel-row); }
 .tw-ts { font-family: "JBMono", monospace; font-size: 11.5px; color: var(--text-faint); }
 .tw-path { font-family: "JBMono", monospace; font-size: 12px; }
 .tw-path .q { color: var(--text-faint); }
@@ -80,7 +83,7 @@ function strip(key, open, label, summary, lock, body, o = {}) {
 const grp = (title, inner, o = {}) => `<div class="tw-grp ${o.locked ? "tw-locked" : ""}" ${o.style ? `style="${o.style}"` : ""}><div class="eyebrow">${title}${o.locked ? I("LOCK_SIMPLE") : ""}</div>${inner}</div>`;
 const fi = (label, ctrl, title) => `<div class="tw-f" ${title ? `title="${title}"` : ""}>${label ? `<label>${label}</label>` : ""}${ctrl}</div>`;
 const num = (v, o = {}) => input(v, { sm: true, style: `width:${o.w || 70}px;text-align:right`, ph: o.ph });
-const checkLine = (on, label, title) => `<div class="tw-f" ${title ? `title="${title}"` : ""}>${chk(on)}<span>${label}</span></div>`;
+const checkLine = (on, label, title) => `<div class="tw-f tw-chk" ${title ? `title="${title}"` : ""}>${chk(on)}<span>${label}</span></div>`;
 const switchLine = (on, label, title) => `<div class="tw-f" style="justify-content:space-between" ${title ? `title="${title}"` : ""}><span>${label}</span>${sw(on)}</div>`;
 
 function listHead(cols, labels, right = []) {

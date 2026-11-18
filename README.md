@@ -65,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternarywire/master/scri
 The script downloads the latest release, checks it (the SHA-256 GitHub publishes, the bundle id,
 the version and the code signature), quits a running TernaryWire, installs `TernaryWire.app` into
 `/Applications` and opens it. If anything fails, the copy you had stays in place. Run it again to
-update. To install a specific version, pass it as an argument: `… | bash -s -- v0.3.1`. To install
+update. To install a specific version, pass it as an argument: `… | bash -s -- v0.3.2`. To install
 somewhere else, set `TERNARYWIRE_APP_DIR` for bash: `… | TERNARYWIRE_APP_DIR=~/Applications bash`.
 
 ### Disk image
@@ -148,7 +148,7 @@ The CLI is a single binary as well. For macOS, take `ternarywire-cli-<version>-m
 from the release (the Linux and Windows archives above contain it too):
 
 ```sh
-curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.1/ternarywire-cli-0.3.1-macos-universal.tar.gz | tar -xz
+curl -fsSL https://github.com/ilhamnadhif/ternarywire/releases/download/v0.3.2/ternarywire-cli-0.3.2-macos-universal.tar.gz | tar -xz
 sudo mv ternarywire /usr/local/bin/
 ternarywire --version
 ```
@@ -438,7 +438,7 @@ collection, writing a JUnit report:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: ilhamnadhif/ternarywire@v0.3.1
+- uses: ilhamnadhif/ternarywire@v0.3.2
   with:
     collection: api/                 # Postman collection file, workspace or collection folder
     environment: Staging             # Postman environment file or workspace environment name
@@ -577,7 +577,7 @@ and `action.yml`.
 ## Development
 
 ```sh
-cargo test --workspace                       # about 1,065 tests, with local HTTP/WS/gRPC/MQTT/Socket.IO/MCP/proxy test servers
+cargo test --workspace                       # about 1,270 tests, with local HTTP/WS/gRPC/MQTT/Socket.IO/MCP/proxy test servers
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 scripts/bench.sh                             # the performance targets above (macOS)
@@ -591,7 +591,7 @@ need real services (socket.io, mosquitto, HashiCorp Vault, Ollama, the npm regis
 
 - **UI**: read [docs/design.md](docs/design.md) first; screens use shared tokens and components.
 - **Translations**: text users read goes through `tr()`/`trf()` with an Indonesian entry in
-  `crates/ternarywire-app/i18n/id.tsv` (about 1,670 entries); a test fails when one is missing.
+  `crates/ternarywire-app/i18n/id.tsv` (about 2,200 entries); a test fails when one is missing.
 - **Environment variables**: `TERNARYWIRE_CONFIG_DIR` (another settings folder),
   `TERNARYWIRE_SECRETS=file|memory` (no Keychain prompts with unsigned builds) and
   `TERNARYWIRE_AUTOMATION=steps.json` (drive the app from a list of steps and take screenshots; see

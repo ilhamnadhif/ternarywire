@@ -39,6 +39,9 @@
   --shadow-modal: 0 24px 64px rgba(20, 20, 30, .22), 0 2px 8px rgba(20, 20, 30, .08);
   --shadow-card: 0 1px 2px rgba(20, 20, 30, .04);
   --desk: #d9d9de;
+  --sel: var(--surface);      /* the selected sidebar row */
+  --sel-ring: 0 0 0 1px var(--border), var(--shadow-card);
+  --sel-row: var(--subtle);   /* the selected row of a list or table: neutral, never the accent */
   color-scheme: light;
 }
 .theme-dark {
@@ -73,6 +76,9 @@
   --shadow-modal: 0 28px 70px rgba(0, 0, 0, .6);
   --shadow-card: none;
   --desk: #0a0a0c;
+  --sel: var(--subtle);
+  --sel-ring: none;
+  --sel-row: var(--subtle);
   color-scheme: dark;
 }
 
@@ -350,7 +356,7 @@ button { cursor: pointer; }
 .tbl td { padding: 0 12px; height: 34px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
 .tbl tr:last-child td { border-bottom: 0; }
 .tbl tr:hover td { background: var(--well); }
-.tbl tr.sel td { background: var(--accent-soft); }
+.tbl tr.sel td { background: var(--sel-row); }
 .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
 .tbl-wrap { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--surface); }
 
@@ -401,8 +407,8 @@ button { cursor: pointer; }
 /* sidebar tree */
 .tree .tr { display: flex; align-items: center; gap: 6px; height: 28px; padding-right: 6px; border-radius: 6px; color: var(--text); font-size: 12.5px; position: relative; white-space: nowrap; }
 .tree .tr:hover { background: var(--hover); }
-.tree .tr.sel { background: var(--surface); box-shadow: 0 0 0 1px var(--border), var(--shadow-card); }
-.tree .tr.sel::before { content: ""; position: absolute; left: -2px; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--accent); }
+/* The selected row is a neutral card: no accent marker next to the method colours. */
+.tree .tr.sel { background: var(--sel); box-shadow: var(--sel-ring); }
 .tree .tr .car { width: 16px; color: var(--text-faint); font-size: 11px; text-align: center; flex: none; }
 .tree .tr .ic { color: var(--text-muted); font-size: 15px; flex: none; }
 .tree .tr .meth { width: 38px; text-align: right; font-size: 10px; }
@@ -458,14 +464,14 @@ button { cursor: pointer; }
 /* stat tiles */
 .stat { padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 .stat .l { font-size: 11.5px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
-.stat .v { font-size: 22px; font-weight: 600; letter-spacing: -.01em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.stat .v { font-size: 22px; font-weight: 600; letter-spacing: -.01em; margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; } /* a value never wraps: the app shrinks it to fit a narrow card */
 .stat .s { font-size: 11.5px; color: var(--text-faint); }
 
 /* message log (realtime protocols) */
 .log { font-size: 12.5px; }
 .log .lr { display: grid; grid-template-columns: 22px 92px minmax(0, auto) 1fr 56px; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-bottom: 1px solid var(--border); }
 .log .lr:hover { background: var(--well); }
-.log .lr.sel { background: var(--accent-soft); }
+.log .lr.sel { background: var(--sel-row); }
 .log .lr .dir { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; font-size: 12px; }
 .log .lr .dir.in { background: var(--ok-soft); color: var(--ok); }
 .log .lr .dir.out { background: var(--info-soft); color: var(--info); }
