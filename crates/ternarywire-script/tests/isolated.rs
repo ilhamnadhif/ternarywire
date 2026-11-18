@@ -372,7 +372,9 @@ fn workers_idle_after_a_burst_are_shut_down() {
     let exe = unique_worker(dir.path(), "worker-idle");
     let config = IsolationConfig {
         max_idle_workers: 4,
-        idle_timeout: std::time::Duration::from_millis(200),
+        // Long enough that a worker which finished first is still there when
+        // the last one finishes on a slow runner (they start a few 100 ms apart).
+        idle_timeout: std::time::Duration::from_millis(1000),
         ..Default::default()
     };
     let e = IsolatedEngine::new(exe.clone(), config);
@@ -391,7 +393,7 @@ fn workers_idle_after_a_burst_are_shut_down() {
     }
     let Some(after_burst) = processes_of(&exe) else { return };
     assert!(after_burst >= 2, "{after_burst}");
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    std::thread::sleep(std::time::Duration::from_millis(2500));
     assert_eq!(processes_of(&exe), Some(1), "one worker stays for the next job");
     assert!(e.run(pre("pm.environment.set('again', 1);")).errors.is_empty());
 }
