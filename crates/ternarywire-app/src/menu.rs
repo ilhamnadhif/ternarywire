@@ -63,13 +63,6 @@ impl AppMenu {
         AppMenu { _menu: menu, commands, events }
     }
 
-    /// Builds the menu again in the current language.
-    pub fn rebuild(&mut self) {
-        let (menu, commands) = build();
-        self._menu = menu;
-        self.commands = commands;
-    }
-
     /// Commands of the menu items chosen since the last call.
     pub fn take_commands(&self) -> Vec<Command> {
         self.events.try_iter().filter_map(|e| self.commands.get(e.id()).copied()).collect()

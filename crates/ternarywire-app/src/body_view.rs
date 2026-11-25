@@ -2705,15 +2705,6 @@ mod tests {
         assert!(!caps.fold && !caps.filter && !caps.wrap);
     }
 
-    /// The JSONPath error messages shown in the filter bar are translated.
-    #[test]
-    fn jsonpath_errors_are_translated() {
-        let table = include_str!("../i18n/id.tsv");
-        for m in jsonpath::ERROR_MESSAGES {
-            assert!(table.lines().any(|l| l.split('\t').next() == Some(m)), "no Indonesian entry for {m:?}");
-        }
-    }
-
     fn tempfile_dir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("ternarywire-test-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();

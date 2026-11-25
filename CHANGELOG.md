@@ -2,6 +2,15 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.3 — 2026-11-25
+
+Unified Ternary family theme, typography defaults, and English-only interface.
+
+### Changed
+- **Unified Obsidian Dark and Paper Light palettes.** Aligned window chrome, canvas, surface, well, border, text, syntax highlighting, and semantic status tokens with TernaryCode, TernaryShell, and TernaryGrid while keeping TernaryWire's calibrated Coral accent (`#cf4422` dark / `#c73d1d` light) at WCAG AA contrast.
+- **Typography and defaults.** Standardized default editor font size to `13.0` (matching UI body `13.0` and UI mono `12.0`) and disabled subpixel glyph binning for crisper stems.
+- **English-only interface.** Removed multi-language switching, Indonesian translation tables, and the language selector from Settings and the Command Palette. Existing `settings.json` files containing legacy `"language"` fields continue to load cleanly.
+
 ## 0.3.2 — 2026-11-18
 
 Calmer colors: selection is neutral, so the coral accent no longer clashes with the method colors.

@@ -50,7 +50,6 @@ pub enum Step {
     ActivateEnv(String),
     Layout(String),
     Theme(String),
-    Language(String),
     Console(bool),
     Url(String),
     /// New unsaved gRPC request with this URL.
@@ -391,15 +390,6 @@ pub fn tick(app: &mut TernaryWireApp, ctx: &egui::Context) {
                 "light" => ternarywire_core::settings::ThemePreference::Light,
                 "dark" => ternarywire_core::settings::ThemePreference::Dark,
                 _ => ternarywire_core::settings::ThemePreference::System,
-            };
-            app.apply_settings(s);
-        }
-        Step::Language(l) => {
-            let mut s = app.settings.clone();
-            s.ui.language = if l == "id" {
-                ternarywire_core::settings::Language::Id
-            } else {
-                ternarywire_core::settings::Language::En
             };
             app.apply_settings(s);
         }

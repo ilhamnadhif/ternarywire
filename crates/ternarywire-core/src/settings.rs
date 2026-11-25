@@ -171,14 +171,6 @@ pub enum ThemePreference {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Language {
-    #[default]
-    En,
-    Id,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum ResponseLayout {
     Below,
     /// Request on the left, response on the right (the default since the
@@ -191,7 +183,6 @@ pub enum ResponseLayout {
 #[serde(default)]
 pub struct UiSettings {
     pub theme: ThemePreference,
-    pub language: Language,
     pub font_size: f32,
     pub editor_font_size: f32,
     /// Saved under a new key: before 0.3 every settings file stored the old
@@ -208,9 +199,8 @@ impl Default for UiSettings {
     fn default() -> Self {
         UiSettings {
             theme: ThemePreference::System,
-            language: Language::En,
             font_size: 13.0,
-            editor_font_size: 12.5,
+            editor_font_size: 13.0,
             layout: ResponseLayout::Side,
             sidebar_visible: true,
             wrap_response: false,
@@ -386,8 +376,10 @@ mod tests {
 
     #[test]
     fn settings_tolerate_missing_fields() {
-        let s: AppSettings = serde_json::from_str("{\"ui\": {\"theme\": \"dark\"}}").unwrap();
+        let s: AppSettings = serde_json::from_str("{\"ui\": {\"theme\": \"dark\", \"language\": \"id\"}}").unwrap();
         assert_eq!(s.ui.theme, ThemePreference::Dark);
+        assert_eq!(s.ui.font_size, 13.0);
+        assert_eq!(s.ui.editor_font_size, 13.0);
         assert_eq!(s.history_limit, 1000);
     }
 

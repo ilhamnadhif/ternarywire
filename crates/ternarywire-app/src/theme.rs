@@ -58,66 +58,70 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+const fn white_alpha(a: u8) -> Color32 {
+    Color32::from_rgba_premultiplied(a, a, a, a)
+}
+
 const LIGHT: Palette = Palette {
     canvas: rgb(255, 255, 255),
-    chrome: rgb(244, 244, 246),
+    chrome: rgb(236, 236, 239),
     surface: rgb(255, 255, 255),
-    well: rgb(248, 248, 250),
-    hover: rgb(239, 239, 242),
-    subtle: rgb(232, 232, 236),
-    border: rgb(228, 228, 233),
-    border_strong: rgb(208, 208, 215),
-    text: rgb(23, 23, 28),
-    text_muted: rgb(98, 98, 109),
-    text_faint: rgb(154, 154, 165),
-    accent: rgb(225, 77, 42),
-    accent_hover: rgb(204, 64, 31),
+    well: rgb(245, 245, 247),
+    hover: Color32::from_black_alpha(11),
+    subtle: Color32::from_black_alpha(20),
+    border: Color32::from_black_alpha(23),
+    border_strong: Color32::from_black_alpha(41),
+    text: rgb(23, 23, 26),
+    text_muted: rgb(85, 85, 95),
+    text_faint: rgb(118, 118, 128),
+    accent: rgb(199, 61, 29),
+    accent_hover: rgb(176, 52, 23),
     on_accent: Color32::WHITE,
-    accent_soft: rgb(253, 236, 230),
-    accent_text: rgb(190, 58, 26),
-    ok: rgb(22, 140, 78),
-    warn: rgb(180, 112, 0),
-    err: rgb(214, 48, 49),
-    info: rgb(37, 99, 220),
-    ok_soft: rgb(229, 245, 236),
-    warn_soft: rgb(251, 241, 220),
-    err_soft: rgb(252, 232, 232),
-    info_soft: rgb(231, 238, 252),
-    var_ok: rgb(20, 130, 70),
-    var_ok_bg: rgb(227, 244, 234),
-    var_bad_bg: rgb(252, 232, 232),
+    accent_soft: rgb(252, 235, 230),
+    accent_text: rgb(179, 52, 23),
+    ok: rgb(17, 112, 64),
+    warn: rgb(143, 83, 0),
+    err: rgb(190, 39, 34),
+    info: rgb(31, 95, 191),
+    ok_soft: rgb(229, 244, 235),
+    warn_soft: rgb(250, 239, 217),
+    err_soft: rgb(252, 231, 230),
+    info_soft: rgb(230, 238, 251),
+    var_ok: rgb(17, 112, 64),
+    var_ok_bg: rgb(229, 244, 235),
+    var_bad_bg: rgb(252, 231, 230),
     selected: rgb(255, 255, 255),
 };
 
 const DARK: Palette = Palette {
-    canvas: rgb(24, 25, 28),
-    chrome: rgb(18, 19, 22),
-    surface: rgb(32, 33, 37),
-    well: rgb(28, 29, 33),
-    hover: rgb(38, 39, 44),
-    subtle: rgb(45, 46, 52),
-    border: rgb(44, 45, 51),
-    border_strong: rgb(62, 64, 71),
-    text: rgb(232, 232, 236),
-    text_muted: rgb(158, 159, 168),
-    text_faint: rgb(110, 111, 120),
-    accent: rgb(242, 103, 72),
-    accent_hover: rgb(250, 125, 96),
+    canvas: rgb(21, 21, 23),
+    chrome: rgb(13, 13, 15),
+    surface: rgb(29, 29, 32),
+    well: rgb(17, 17, 20),
+    hover: white_alpha(11),
+    subtle: white_alpha(20),
+    border: white_alpha(20),
+    border_strong: white_alpha(36),
+    text: rgb(237, 237, 240),
+    text_muted: rgb(161, 161, 170),
+    text_faint: rgb(117, 117, 126),
+    accent: rgb(207, 68, 34),
+    accent_hover: rgb(224, 83, 48),
     on_accent: Color32::WHITE,
-    accent_soft: rgb(63, 36, 30),
-    accent_text: rgb(255, 144, 118),
-    ok: rgb(74, 205, 128),
-    warn: rgb(240, 180, 72),
-    err: rgb(248, 104, 100),
-    info: rgb(110, 160, 255),
-    ok_soft: rgb(23, 51, 38),
-    warn_soft: rgb(58, 47, 23),
-    err_soft: rgb(61, 31, 31),
-    info_soft: rgb(28, 42, 69),
-    var_ok: rgb(110, 200, 140),
-    var_ok_bg: rgb(27, 51, 38),
-    var_bad_bg: rgb(61, 31, 31),
-    selected: rgb(45, 46, 52),
+    accent_soft: rgb(56, 29, 23),
+    accent_text: rgb(255, 150, 125),
+    ok: rgb(77, 196, 140),
+    warn: rgb(240, 173, 66),
+    err: rgb(240, 101, 96),
+    info: rgb(106, 165, 255),
+    ok_soft: rgb(22, 46, 35),
+    warn_soft: rgb(54, 41, 20),
+    err_soft: rgb(56, 27, 27),
+    info_soft: rgb(25, 38, 61),
+    var_ok: rgb(77, 196, 140),
+    var_ok_bg: rgb(22, 46, 35),
+    var_bad_bg: rgb(56, 27, 27),
+    selected: white_alpha(19),
 };
 
 /// Which status color a pill, banner or badge uses.
@@ -209,11 +213,12 @@ pub fn accent(dark: bool) -> Color32 {
 /// prototype's green, amber and red first (the same in both themes), then
 /// other hues.
 pub fn env_color(index: usize, dark: bool) -> Color32 {
+    let p = palette(dark);
     let colors = [
-        Color32::from_rgb(0x22, 0xa6, 0x60),
-        Color32::from_rgb(0xe0, 0xa0, 0x20),
-        Color32::from_rgb(0xe1, 0x4d, 0x2a),
-        palette(dark).info,
+        p.ok,
+        p.warn,
+        p.accent,
+        p.info,
         method_color("PATCH", dark),
         method_color("HEAD", dark),
         method_color("OPTIONS", dark),
@@ -223,19 +228,19 @@ pub fn env_color(index: usize, dark: bool) -> Color32 {
 
 pub fn method_color(method: &str, dark: bool) -> Color32 {
     let (d, l) = match method.to_ascii_uppercase().as_str() {
-        "GET" => ((74, 205, 128), (22, 140, 78)),
-        "POST" => ((246, 184, 70), (184, 112, 0)),
-        "PUT" => ((100, 160, 255), (37, 99, 220)),
-        "PATCH" => ((180, 140, 250), (124, 72, 210)),
-        "DELETE" | "DEL" => ((248, 104, 100), (214, 48, 49)),
+        "GET" => ((77, 196, 140), (17, 112, 64)),
+        "POST" => ((240, 173, 66), (143, 83, 0)),
+        "PUT" => ((106, 165, 255), (31, 95, 191)),
+        "PATCH" => ((196, 155, 255), (118, 63, 208)),
+        "DELETE" | "DEL" => ((240, 101, 96), (190, 39, 34)),
         // Protocol badges share the hues of the rarer methods.
-        "HEAD" | "SIO" | "SOCKET.IO" => ((96, 205, 205), (14, 128, 132)),
-        "OPTIONS" | "OPT" | "AI" => ((240, 125, 200), (180, 45, 135)),
-        "WS" => ((110, 180, 255), (20, 110, 200)),
-        "GQL" | "GRPC" => ((236, 100, 190), (196, 30, 140)),
-        "MQTT" => ((180, 140, 250), (124, 72, 210)),
-        "MCP" => ((246, 184, 70), (184, 112, 0)),
-        _ => ((158, 159, 168), (104, 104, 116)),
+        "HEAD" | "SIO" | "SOCKET.IO" => ((98, 204, 216), (13, 117, 136)),
+        "OPTIONS" | "OPT" | "AI" => ((240, 125, 200), (168, 40, 126)),
+        "WS" => ((122, 167, 255), (31, 88, 196)),
+        "GQL" | "GRPC" => ((236, 100, 190), (176, 30, 126)),
+        "MQTT" => ((196, 155, 255), (118, 63, 208)),
+        "MCP" => ((240, 173, 66), (143, 83, 0)),
+        _ => ((161, 161, 170), (85, 85, 95)),
     };
     let (r, g, b) = if dark { d } else { l };
     Color32::from_rgb(r, g, b)
@@ -267,7 +272,7 @@ pub fn muted(dark: bool) -> Color32 {
 }
 
 pub fn var_defined(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(110, 200, 140) } else { Color32::from_rgb(20, 130, 70) }
+    palette(dark).var_ok
 }
 
 pub fn var_undefined(dark: bool) -> Color32 {
@@ -408,6 +413,7 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             s.scroll.fade.strength = 0.0;
 
             let v: &mut Visuals = &mut style.visuals;
+            v.text_options.subpixel_binning = false;
             v.panel_fill = p.canvas;
             v.window_fill = p.surface;
             v.extreme_bg_color = p.surface;
@@ -467,7 +473,7 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             w.hovered.bg_fill = p.subtle;
             w.hovered.weak_bg_fill = p.hover;
             w.hovered.bg_stroke =
-                Stroke::new(1.0, if dark { Color32::from_rgb(80, 82, 90) } else { Color32::from_rgb(190, 190, 200) });
+                Stroke::new(1.0, if dark { Color32::from_white_alpha(56) } else { Color32::from_black_alpha(61) });
             w.hovered.fg_stroke = Stroke::new(1.0, p.text);
             w.hovered.corner_radius = radius;
             w.hovered.expansion = 0.0;
@@ -487,8 +493,8 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
                 *font = match ts {
                     egui::TextStyle::Heading => semibold(font_size + 3.0),
                     egui::TextStyle::Small => FontId::proportional(font_size - 1.0),
-                    egui::TextStyle::Monospace => mono(font_size - 0.5),
-                    egui::TextStyle::Button => FontId::proportional(font_size - 0.5),
+                    egui::TextStyle::Monospace => mono(font_size - 1.0),
+                    egui::TextStyle::Button => FontId::proportional(body(font_size)),
                     _ => FontId::proportional(body(font_size)),
                 };
             }

@@ -75,27 +75,27 @@ struct Palette {
 fn palette(dark: bool) -> Palette {
     if dark {
         Palette {
-            text: Color32::from_rgb(222, 223, 228),
-            key: Color32::from_rgb(122, 172, 255),
-            string: Color32::from_rgb(130, 204, 140),
-            number: Color32::from_rgb(240, 178, 96),
-            keyword: Color32::from_rgb(190, 150, 250),
-            comment: Color32::from_rgb(118, 120, 130),
-            punct: Color32::from_rgb(146, 148, 158),
-            tag: Color32::from_rgb(246, 128, 104),
-            attr: Color32::from_rgb(232, 190, 110),
+            text: Color32::from_rgb(220, 222, 228),
+            key: Color32::from_rgb(122, 167, 255),
+            string: Color32::from_rgb(127, 209, 154),
+            number: Color32::from_rgb(235, 192, 106),
+            keyword: Color32::from_rgb(196, 155, 255),
+            comment: Color32::from_rgb(114, 115, 124),
+            punct: Color32::from_rgb(161, 161, 170),
+            tag: Color32::from_rgb(255, 150, 125),
+            attr: Color32::from_rgb(98, 204, 216),
         }
     } else {
         Palette {
-            text: Color32::from_rgb(26, 26, 32),
-            key: Color32::from_rgb(30, 88, 200),
-            string: Color32::from_rgb(20, 122, 66),
-            number: Color32::from_rgb(176, 96, 0),
-            keyword: Color32::from_rgb(124, 72, 210),
-            comment: Color32::from_rgb(140, 140, 152),
-            punct: Color32::from_rgb(110, 110, 122),
-            tag: Color32::from_rgb(190, 58, 26),
-            attr: Color32::from_rgb(150, 96, 0),
+            text: Color32::from_rgb(28, 28, 32),
+            key: Color32::from_rgb(31, 88, 196),
+            string: Color32::from_rgb(22, 121, 66),
+            number: Color32::from_rgb(156, 92, 0),
+            keyword: Color32::from_rgb(118, 63, 208),
+            comment: Color32::from_rgb(128, 128, 138),
+            punct: Color32::from_rgb(85, 85, 95),
+            tag: Color32::from_rgb(179, 52, 23),
+            attr: Color32::from_rgb(13, 117, 136),
         }
     }
 }

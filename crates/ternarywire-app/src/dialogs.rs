@@ -18,9 +18,7 @@ use ternarywire_convert::codegen::Language;
 use ternarywire_core::model::{HttpVersion, Id, Item, RequestItem};
 use ternarywire_core::postman::ExportOptions;
 use ternarywire_core::prepared::{PrepareContext, prepare};
-use ternarywire_core::settings::{
-    AppSettings, ClientCertificate, Language as UiLanguage, ResponseLayout, ThemePreference,
-};
+use ternarywire_core::settings::{AppSettings, ClientCertificate, ResponseLayout, ThemePreference};
 use ternarywire_core::variables::Resolver;
 
 use crate::app::{ItemRef, Tab, TabKind, TernaryWireApp};
@@ -2002,7 +2000,6 @@ enum PaletteAction {
     Env(Option<Id>),
     Run(Id),
     Theme(ThemePreference),
-    Language(UiLanguage),
     OpenWorkspace,
     NewWorkspace,
     CheckUpdates,
@@ -2190,14 +2187,6 @@ fn palette_entries(app: &TernaryWireApp, requests_only: bool, dark: bool) -> Vec
         ] {
             out.push(
                 PaletteEntry::new(p, icon, trf("Theme: {}", &[&name]), A::Theme(t)).extra("theme").current(theme == t),
-            );
-        }
-        let lang = app.settings.ui.language;
-        for (l, name) in [(UiLanguage::En, "English"), (UiLanguage::Id, "Bahasa Indonesia")] {
-            out.push(
-                PaletteEntry::new(p, icons::TRANSLATE, trf("Language: {}", &[&name]), A::Language(l))
-                    .extra("language bahasa")
-                    .current(lang == l),
             );
         }
     }
@@ -2551,11 +2540,6 @@ fn run_palette_action(app: &mut TernaryWireApp, ctx: &egui::Context, action: Pal
         PaletteAction::Theme(t) => {
             let mut s = app.settings.clone();
             s.ui.theme = t;
-            app.apply_settings(s);
-        }
-        PaletteAction::Language(l) => {
-            let mut s = app.settings.clone();
-            s.ui.language = l;
             app.apply_settings(s);
         }
     }
@@ -3139,14 +3123,6 @@ fn general_page(ui: &mut Ui, draft: &mut AppSettings) {
                     (ThemePreference::Dark, Some(icons::MOON), tr("Dark")),
                 ],
                 true,
-            );
-        });
-        let help = Help::Text(tr("The language of menus and messages."));
-        frow(g, ui, true, tr("Language"), help, ctl::SMALL, |ui| {
-            kit::segmented_sm(
-                ui,
-                &mut draft.ui.language,
-                &[(UiLanguage::En, "English"), (UiLanguage::Id, "Bahasa Indonesia")],
             );
         });
         let help = Help::Text(tr("Text size of the whole interface."));

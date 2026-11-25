@@ -505,7 +505,6 @@ impl TernaryWireApp {
     ) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         crate::theme::install_fonts(&cc.egui_ctx);
-        crate::i18n::set_language(settings.ui.language);
         cc.egui_ctx.set_theme(match settings.ui.theme {
             ternarywire_core::settings::ThemePreference::System => egui::ThemePreference::System,
             ternarywire_core::settings::ThemePreference::Light => egui::ThemePreference::Light,
@@ -1631,13 +1630,6 @@ impl TernaryWireApp {
         let engine_changed = new.proxy != self.settings.proxy
             || new.certificates != self.settings.certificates
             || new.max_body_in_memory_bytes != self.settings.max_body_in_memory_bytes;
-        crate::i18n::set_language(new.ui.language);
-        #[cfg(target_os = "macos")]
-        if new.ui.language != self.settings.ui.language
-            && let Some(menu) = &mut self.menu
-        {
-            menu.rebuild();
-        }
         self.ctx.set_theme(match new.ui.theme {
             ternarywire_core::settings::ThemePreference::System => egui::ThemePreference::System,
             ternarywire_core::settings::ThemePreference::Light => egui::ThemePreference::Light,
