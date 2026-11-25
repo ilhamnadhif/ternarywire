@@ -57,12 +57,7 @@ impl SecretBackend for FileBackend {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let data = serde_json::to_vec_pretty(secrets).map_err(|e| e.to_string())?;
-        crate::storage::write_atomic(&self.path, &data).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
-        }
+        crate::storage::write_atomic_private(&self.path, &data).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -77,6 +72,7 @@ pub struct SecretStore {
     backend: Box<dyn SecretBackend>,
     map: RwLock<IndexMap<String, String>>,
     load_error: Option<String>,
+    last_save_error: RwLock<Option<String>>,
     /// Held from snapshot to backend write, so that of two concurrent
     /// writers the older snapshot can never be saved last.
     persist_lock: Mutex<()>,
@@ -100,7 +96,13 @@ impl SecretStore {
                 (IndexMap::new(), Some(e))
             }
         };
-        SecretStore { backend, map: RwLock::new(map), load_error, persist_lock: Mutex::new(()) }
+        SecretStore {
+            backend,
+            map: RwLock::new(map),
+            load_error,
+            last_save_error: RwLock::new(None),
+            persist_lock: Mutex::new(()),
+        }
     }
 
     pub fn memory() -> Self {
@@ -109,6 +111,10 @@ impl SecretStore {
 
     pub fn load_error(&self) -> Option<&str> {
         self.load_error.as_deref()
+    }
+
+    pub fn last_save_error(&self) -> Option<String> {
+        self.last_save_error.read().clone()
     }
 
     pub fn backend_description(&self) -> String {
@@ -143,12 +149,13 @@ impl SecretStore {
 
     /// Applies many changes with a single backend write.
     pub fn update(&self, f: impl FnOnce(&mut IndexMap<String, String>)) {
-        let before = self.map.read().clone();
-        {
+        let changed = {
             let mut map = self.map.write();
+            let before = map.clone();
             f(&mut map);
-        }
-        if *self.map.read() != before {
+            *map != before
+        };
+        if changed {
             self.persist();
         }
     }
@@ -166,8 +173,14 @@ impl SecretStore {
         }
         let _guard = self.persist_lock.lock();
         let snapshot = self.map.read().clone();
-        if let Err(e) = self.backend.save(&snapshot) {
-            tracing::error!("could not save secrets to {}: {e}", self.backend.describe());
+        match self.backend.save(&snapshot) {
+            Ok(()) => {
+                *self.last_save_error.write() = None;
+            }
+            Err(e) => {
+                tracing::error!("could not save secrets to {}: {e}", self.backend.describe());
+                *self.last_save_error.write() = Some(e);
+            }
         }
     }
 
@@ -236,7 +249,108 @@ impl TokenStore for SecretStore {
     }
 }
 
-/// macOS Keychain / Windows Credential Manager / Linux keyutils backend.
+/// Maximum UTF-16 code units per OS keychain credential entry.
+/// Windows Credential Manager enforces `CRED_MAX_CREDENTIAL_BLOB_SIZE`
+/// (2,560 bytes = 1,280 UTF-16 code units), so payloads larger than this
+/// threshold are transparently split across numbered entries (`{account}#chunk:{i}`).
+#[cfg(any(feature = "keychain", test))]
+const KEYCHAIN_CHUNK_UNITS: usize = 1_000;
+#[cfg(any(feature = "keychain", test))]
+const CHUNK_MANIFEST_KEY: &str = "__tw_chunks";
+#[cfg(any(feature = "keychain", test))]
+const MAX_KEYCHAIN_CHUNKS: usize = 10_000;
+
+#[cfg(any(feature = "keychain", test))]
+fn split_utf16_chunks(s: &str, max_units: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut units = 0;
+    for (idx, ch) in s.char_indices() {
+        let w = ch.len_utf16();
+        if units + w > max_units && idx > start {
+            chunks.push(&s[start..idx]);
+            start = idx;
+            units = 0;
+        }
+        units += w;
+    }
+    if start < s.len() || chunks.is_empty() {
+        chunks.push(&s[start..]);
+    }
+    chunks
+}
+
+#[cfg(any(feature = "keychain", test))]
+fn chunk_manifest_count(json: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let o = v.as_object()?;
+    if o.len() != 1 {
+        return None;
+    }
+    let n = o.get(CHUNK_MANIFEST_KEY)?.as_u64()?;
+    usize::try_from(n).ok().filter(|&n| (1..=MAX_KEYCHAIN_CHUNKS).contains(&n))
+}
+
+#[cfg(any(feature = "keychain", test))]
+fn load_chunked<F>(mut get: F) -> Result<IndexMap<String, String>, String>
+where
+    F: FnMut(Option<usize>) -> Result<Option<String>, String>,
+{
+    let Some(primary) = get(None)? else {
+        return Ok(IndexMap::new());
+    };
+    if let Some(count) = chunk_manifest_count(&primary) {
+        let mut full = String::new();
+        for i in 0..count {
+            let part = get(Some(i))?.ok_or_else(|| format!("missing keychain chunk {i} of {count}"))?;
+            full.push_str(&part);
+        }
+        return serde_json::from_str(&full).map_err(|e| e.to_string());
+    }
+    serde_json::from_str(&primary).map_err(|e| e.to_string())
+}
+
+#[cfg(any(feature = "keychain", test))]
+fn save_chunked<G, S, D>(
+    secrets: &IndexMap<String, String>,
+    mut get_primary: G,
+    mut set: S,
+    mut del: D,
+) -> Result<(), String>
+where
+    G: FnMut() -> Result<Option<String>, String>,
+    S: FnMut(Option<usize>, &str) -> Result<(), String>,
+    D: FnMut(Option<usize>) -> Result<(), String>,
+{
+    let prev_chunks = get_primary().ok().flatten().and_then(|s| chunk_manifest_count(&s)).unwrap_or(0);
+    if secrets.is_empty() {
+        del(None)?;
+        for i in 0..prev_chunks {
+            let _ = del(Some(i));
+        }
+        return Ok(());
+    }
+    let json = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
+    let chunks = split_utf16_chunks(&json, KEYCHAIN_CHUNK_UNITS);
+    if chunks.len() <= 1 {
+        set(None, &json)?;
+        for i in 0..prev_chunks {
+            let _ = del(Some(i));
+        }
+    } else {
+        for (i, chunk) in chunks.iter().enumerate() {
+            set(Some(i), chunk)?;
+        }
+        let manifest = format!("{{\"{CHUNK_MANIFEST_KEY}\":{}}}", chunks.len());
+        set(None, &manifest)?;
+        for i in chunks.len()..prev_chunks {
+            let _ = del(Some(i));
+        }
+    }
+    Ok(())
+}
+
+/// macOS Keychain / Windows Credential Manager / persistent OS keychain backend.
 #[cfg(feature = "keychain")]
 pub struct KeychainBackend {
     pub service: String,
@@ -256,37 +370,58 @@ impl KeychainBackend {
         KeychainBackend::for_workspace("app-settings")
     }
 
-    fn entry(&self) -> Result<keyring::Entry, String> {
-        keyring::Entry::new(&self.service, &self.account).map_err(|e| e.to_string())
+    fn entry_for(&self, chunk: Option<usize>) -> Result<keyring::Entry, String> {
+        let account = match chunk {
+            None => self.account.clone(),
+            Some(i) => format!("{}#chunk:{i}", self.account),
+        };
+        keyring::Entry::new(&self.service, &account).map_err(|e| e.to_string())
     }
 
-    /// Checks whether the platform keychain works at all (it does not on
-    /// headless CI machines).
+    /// Checks whether a *persistent* OS keychain is available and accessible
+    /// (returns `false` on volatile backends like Linux `keyutils` `UntilReboot`
+    /// and on headless CI machines without keychain access).
     pub fn available() -> bool {
-        keyring::Entry::new("dev.ternarywire.probe", "probe").is_ok()
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            if !matches!(
+                keyring::default::default_credential_builder().persistence(),
+                keyring::credential::CredentialPersistence::UntilDelete
+            ) {
+                return false;
+            }
+            let Ok(entry) = keyring::Entry::new("dev.ternarywire.probe", "probe") else {
+                return false;
+            };
+            matches!(entry.get_password(), Ok(_) | Err(keyring::Error::NoEntry))
+        })
     }
 }
 
 #[cfg(feature = "keychain")]
 impl SecretBackend for KeychainBackend {
     fn load(&self) -> Result<IndexMap<String, String>, String> {
-        match self.entry()?.get_password() {
-            Ok(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
-            Err(keyring::Error::NoEntry) => Ok(IndexMap::new()),
+        load_chunked(|chunk| match self.entry_for(chunk)?.get_password() {
+            Ok(s) => Ok(Some(s)),
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(e.to_string()),
-        }
+        })
     }
 
     fn save(&self, secrets: &IndexMap<String, String>) -> Result<(), String> {
-        let entry = self.entry()?;
-        if secrets.is_empty() {
-            return match entry.delete_credential() {
+        save_chunked(
+            secrets,
+            || match self.entry_for(None)?.get_password() {
+                Ok(s) => Ok(Some(s)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            },
+            |chunk, data| self.entry_for(chunk)?.set_password(data).map_err(|e| e.to_string()),
+            |chunk| match self.entry_for(chunk)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(e) => Err(e.to_string()),
-            };
-        }
-        let json = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
-        entry.set_password(&json).map_err(|e| e.to_string())
+            },
+        )
     }
 
     fn describe(&self) -> String {
@@ -376,6 +511,87 @@ mod tests {
         let last = saves.lock().last().cloned().unwrap();
         assert_eq!(last.get("b").map(String::as_str), Some("2"), "the newer secret was overwritten on disk");
         assert_eq!(last.get("a").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn chunked_keychain_helpers_roundtrip_and_shrink() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+
+        let store: RefCell<HashMap<Option<usize>, String>> = RefCell::new(HashMap::new());
+        let save = |map: &IndexMap<String, String>| {
+            save_chunked(
+                map,
+                || Ok(store.borrow().get(&None).cloned()),
+                |idx, val| {
+                    store.borrow_mut().insert(idx, val.to_string());
+                    Ok(())
+                },
+                |idx| {
+                    store.borrow_mut().remove(&idx);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        };
+        let load = || load_chunked(|idx| Ok(store.borrow().get(&idx).cloned())).unwrap();
+
+        // Large payload (> 2 chunks, including multi-byte emoji) splits and round-trips.
+        let big = IndexMap::from([
+            ("big1".to_string(), format!("{}🎉", "a".repeat(KEYCHAIN_CHUNK_UNITS))),
+            ("big2".to_string(), "b".repeat(KEYCHAIN_CHUNK_UNITS + 200)),
+        ]);
+        save(&big);
+        assert!(store.borrow().len() >= 4, "expected manifest + >=3 chunks: {:?}", store.borrow().len());
+        assert!(store.borrow().values().all(|v| v.encode_utf16().count() <= KEYCHAIN_CHUNK_UNITS));
+        assert_eq!(load(), big);
+
+        // Shrinking to a small payload removes all stale chunk entries.
+        let small = IndexMap::from([("k".to_string(), "v".to_string())]);
+        save(&small);
+        assert_eq!(store.borrow().len(), 1);
+        assert!(store.borrow().contains_key(&None));
+        assert_eq!(load(), small);
+
+        // Saving an empty map cleans up everything.
+        save(&IndexMap::new());
+        assert!(store.borrow().is_empty());
+        assert!(load().is_empty());
+    }
+
+    #[test]
+    fn save_error_is_recorded_and_noop_update_skips_save() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct CountingFail {
+            saves: Arc<AtomicUsize>,
+            fail: Arc<AtomicBool>,
+        }
+        impl SecretBackend for CountingFail {
+            fn load(&self) -> Result<IndexMap<String, String>, String> {
+                Ok(IndexMap::new())
+            }
+            fn save(&self, _secrets: &IndexMap<String, String>) -> Result<(), String> {
+                self.saves.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) { Err("disk full".into()) } else { Ok(()) }
+            }
+            fn describe(&self) -> String {
+                "counting".into()
+            }
+        }
+        let saves = Arc::new(AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(false));
+        let store = SecretStore::new(Box::new(CountingFail { saves: saves.clone(), fail: fail.clone() }));
+        store.update(|_| {});
+        assert_eq!(saves.load(Ordering::SeqCst), 0, "no-op update must not call save");
+        fail.store(true, Ordering::SeqCst);
+        store.set("k", "v");
+        assert_eq!(saves.load(Ordering::SeqCst), 1);
+        assert_eq!(store.last_save_error().as_deref(), Some("disk full"));
+        fail.store(false, Ordering::SeqCst);
+        store.set("k", "v2");
+        assert_eq!(store.last_save_error(), None);
     }
 }
 

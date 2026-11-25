@@ -86,9 +86,10 @@
       protocolInput: null,
       protocolBaseline: null,
       message: null,
-      // Package Library modules loaded by this job.
+      // Package Library and remote modules loaded by this job.
       packages: !!input.packages,
       localPkgs: Object.create(null),
+      remotePkgs: Object.create(null),
     };
   }
 
@@ -1407,8 +1408,6 @@
   // Packages: npm/JSR modules (namespaces kept per worker) and Package
   // Library files (loaded fresh per job), resolved by the host.
   // ---------------------------------------------------------------------
-  const remotePkgs = Object.create(null);
-
   // What `require` returns for an ES module: its default export when that
   // is all there is or when the default already carries the named exports
   // (CommonJS-style packages), otherwise the namespace.
@@ -1435,11 +1434,12 @@
   function requirePackage(spec, parent) {
     const r = jsonParse(host.pkgResolve(spec, parent || ''));
     if (r.kind === 'remote') {
-      if (!hasOwn(remotePkgs, r.id)) {
+      const remoteCache = S.remotePkgs;
+      if (!hasOwn(remoteCache, r.id)) {
         const ns = loadPackage(r.id, 'remote', spec);
-        remotePkgs[r.id] = interop(ns);
+        remoteCache[r.id] = interop(ns);
       }
-      return remotePkgs[r.id];
+      return remoteCache[r.id];
     }
     const cache = S.localPkgs;
     if (hasOwn(cache, r.id)) return cache[r.id].exports;
@@ -2575,7 +2575,15 @@
     if (!intlApi) {
       intlApi = loadModule('intl')({ localTimeZone: () => host.tzLocal(), zoneOffset: (name, t) => host.tzOffset(name, t) });
       settleGlobal('Intl', intlApi.Intl);
-      trackBuiltins([intlApi.Intl]);
+      const objs = [intlApi.Intl];
+      for (const k of Reflect.ownKeys(intlApi.Intl)) {
+        const v = intlApi.Intl[k];
+        if (typeof v === 'function') {
+          objs.push(v);
+          if (v.prototype) objs.push(v.prototype);
+        }
+      }
+      trackBuiltins(objs);
     }
     return intlApi;
   }
@@ -2613,12 +2621,26 @@
   function streamsLib() {
     if (!streamsApi) {
       streamsApi = loadModule('streams')({ TextEncoder, TextDecoder });
-      for (const name of STREAM_GLOBALS) settleGlobal(name, streamsApi[name]);
+      const objs = [];
+      for (const name of STREAM_GLOBALS) {
+        const v = streamsApi[name];
+        settleGlobal(name, v);
+        if (v) {
+          objs.push(v);
+          if (v.prototype) objs.push(v.prototype);
+        }
+      }
       // New names (not the accessor being read) can be added right away.
       for (const name of STREAM_INTERNALS) {
-        if (!(name in G)) define(G, name, streamsApi[name]);
-        settleGlobal(name, streamsApi[name]);
+        const v = streamsApi[name];
+        if (!(name in G)) define(G, name, v);
+        settleGlobal(name, v);
+        if (v) {
+          objs.push(v);
+          if (v.prototype) objs.push(v.prototype);
+        }
       }
+      trackBuiltins(objs);
     }
     return streamsApi;
   }

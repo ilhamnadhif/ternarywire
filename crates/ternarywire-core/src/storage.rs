@@ -60,9 +60,8 @@ pub fn ensure_local_dir(root: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Writes via a temporary file and rename so a crash of the app never leaves
-/// a half-written file behind. There is deliberately no fsync per file: it
-/// made saving a 10,000-request collection take ~45 s, and the rename already
-/// gives all-or-nothing files for app crashes.
+/// a half-written file behind. Follows symlinks (intended for user-owned
+/// config files such as `settings.json` kept in a dotfiles repository).
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     // Renaming over a symlink would replace the link (settings kept in a
     // dotfiles repository, say): write the file it points to instead.
@@ -71,18 +70,77 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
         _ => None,
     };
     let path = resolved.as_deref().unwrap_or(path);
+    write_atomic_direct(path, data, true)
+}
+
+/// Atomic write for private local files (`.ternarywire/secrets.json`,
+/// `history.jsonl`, `state.json`, `cookies.json`). Refuses to write through a
+/// symlink and always enforces mode `0o600` on Unix before persisting.
+pub fn write_atomic_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing to write private file through symlink: {}", path.display()),
+        ));
+    }
+    write_atomic_direct(path, data, false)
+}
+
+/// Atomic write confined to `root`: refuses symlinks on `path` and verifies
+/// that the target directory resolves inside the canonical `root`.
+pub fn write_atomic_confined(root: &Path, path: &Path, data: &[u8], preserve_mode: bool) -> std::io::Result<()> {
+    let canon_root = std::fs::canonicalize(root)?;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing to write workspace file through symlink: {}", path.display()),
+        ));
+    }
+    // Check the nearest existing ancestor so symlinked parent directories
+    // cannot redirect writes outside the workspace root.
+    let mut probe = path.parent();
+    while let Some(dir) = probe {
+        if dir.exists() {
+            let canon = std::fs::canonicalize(dir)?;
+            if !canon.starts_with(&canon_root) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("refusing to write outside workspace root: {}", path.display()),
+                ));
+            }
+            break;
+        }
+        probe = dir.parent();
+    }
+    write_atomic_direct(path, data, preserve_mode)
+}
+
+fn write_atomic_direct(path: &Path, data: &[u8], preserve_mode: bool) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::io::Write::write_all(&mut tmp, data)?;
     // The temporary file is private (0600): keep the mode of the file it
-    // replaces, so a group-readable workspace file stays readable.
+    // replaces for shared workspace files, or enforce 0600 for private files.
     #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(path) {
-        let _ = tmp.as_file().set_permissions(meta.permissions());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if preserve_mode {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let _ = tmp.as_file().set_permissions(meta.permissions());
+            }
+        } else {
+            tmp.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
     }
+    #[cfg(not(unix))]
+    let _ = preserve_mode;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+fn is_within_root(canon_root: &Path, path: &Path) -> bool {
+    std::fs::canonicalize(path).is_ok_and(|c| c.starts_with(canon_root))
 }
 
 fn to_pretty<T: Serialize>(v: &T) -> Vec<u8> {
@@ -208,6 +266,9 @@ pub struct WorkspaceStore {
     root: PathBuf,
     id: Id,
     index: Mutex<Index>,
+    /// Held across snapshot + `write_state` so concurrent callers cannot
+    /// persist an older `state.json` snapshot after a newer one.
+    state_lock: Mutex<()>,
 }
 
 /// Secret store key for a sensitive auth parameter.
@@ -300,11 +361,22 @@ impl SecretSink {
             if !sensitive.contains(&k.as_str()) {
                 continue;
             }
-            if let serde_json::Value::String(s) = v
-                && !s.is_empty()
-                && !is_pure_reference(s)
-            {
-                self.secrets.push((auth_secret_key(owner, k), std::mem::take(s)));
+            match v {
+                serde_json::Value::String(s) if !s.is_empty() && !is_pure_reference(s) => {
+                    self.secrets.push((auth_secret_key(owner, k), std::mem::take(s)));
+                }
+                serde_json::Value::String(_) | serde_json::Value::Null => {}
+                other => {
+                    let s = match other {
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        ref v => v.to_string(),
+                    };
+                    if !s.is_empty() {
+                        self.secrets.push((auth_secret_key(owner, k), s));
+                    }
+                    *other = serde_json::Value::String(String::new());
+                }
             }
         }
     }
@@ -466,13 +538,19 @@ impl WorkspaceStore {
         std::fs::create_dir_all(root).map_err(|e| Error::io(root, e))?;
         let manifest =
             Manifest { format: FORMAT_NAME.into(), version: FORMAT_VERSION, id: new_id(), name: name.to_string() };
-        write_atomic(&root.join(MANIFEST_FILE), &to_pretty(&manifest)).map_err(|e| Error::io(root, e))?;
+        write_atomic_confined(root, &root.join(MANIFEST_FILE), &to_pretty(&manifest), true)
+            .map_err(|e| Error::io(root, e))?;
         let gitignore = root.join(".gitignore");
         if !gitignore.exists() {
             std::fs::write(&gitignore, format!("{LOCAL_DIR}/\n")).map_err(|e| Error::io(&gitignore, e))?;
         }
         ensure_local_dir(root).map_err(|e| Error::io(root.join(LOCAL_DIR), e))?;
-        let store = WorkspaceStore { root: root.to_path_buf(), id: manifest.id.clone(), index: Mutex::default() };
+        let store = WorkspaceStore {
+            root: root.to_path_buf(),
+            id: manifest.id.clone(),
+            index: Mutex::default(),
+            state_lock: Mutex::new(()),
+        };
         let ws = Workspace {
             root: root.to_path_buf(),
             id: manifest.id,
@@ -505,6 +583,7 @@ impl WorkspaceStore {
 
     pub fn open(root: &Path, secrets: &SecretStore) -> Result<(WorkspaceStore, Workspace)> {
         let manifest = Self::read_manifest(root)?;
+        let canon_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         // Before anything (state, secrets file, history) is written into
         // it. A read-only checkout still opens.
         let _ = ensure_local_dir(root);
@@ -512,24 +591,33 @@ impl WorkspaceStore {
         let mut load_errors = Vec::new();
 
         let state_path = root.join(LOCAL_DIR).join("state.json");
-        index.state = match std::fs::read(&state_path) {
-            Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
-                load_errors.push(format!("{}: {e}", state_path.display()));
-                LocalState::default()
-            }),
-            Err(_) => LocalState::default(),
+        index.state = if state_path.exists() && !is_within_root(&canon_root, &state_path) {
+            load_errors.push(format!("{}: points outside the workspace, skipped", state_path.display()));
+            LocalState::default()
+        } else {
+            match std::fs::read(&state_path) {
+                Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+                    load_errors.push(format!("{}: {e}", state_path.display()));
+                    LocalState::default()
+                }),
+                Err(_) => LocalState::default(),
+            }
         };
         let source = SecretSource { store: secrets, state: &index.state };
 
         let mut globals = Vec::new();
         let gpath = root.join("globals.json");
         if gpath.is_file() {
-            match read_json::<GlobalsFile>(&gpath) {
-                Ok((g, h)) => {
-                    globals = g.variables;
-                    index.written.insert(PathBuf::from("globals.json"), h);
+            if !is_within_root(&canon_root, &gpath) {
+                load_errors.push(format!("{}: points outside the workspace, skipped", gpath.display()));
+            } else {
+                match read_json::<GlobalsFile>(&gpath) {
+                    Ok((g, h)) => {
+                        globals = g.variables;
+                        index.written.insert(PathBuf::from("globals.json"), h);
+                    }
+                    Err(e) => load_errors.push(e.to_string()),
                 }
-                Err(e) => load_errors.push(e.to_string()),
             }
         }
         source.variables(GLOBALS_OWNER, &mut globals);
@@ -537,10 +625,16 @@ impl WorkspaceStore {
         let mut environments = Vec::new();
         let mut env_ids = HashSet::new();
         let env_dir = root.join("environments");
-        if let Ok(rd) = std::fs::read_dir(&env_dir) {
+        if is_within_root(&canon_root, &env_dir)
+            && let Ok(rd) = std::fs::read_dir(&env_dir)
+        {
             let mut paths: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
             paths.sort();
             for p in paths.into_iter().filter(|p| p.extension().map(|e| e == "json").unwrap_or(false)) {
+                if !is_within_root(&canon_root, &p) {
+                    load_errors.push(format!("{}: points outside the workspace, skipped", p.display()));
+                    continue;
+                }
                 match read_json::<Environment>(&p) {
                     Ok((mut env, h)) => {
                         let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
@@ -564,15 +658,34 @@ impl WorkspaceStore {
         let mut collections = Vec::new();
         let mut collection_ids = HashSet::new();
         let col_dir = root.join("collections");
-        if let Ok(rd) = std::fs::read_dir(&col_dir) {
+        if is_within_root(&canon_root, &col_dir)
+            && let Ok(rd) = std::fs::read_dir(&col_dir)
+        {
             let mut dirs: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
             dirs.sort();
             for d in dirs {
+                if !is_within_root(&canon_root, &d) {
+                    load_errors.push(format!("{}: points outside the workspace, skipped", d.display()));
+                    continue;
+                }
                 if !d.join(COLLECTION_FILE).is_file() {
                     continue;
                 }
+                if !is_within_root(&canon_root, &d.join(COLLECTION_FILE)) {
+                    load_errors
+                        .push(format!("{}: points outside the workspace, skipped", d.join(COLLECTION_FILE).display()));
+                    continue;
+                }
                 let mut loaded = HashSet::from_iter(std::fs::canonicalize(&d));
-                match load_container(root, &d, COLLECTION_FILE, &mut index.written, &mut load_errors, &mut loaded) {
+                match load_container(
+                    root,
+                    &canon_root,
+                    &d,
+                    COLLECTION_FILE,
+                    &mut index.written,
+                    &mut load_errors,
+                    &mut loaded,
+                ) {
                     Ok((meta, items)) => {
                         let mut c = Collection {
                             id: meta.id,
@@ -604,7 +717,12 @@ impl WorkspaceStore {
         }
 
         let active = index.state.active_environment.clone().filter(|id| environments.iter().any(|e| &e.id == id));
-        let store = WorkspaceStore { root: root.to_path_buf(), id: manifest.id.clone(), index: Mutex::new(index) };
+        let store = WorkspaceStore {
+            root: root.to_path_buf(),
+            id: manifest.id.clone(),
+            index: Mutex::new(index),
+            state_lock: Mutex::new(()),
+        };
         let ws = Workspace {
             root: root.to_path_buf(),
             id: manifest.id,
@@ -634,21 +752,27 @@ impl WorkspaceStore {
         let manifest =
             Manifest { format: FORMAT_NAME.into(), version: FORMAT_VERSION, id: self.id.clone(), name: name.into() };
         let path = self.root.join(MANIFEST_FILE);
-        write_atomic(&path, &to_pretty(&manifest)).map_err(|e| Error::io(path, e))
+        write_atomic_confined(&self.root, &path, &to_pretty(&manifest), true).map_err(|e| Error::io(path, e))
     }
 
     fn write_state(&self, state: &LocalState) -> Result<()> {
         let dir = ensure_local_dir(&self.root).map_err(|e| Error::io(self.local_dir(), e))?;
         let path = dir.join("state.json");
-        write_atomic(&path, &to_pretty(state)).map_err(|e| Error::io(path, e))
+        write_atomic_confined(&self.root, &path, &to_pretty(state), false).map_err(|e| Error::io(path, e))
+    }
+
+    fn write_current_state(&self) -> Result<()> {
+        let _guard = self.state_lock.lock();
+        let state = self.index.lock().state.clone();
+        self.write_state(&state)
     }
 
     pub fn set_active_environment(&self, id: Option<&str>) -> Result<()> {
-        let mut idx = self.index.lock();
-        idx.state.active_environment = id.map(str::to_string);
-        let state = idx.state.clone();
-        drop(idx);
-        self.write_state(&state)
+        {
+            let mut idx = self.index.lock();
+            idx.state.active_environment = id.map(str::to_string);
+        }
+        self.write_current_state()
     }
 
     /// Writes `files` (relative path -> content), skipping unchanged ones.
@@ -659,7 +783,7 @@ impl WorkspaceStore {
             if idx.written.get(rel) == Some(&h) && abs.is_file() {
                 continue;
             }
-            write_atomic(&abs, data).map_err(|e| Error::io(&abs, e))?;
+            write_atomic_confined(&self.root, &abs, data, true).map_err(|e| Error::io(&abs, e))?;
             idx.written.insert(rel.clone(), h);
         }
         Ok(())
@@ -670,16 +794,20 @@ impl WorkspaceStore {
     /// file that failed to load (merge conflict markers, say) or that
     /// appeared since is the user's data, not a leftover.
     fn prune(&self, idx: &mut Index, dir_rel: &Path, keep: &HashSet<PathBuf>) -> Result<()> {
+        let canon_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
         let abs = self.root.join(dir_rel);
         let mut files = Vec::new();
         let mut dirs = Vec::new();
-        walk_managed(&abs, &mut files, &mut dirs);
+        walk_managed(&canon_root, &abs, &mut files, &mut dirs);
         // On a case- (or normalization-) insensitive file system a path can
         // name a file under another spelling: a hand-made `Users.request.json`
         // *is* the `users.request.json` just written (the rename kept the old
         // spelling). So files are matched by identity, not by path.
         let mut ids = None;
         for f in files {
+            if !is_within_root(&canon_root, &f) {
+                continue;
+            }
             let rel = f.strip_prefix(&self.root).unwrap_or(&f).to_path_buf();
             if keep.contains(&rel) {
                 continue;
@@ -712,7 +840,8 @@ impl WorkspaceStore {
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
         dirs.push(abs);
         for d in dirs {
-            if std::fs::read_dir(&d).map(|mut r| r.next().is_none()).unwrap_or(false) {
+            if is_within_root(&canon_root, &d) && std::fs::read_dir(&d).map(|mut r| r.next().is_none()).unwrap_or(false)
+            {
                 let _ = std::fs::remove_dir(&d);
             }
         }
@@ -722,8 +851,9 @@ impl WorkspaceStore {
     /// Managed files under `dir_rel` (relative paths) that this store
     /// neither read nor wrote.
     fn unknown_files(&self, idx: &Index, dir_rel: &Path) -> HashSet<PathBuf> {
+        let canon_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
         let mut files = Vec::new();
-        walk_managed(&self.root.join(dir_rel), &mut files, &mut Vec::new());
+        walk_managed(&canon_root, &self.root.join(dir_rel), &mut files, &mut Vec::new());
         let mut unknown: HashSet<PathBuf> = files
             .into_iter()
             .map(|f| f.strip_prefix(&self.root).unwrap_or(&f).to_path_buf())
@@ -799,9 +929,8 @@ impl WorkspaceStore {
         }
         idx.owners.insert(c.id.clone(), owners);
         sink.commit(secrets, &mut idx);
-        let state = idx.state.clone();
         drop(idx);
-        self.write_state(&state)
+        self.write_current_state()
     }
 
     pub fn delete_collection(&self, id: &str, secrets: &SecretStore) -> Result<()> {
@@ -814,9 +943,8 @@ impl WorkspaceStore {
         owners.insert(id.to_string());
         let dropped = owners.into_iter().filter(|o| !idx.owners.values().any(|s| s.contains(o))).collect();
         SecretSink { dropped, ..Default::default() }.commit(secrets, &mut idx);
-        let state = idx.state.clone();
         drop(idx);
-        self.write_state(&state)
+        self.write_current_state()
     }
 
     pub fn save_environment(&self, env: &Environment, secrets: &SecretStore) -> Result<()> {
@@ -851,23 +979,24 @@ impl WorkspaceStore {
         self.write_files(&mut idx, &[(rel.clone(), to_pretty(&model))])?;
         if let Some(o) = old.filter(|o| o != &rel) {
             let abs = self.root.join(&o);
-            if !same_file(&abs, &self.root.join(&rel)) {
+            let canon_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+            if is_within_root(&canon_root, &abs) && !same_file(&abs, &self.root.join(&rel)) {
                 let _ = std::fs::remove_file(&abs);
             }
             idx.written.remove(&o);
         }
         idx.env_files.insert(env.id.clone(), rel);
         sink.commit(secrets, &mut idx);
-        let state = idx.state.clone();
         drop(idx);
-        self.write_state(&state)
+        self.write_current_state()
     }
 
     pub fn delete_environment(&self, id: &str, secrets: &SecretStore) -> Result<()> {
         let mut idx = self.index.lock();
         if let Some(rel) = idx.env_files.remove(id) {
             let abs = self.root.join(&rel);
-            if abs.exists() {
+            let canon_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+            if abs.exists() && is_within_root(&canon_root, &abs) {
                 std::fs::remove_file(&abs).map_err(|e| Error::io(&abs, e))?;
             }
             idx.written.remove(&rel);
@@ -878,9 +1007,8 @@ impl WorkspaceStore {
         if idx.state.active_environment.as_deref() == Some(id) {
             idx.state.active_environment = None;
         }
-        let state = idx.state.clone();
         drop(idx);
-        self.write_state(&state)
+        self.write_current_state()
     }
 
     pub fn save_globals(&self, vars: &[Variable], secrets: &SecretStore) -> Result<()> {
@@ -891,9 +1019,8 @@ impl WorkspaceStore {
         let file = GlobalsFile { variables: model };
         self.write_files(&mut idx, &[(PathBuf::from("globals.json"), to_pretty(&file))])?;
         sink.commit(secrets, &mut idx);
-        let state = idx.state.clone();
         drop(idx);
-        self.write_state(&state)
+        self.write_current_state()
     }
 
     /// Path of the folder containing a collection's files, if saved.
@@ -921,32 +1048,45 @@ fn same_file(a: &Path, b: &Path) -> bool {
     file_id(a).is_some_and(|id| file_id(b) == Some(id))
 }
 
-/// Managed files (and every directory) under `abs`, recursively.
-fn walk_managed(abs: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+/// Managed files (and every directory) under `abs`, recursively, confined to `canon_root`.
+fn walk_managed(canon_root: &Path, abs: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
     // Canonical paths of the directories walked: a symlink back to one of
-    // them (an ancestor, say) would otherwise recurse without end.
-    fn walk(abs: &Path, canon: &Path, seen: &mut HashSet<PathBuf>, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+    // them (an ancestor, say) would otherwise recurse without end, and a
+    // symlink pointing outside `canon_root` is never followed.
+    fn walk(
+        canon_root: &Path,
+        abs: &Path,
+        canon: &Path,
+        seen: &mut HashSet<PathBuf>,
+        files: &mut Vec<PathBuf>,
+        dirs: &mut Vec<PathBuf>,
+    ) {
         let Ok(rd) = std::fs::read_dir(abs) else { return };
         for e in rd.flatten() {
             let p = e.path();
             // The entry type needs no `stat` (10,000 files per save); symlinks
-            // are followed as before.
+            // are only followed when they stay within `canon_root`.
             let (is_dir, link) = match e.file_type() {
                 Ok(t) if !t.is_symlink() => (t.is_dir(), false),
                 _ => (p.is_dir(), true),
             };
             if is_dir {
                 let sub = if link { std::fs::canonicalize(&p).ok() } else { Some(canon.join(e.file_name())) };
-                let Some(sub) = sub.filter(|c| seen.insert(c.clone())) else { continue };
-                walk(&p, &sub, seen, files, dirs);
+                let Some(sub) = sub.filter(|c| c.starts_with(canon_root) && seen.insert(c.clone())) else { continue };
+                walk(canon_root, &p, &sub, seen, files, dirs);
                 dirs.push(p);
-            } else if p.file_name().and_then(|n| n.to_str()).map(is_managed_file).unwrap_or(false) {
+            } else if p.file_name().and_then(|n| n.to_str()).map(is_managed_file).unwrap_or(false)
+                && (!link || is_within_root(canon_root, &p))
+            {
                 files.push(p);
             }
         }
     }
     let Ok(canon) = std::fs::canonicalize(abs) else { return };
-    walk(abs, &canon, &mut HashSet::from([canon.clone()]), files, dirs);
+    if !canon.starts_with(canon_root) {
+        return;
+    }
+    walk(canon_root, abs, &canon, &mut HashSet::from([canon.clone()]), files, dirs);
 }
 
 fn render_collection(
@@ -1034,6 +1174,7 @@ fn render_children(
 /// a symlink back to one of them (an ancestor, say) cannot recurse forever.
 fn load_container(
     root: &Path,
+    canon_root: &Path,
     dir: &Path,
     meta_file: &str,
     written: &mut HashMap<PathBuf, u64>,
@@ -1076,6 +1217,10 @@ fn load_container(
             if !p.is_file() {
                 continue;
             }
+            if !is_within_root(canon_root, &p) {
+                errors.push(format!("{}: points outside the workspace, skipped", p.display()));
+                continue;
+            }
             match read_json::<RequestItem>(&p) {
                 Ok((r, h)) => {
                     written.insert(p.strip_prefix(root).unwrap_or(&p).to_path_buf(), h);
@@ -1084,11 +1229,19 @@ fn load_container(
                 Err(e) => errors.push(e.to_string()),
             }
         } else if p.join(FOLDER_FILE).is_file() {
-            if !std::fs::canonicalize(&p).is_ok_and(|c| loaded.insert(c)) {
+            let Ok(canon) = std::fs::canonicalize(&p) else {
+                errors.push(format!("{}: could not resolve folder, skipped", p.display()));
+                continue;
+            };
+            if !canon.starts_with(canon_root) || !is_within_root(canon_root, &p.join(FOLDER_FILE)) {
+                errors.push(format!("{}: points outside the workspace, skipped", p.display()));
+                continue;
+            }
+            if !loaded.insert(canon) {
                 errors.push(format!("{}: a link to a folder already loaded, skipped", p.display()));
                 continue;
             }
-            match load_container(root, &p, FOLDER_FILE, written, errors, loaded) {
+            match load_container(root, canon_root, &p, FOLDER_FILE, written, errors, loaded) {
                 Ok((m, children)) => items.push(Item::Folder(Folder {
                     id: m.id,
                     name: m.name,

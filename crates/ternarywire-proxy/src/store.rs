@@ -79,6 +79,7 @@ impl Store {
 
     /// Replaces the stored entry with the same id. Returns `false` when it is
     /// no longer stored (evicted or cleared).
+    #[cfg(test)]
     pub fn update(&self, entry: CaptureEntry) -> bool {
         self.put(entry, false, 0)
     }

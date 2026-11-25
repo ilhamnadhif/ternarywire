@@ -130,9 +130,13 @@ impl PackageLoader {
         *self.import_hook.borrow_mut() = Some(hook);
     }
 
-    /// Forgets per-job state (local modules).
+    /// Forgets per-job state (local AND remote evaluated module instances, so
+    /// mutable exports or module-scoped state cannot leak across jobs; fetched
+    /// sources remain cached on disk by `Session`).
     pub(crate) fn end_job(&self) {
         self.local.borrow_mut().clear();
+        self.remote.borrow_mut().clear();
+        self.paths.borrow_mut().clear();
         self.fresh.borrow_mut().clear();
     }
 

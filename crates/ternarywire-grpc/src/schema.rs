@@ -278,14 +278,36 @@ fn json_options() -> SerializeOptions {
 /// define; such a message is rendered by [`message_value`] instead, so only
 /// that `Any` shows a placeholder.
 pub(crate) fn message_to_json(msg: &DynamicMessage) -> String {
-    let pretty = || serde_json::ser::PrettyFormatter::with_indent(b"  ");
-    let mut buf = Vec::new();
-    let mut ser = serde_json::Serializer::with_formatter(&mut buf, pretty());
-    if msg.serialize_with_options(&mut ser, &json_options()).is_ok() {
-        return String::from_utf8(buf).unwrap_or_default();
+    if !contains_any(msg) {
+        let pretty = || serde_json::ser::PrettyFormatter::with_indent(b"  ");
+        let mut buf = Vec::new();
+        let mut ser = serde_json::Serializer::with_formatter(&mut buf, pretty());
+        if msg.serialize_with_options(&mut ser, &json_options()).is_ok() {
+            return String::from_utf8(buf).unwrap_or_default();
+        }
     }
     // Same two-space indentation as above.
     serde_json::to_string_pretty(&message_value(msg)).unwrap_or_default()
+}
+
+/// Returns true if `msg` or any nested message field is `google.protobuf.Any`.
+/// `prost-reflect`'s own JSON serializer decodes nested `Any` values without a
+/// depth cap, so messages containing `Any` must go through [`message_value_at`]
+/// where [`MAX_ANY_DEPTH`] is enforced.
+fn contains_any(msg: &DynamicMessage) -> bool {
+    fn val_has_any(val: &prost_reflect::Value) -> bool {
+        use prost_reflect::Value as V;
+        match val {
+            V::Message(m) => contains_any(m),
+            V::List(items) => items.iter().any(val_has_any),
+            V::Map(entries) => entries.values().any(val_has_any),
+            _ => false,
+        }
+    }
+    if msg.descriptor().full_name() == "google.protobuf.Any" {
+        return true;
+    }
+    msg.fields().any(|(_, v)| val_has_any(v)) || msg.extensions().any(|(_, v)| val_has_any(v))
 }
 
 /// prost-reflect's JSON for `msg`, if it can render it. Written as text and
@@ -296,33 +318,42 @@ fn reflect_value(msg: &DynamicMessage) -> Option<Value> {
     serde_json::from_slice(&buf).ok()
 }
 
+/// Maximum recursive `google.protobuf.Any` nesting depth decoded into JSON.
+const MAX_ANY_DEPTH: usize = 64;
+
 /// Protobuf-JSON of a message prost-reflect cannot render as a whole: field
 /// by field like prost-reflect (field number order, default values included
 /// for fields without presence, JSON names), every part that it can render
 /// still going through it.
 fn message_value(msg: &DynamicMessage) -> Value {
-    if let Some(v) = reflect_value(msg) {
+    message_value_at(msg, 0)
+}
+
+fn message_value_at(msg: &DynamicMessage, depth: usize) -> Value {
+    if !contains_any(msg)
+        && let Some(v) = reflect_value(msg)
+    {
         return v;
     }
     let desc = msg.descriptor();
     if desc.full_name() == "google.protobuf.Any" {
-        return any_value(msg);
+        return any_value_at(msg, depth);
     }
     let mut map = Map::new();
     for field in desc.fields() {
         if field.supports_presence() && !msg.has_field(&field) {
             continue;
         }
-        map.insert(field.json_name().to_string(), field_value(&msg.get_field(&field), &field.kind()));
+        map.insert(field.json_name().to_string(), field_value_at(&msg.get_field(&field), &field.kind(), depth));
     }
     for (ext, value) in msg.extensions() {
-        map.insert(ext.json_name().to_string(), field_value(value, &ext.kind()));
+        map.insert(ext.json_name().to_string(), field_value_at(value, &ext.kind(), depth));
     }
     Value::Object(map)
 }
 
 /// One field value, mapped like prost-reflect's serializer does.
-fn field_value(value: &prost_reflect::Value, kind: &Kind) -> Value {
+fn field_value_at(value: &prost_reflect::Value, kind: &Kind, depth: usize) -> Value {
     use prost_reflect::{MapKey, Value as V};
     let float = |f: f64, text: String| {
         if f.is_nan() {
@@ -352,8 +383,8 @@ fn field_value(value: &prost_reflect::Value, kind: &Kind) -> Value {
             Kind::Enum(e) => e.get_value(*n).map(|v| json!(v.name())).unwrap_or(json!(n)),
             _ => json!(n),
         },
-        V::Message(m) => message_value(m),
-        V::List(items) => Value::Array(items.iter().map(|v| field_value(v, kind)).collect()),
+        V::Message(m) => message_value_at(m, depth),
+        V::List(items) => Value::Array(items.iter().map(|v| field_value_at(v, kind, depth)).collect()),
         V::Map(entries) => {
             let value_kind = match kind {
                 Kind::Message(entry) if entry.is_map_entry() => entry.map_entry_value_field().kind(),
@@ -369,7 +400,7 @@ fn field_value(value: &prost_reflect::Value, kind: &Kind) -> Value {
                 MapKey::U64(n) => n.to_string(),
                 MapKey::String(s) => s.clone(),
             };
-            Value::Object(entries.into_iter().map(|(k, v)| (key(k), field_value(v, &value_kind))).collect())
+            Value::Object(entries.into_iter().map(|(k, v)| (key(k), field_value_at(v, &value_kind, depth))).collect())
         }
     }
 }
@@ -406,22 +437,26 @@ fn has_special_json(name: &str) -> bool {
 /// "@value"}` with the raw bytes in base64, so the rest of the message stays
 /// visible. `@value`, not `value`: a packed `BytesValue` is
 /// `{"@type", "value": "<base64>"}` in standard protobuf-JSON.
-fn any_value(msg: &DynamicMessage) -> Value {
+fn any_value_at(msg: &DynamicMessage, depth: usize) -> Value {
     let text = |name: &str| msg.get_field_by_name(name).and_then(|v| v.as_str().map(str::to_string));
     let type_url = text("type_url").unwrap_or_default();
     let bytes = msg.get_field_by_name("value").and_then(|v| v.as_bytes().cloned()).unwrap_or_default();
     let name = type_url.rsplit_once('/').map_or(type_url.as_str(), |(_, n)| n);
-    let decoded = match msg.descriptor().parent_pool().get_message_by_name(name) {
-        _ if name.is_empty() => Err("the Any has no type URL".to_string()),
-        None => Err(format!("{name} is not in the schema")),
-        Some(desc) => {
-            DynamicMessage::decode(desc, bytes.as_ref()).map_err(|e| format!("{name} could not be decoded ({e})"))
+    let decoded = if depth >= MAX_ANY_DEPTH {
+        Err(format!("nested google.protobuf.Any exceeded maximum depth ({MAX_ANY_DEPTH})"))
+    } else {
+        match msg.descriptor().parent_pool().get_message_by_name(name) {
+            _ if name.is_empty() => Err("the Any has no type URL".to_string()),
+            None => Err(format!("{name} is not in the schema")),
+            Some(desc) => {
+                DynamicMessage::decode(desc, bytes.as_ref()).map_err(|e| format!("{name} could not be decoded ({e})"))
+            }
         }
     };
     let mut out = Map::new();
     out.insert("@type".into(), json!(type_url));
     match decoded {
-        Ok(inner) => match message_value(&inner) {
+        Ok(inner) => match message_value_at(&inner, depth + 1) {
             Value::Object(fields) if !has_special_json(name) => out.extend(fields),
             other => {
                 out.insert("value".into(), other);
@@ -661,5 +696,20 @@ message Envelope {
         let v: Value = serde_json::from_str(&message_to_json(&plain)).unwrap();
         assert_eq!(v["payload"], json!({"@type": "type.googleapis.com/t.Known", "note": "hi"}));
         assert_eq!(v["big"], json!("0"));
+
+        // Deeply nested google.protobuf.Any chains hit MAX_ANY_DEPTH cleanly instead of overflowing the stack.
+        let mut nested = known.encode_to_vec();
+        let mut cur_type = "type.googleapis.com/t.Known";
+        for _ in 0..80 {
+            let mut a = msg_of("google.protobuf.Any");
+            a.set_field_by_name("type_url", prost_reflect::Value::String(cur_type.into()));
+            a.set_field_by_name("value", prost_reflect::Value::Bytes(nested.into()));
+            nested = a.encode_to_vec();
+            cur_type = "type.googleapis.com/google.protobuf.Any";
+        }
+        let mut env = msg_of("t.Envelope");
+        env.set_field_by_name("payload", any("type.googleapis.com/google.protobuf.Any", nested));
+        let out = message_to_json(&env);
+        assert!(out.contains("exceeded maximum depth"), "{out}");
     }
 }

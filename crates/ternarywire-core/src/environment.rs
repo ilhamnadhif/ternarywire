@@ -31,7 +31,7 @@ impl Environment {
 
     /// Sets the current value of `key`, adding the variable if needed.
     pub fn set_current(&mut self, key: &str, value: &str) {
-        match self.variables.iter_mut().rev().find(|v| v.key == key) {
+        match self.variables.iter_mut().rev().find(|v| v.enabled && v.key == key) {
             Some(v) => v.current = Some(value.to_string()),
             None => {
                 let mut v = Variable::new(key, "");

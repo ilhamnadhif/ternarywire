@@ -132,7 +132,7 @@ pub fn redact_urls(text: &str) -> String {
     let mut rest = text;
     while let Some(i) = rest.find("://") {
         let is_scheme = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
-        let start = rest[..i].rfind(|c: char| !is_scheme(c)).map_or(0, |j| j + 1);
+        let start = rest[..i].rmatch_indices(|c: char| !is_scheme(c)).next().map_or(0, |(j, s)| j + s.len());
         let len = rest[i..].find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '<' | '>'));
         let end = len.map_or(rest.len(), |j| i + j);
         out.push_str(&rest[..start]);
@@ -243,5 +243,10 @@ mod tests {
         assert_eq!(redact_urls("no url: a@b?c"), "no url: a@b?c");
         assert_eq!(redact_url("https://user@h/p@x?y"), "https://h/p@x");
         assert_eq!(redact_url("not a url?key=1"), "not a url");
+        // Multi-byte UTF-8 directly before the scheme must never slice mid-char.
+        assert_eq!(
+            redact_urls("éhttps://u:p@h.test/a?k=1 and —http://tok@x.test?s=2"),
+            "éhttps://h.test/a and —http://x.test"
+        );
     }
 }

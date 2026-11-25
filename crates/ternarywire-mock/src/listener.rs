@@ -246,21 +246,39 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
-/// Reads at most `cap` bytes and drains (discards) the rest so the client
-/// still gets the configured answer.
+/// Maximum total request body bytes drained past `cap` before aborting read.
+const MAX_DRAIN_EXCESS: usize = 16 * 1024 * 1024;
+/// Maximum wall-clock time spent reading/draining a single webhook body.
+const READ_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reads at most `cap` bytes and drains (discards) up to a bounded excess so
+/// normal clients still get the configured answer while abusive streams cannot
+/// stall the listener indefinitely.
 async fn read_capped(body: Body, cap: usize) -> (Vec<u8>, bool) {
     let mut stream = body.into_data_stream();
     let mut buf = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else { break };
-        let room = cap - buf.len();
-        if chunk.len() > room {
-            buf.extend_from_slice(&chunk[..room]);
-            truncated = true;
-        } else {
-            buf.extend_from_slice(&chunk);
+    let mut total_read = 0usize;
+    let drain_limit = cap.saturating_add(MAX_DRAIN_EXCESS);
+    let read_all = async {
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            total_read = total_read.saturating_add(chunk.len());
+            let room = cap - buf.len();
+            if chunk.len() > room {
+                buf.extend_from_slice(&chunk[..room]);
+                truncated = true;
+            } else {
+                buf.extend_from_slice(&chunk);
+            }
+            if total_read >= drain_limit {
+                truncated = true;
+                break;
+            }
         }
+    };
+    if tokio::time::timeout(READ_BODY_TIMEOUT, read_all).await.is_err() {
+        truncated = true;
     }
     (buf, truncated)
 }

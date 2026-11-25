@@ -3,6 +3,7 @@ name = "ternarywire-auth"
 description = "Auth schemes for TernaryWire: API key, Basic, Bearer, Digest, JWT, OAuth 1.0/2.0, Hawk, AWS SigV4, NTLM, EdgeGrid, ASAP"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

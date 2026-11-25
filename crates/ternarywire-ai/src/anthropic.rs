@@ -197,8 +197,11 @@ impl StreamAcc for AnthropicStream {
                 let d = v.get("delta").cloned().unwrap_or(Value::Null);
                 let block = self.blocks.entry(index).or_insert_with(|| json!({"type": "text", "text": ""}));
                 let append = |block: &mut Value, key: &str, piece: &str| {
-                    let cur = block.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-                    block[key] = Value::String(cur + piece);
+                    if let Some(Value::String(s)) = block.get_mut(key) {
+                        s.push_str(piece);
+                    } else {
+                        block[key] = Value::String(piece.to_string());
+                    }
                 };
                 match d.get("type").and_then(Value::as_str) {
                     Some("text_delta") => {

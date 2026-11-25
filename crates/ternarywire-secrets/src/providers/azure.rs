@@ -29,6 +29,18 @@ fn resource(vault: &url::Url) -> String {
     "https://vault.azure.net".into()
 }
 
+/// Default Entra ID login authority matching the vault's cloud.
+fn default_authority(vault: &url::Url) -> &'static str {
+    let host = vault.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host.ends_with(".usgovcloudapi.net") {
+        "https://login.microsoftonline.us"
+    } else if host.ends_with(".azure.cn") {
+        "https://login.chinacloudapi.cn"
+    } else {
+        DEFAULT_AUTHORITY
+    }
+}
+
 fn api_version(s: &AzureSettings) -> &str {
     match s.api_version.trim() {
         "" => DEFAULT_API_VERSION,
@@ -50,7 +62,7 @@ async fn token(env: &Env, id: &str, s: &AzureSettings, fresh: bool) -> Result<St
     let vault = check_url("Key Vault URL", &s.vault_url)?;
     let resource = resource(&vault);
     let (token, lifetime) = match s.auth {
-        AzureAuth::ClientSecret => client_credentials(env, id, s, &resource).await?,
+        AzureAuth::ClientSecret => client_credentials(env, id, s, &vault, &resource).await?,
         AzureAuth::AzureCli => cli_token(env, s, &resource).await?,
     };
     env.set_token(id, token.clone(), lifetime);
@@ -61,6 +73,7 @@ async fn client_credentials(
     env: &Env,
     id: &str,
     s: &AzureSettings,
+    vault: &url::Url,
     resource: &str,
 ) -> Result<(String, Duration), SecretError> {
     let tenant = s.tenant_id.trim();
@@ -70,7 +83,7 @@ async fn client_credentials(
     }
     let secret = env.required_credential(id, "client_secret", "client secret", WHAT)?;
     let authority = match base_url(&s.authority_host) {
-        a if a.is_empty() => DEFAULT_AUTHORITY.to_string(),
+        a if a.is_empty() => default_authority(vault).to_string(),
         a => a,
     };
     let url = format!(
@@ -325,6 +338,9 @@ mod tests {
         assert_eq!(resource(&u("https://kv.vault.azure.cn/")), "https://vault.azure.cn");
         assert_eq!(resource(&u("https://kv.vault.usgovcloudapi.net")), "https://vault.usgovcloudapi.net");
         assert_eq!(resource(&u("http://127.0.0.1:9000")), "https://vault.azure.net");
+        assert_eq!(default_authority(&u("https://my-vault.vault.azure.net")), "https://login.microsoftonline.com");
+        assert_eq!(default_authority(&u("https://kv.vault.usgovcloudapi.net")), "https://login.microsoftonline.us");
+        assert_eq!(default_authority(&u("https://kv.vault.azure.cn")), "https://login.chinacloudapi.cn");
         assert!(valid_name("db-password-2"));
         assert!(!valid_name("db_password"));
     }

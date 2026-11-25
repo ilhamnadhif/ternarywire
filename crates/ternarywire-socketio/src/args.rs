@@ -138,16 +138,27 @@ pub fn resolve_arg(
             SocketIoArg::decode_binary(value).map(EmitArg::Binary).ok_or(ArgError::InvalidBinary { index })
         }
         SocketIoArgKind::File => {
-            let path = Path::new(value.trim());
-            let path = match base_dir {
-                Some(dir) if path.is_relative() => dir.join(path),
-                _ => path.to_path_buf(),
+            let trimmed = value.trim();
+            let raw = Path::new(trimmed);
+            let fail = |message: String| ArgError::File { index, path: trimmed.to_string(), message };
+            let path = if let Some(dir) = base_dir {
+                if !raw.is_relative()
+                    || raw
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+                {
+                    return Err(fail("file path must be relative to the workspace directory".into()));
+                }
+                let root = dir.canonicalize().map_err(|e| fail(e.to_string()))?;
+                let real = dir.join(raw).canonicalize().map_err(|e| fail(e.to_string()))?;
+                if !real.starts_with(&root) {
+                    return Err(fail(format!("path resolves outside the workspace directory {}", dir.display())));
+                }
+                real
+            } else {
+                raw.to_path_buf()
             };
-            std::fs::read(&path).map(EmitArg::Binary).map_err(|e| ArgError::File {
-                index,
-                path: value.trim().to_string(),
-                message: e.to_string(),
-            })
+            std::fs::read(&path).map(EmitArg::Binary).map_err(|e| fail(e.to_string()))
         }
     }
 }
@@ -282,5 +293,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(m.argument_list(), m.arguments);
+    }
+
+    #[test]
+    fn file_arg_is_confined_to_base_dir() {
+        let base = std::env::temp_dir().join(format!("tw-sio-args-test-{}", std::process::id()));
+        let outside = base.join("outside");
+        let ws = base.join("ws");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, b"top-secret").unwrap();
+        let ok = ws.join("ok.bin");
+        std::fs::write(&ok, b"hello").unwrap();
+
+        assert_eq!(
+            resolve_arg(0, SocketIoArgKind::File, "ok.bin", Some(&ws)).unwrap(),
+            EmitArg::Binary(b"hello".to_vec())
+        );
+        // Absolute path rejected when base_dir is set.
+        assert!(resolve_arg(0, SocketIoArgKind::File, secret.to_str().unwrap(), Some(&ws)).is_err());
+        // Parent traversal rejected.
+        assert!(resolve_arg(0, SocketIoArgKind::File, "../outside/secret.txt", Some(&ws)).is_err());
+        // Escaping symlink rejected.
+        #[cfg(unix)]
+        {
+            let link = ws.join("escape.bin");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            assert!(resolve_arg(0, SocketIoArgKind::File, "escape.bin", Some(&ws)).is_err());
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -3,6 +3,7 @@ name = "ternarywire-cli"
 description = "TernaryWire command line: run collections in CI, mock servers, import/export, codegen, load tests"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

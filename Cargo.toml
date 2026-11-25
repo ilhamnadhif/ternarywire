@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/ternarywire-app", "crates/ternarywire-cli"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ilhamnadhif/ternarywire"
@@ -55,10 +55,8 @@ quick-junit = "0.8"
 quick-xml = "0.38"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
-dirs = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-mime_guess = "2"
 boa_engine = { version = "0.22", default-features = false }
 boa_gc = "0.22"
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wayland", "x11", "persistence"] }
@@ -72,7 +70,6 @@ arboard = { version = "3.7", default-features = false }
 # Only to turn off winit's default macOS menu (same version eframe uses).
 winit = { version = "0.30", default-features = false }
 parking_lot = "0.12"
-crossbeam-channel = "0.5"
 
 [profile.release]
 lto = "thin"

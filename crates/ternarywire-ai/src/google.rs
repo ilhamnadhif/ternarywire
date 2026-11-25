@@ -406,9 +406,12 @@ impl GoogleStream {
                 }
                 match self.parts.last_mut() {
                     Some(last) if is_plain_text(p) && is_plain_text(last) => {
-                        let joined =
-                            format!("{}{}", last["text"].as_str().unwrap_or(""), p["text"].as_str().unwrap_or(""));
-                        last["text"] = Value::String(joined);
+                        let piece = p["text"].as_str().unwrap_or("");
+                        if let Some(Value::String(s)) = last.get_mut("text") {
+                            s.push_str(piece);
+                        } else {
+                            last["text"] = Value::String(piece.to_string());
+                        }
                     }
                     _ => self.parts.push(p.clone()),
                 }

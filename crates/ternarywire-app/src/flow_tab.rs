@@ -64,7 +64,13 @@ const DETAIL_ZOOM: f32 = 0.55;
 
 pub enum FlowMsg {
     Event(FlowEvent),
-    Done(Box<FlowResult>),
+    Done {
+        result: Box<FlowResult>,
+        ws: u64,
+        env: Option<String>,
+        before: Box<ternarywire_core::variables::VariableScopes>,
+        after: Box<ternarywire_core::variables::VariableScopes>,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -314,7 +320,7 @@ impl FlowTab {
                 }
                 FlowEvent::Finished { .. } => {}
             },
-            FlowMsg::Done(result) => {
+            FlowMsg::Done { result, .. } => {
                 self.run.cancel = None;
                 self.run.running.clear();
                 self.run.live.clear();
@@ -1002,7 +1008,10 @@ fn start_run(app: &mut TernaryWireApp, tab_id: u64, tab: &mut FlowTab) {
         collections: app.ws.data.collections.clone(),
         base_dir: Some(app.ws.root().to_path_buf()),
     };
+    let env_id = app.ws.data.active_environment.clone();
+    let ws = app.ws_gen;
     let mut vars = app.ws.scopes_for(None);
+    let before = vars.clone();
     let flow = tab.flow.clone();
     let cancel = CancellationToken::new();
     let epoch = crate::app::next_epoch();
@@ -1017,7 +1026,17 @@ fn start_run(app: &mut TernaryWireApp, tab_id: u64, tab: &mut FlowTab) {
             repaint.request_repaint();
         };
         let result = ternarywire_flows::run_flow(&env, &flow, &mut vars, opts, &mut sink, &cancel).await;
-        let _ = tx.send(Msg::Flow { tab: tab_id, epoch, event: FlowMsg::Done(Box::new(result)) });
+        let _ = tx.send(Msg::Flow {
+            tab: tab_id,
+            epoch,
+            event: FlowMsg::Done {
+                result: Box::new(result),
+                ws,
+                env: env_id,
+                before: Box::new(before),
+                after: Box::new(vars),
+            },
+        });
         ctx.request_repaint();
     });
 }

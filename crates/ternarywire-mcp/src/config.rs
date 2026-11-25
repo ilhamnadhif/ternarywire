@@ -73,7 +73,9 @@ impl McpConfig {
             McpTransport::Stdio { command, args, env, cwd } => {
                 let cwd = resolve(cwd.trim());
                 Transport::Stdio {
-                    command: resolve(command.trim()),
+                    // Security: keep the executable command literal (never interpolate
+                    // runtime variables into the binary path to launch).
+                    command: command.trim().to_string(),
                     args: args.iter().map(|a| resolve(a)).collect(),
                     env: enabled_pairs(env, resolve),
                     cwd: if cwd.trim().is_empty() { None } else { Some(PathBuf::from(cwd.trim())) },
@@ -331,5 +333,22 @@ mod tests {
             }
         );
         assert_eq!(cfg.describe(), "npx -y server-everything");
+    }
+
+    #[test]
+    fn from_request_stdio_keeps_command_literal() {
+        let req = McpRequest {
+            transport: McpTransport::Stdio {
+                command: "{{evil_cmd}}".into(),
+                args: vec!["--flag".into()],
+                env: vec![],
+                cwd: String::new(),
+            },
+            ..Default::default()
+        };
+        let resolve = |s: &str| s.replace("{{evil_cmd}}", "/bin/sh");
+        let cfg = McpConfig::from_request(&req, &resolve);
+        let Transport::Stdio { command, .. } = cfg.transport else { panic!("expected stdio") };
+        assert_eq!(command, "{{evil_cmd}}", "stdio executable path must never be variable-interpolated");
     }
 }

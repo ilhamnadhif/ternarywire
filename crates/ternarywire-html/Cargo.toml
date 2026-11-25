@@ -3,6 +3,7 @@ name = "ternarywire-html"
 description = "Handlebars templating and an HTML/CSS-subset renderer for egui (Postman visualizer)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -279,6 +279,7 @@ async fn ai_tools(
     ctx: &Ctx<'_>,
     ids: &[String],
     vars: &VariableScopes,
+    stdio_vars: &VariableScopes,
     http: &reqwest::Client,
     exec: &mut Execution,
 ) -> (Vec<ternarywire_mcp::McpClient>, Vec<(ternarywire_mcp::McpClient, ternarywire_mcp::Tool)>) {
@@ -297,8 +298,16 @@ async fn ai_tools(
         if let Some(eff) = ctx.collection.effective_auth(id) {
             m.auth = eff.auth.clone();
         }
-        let resolve = ctx.resolver(vars);
-        let cfg = ternarywire_mcp::McpConfig::from_request(&m, &resolve);
+        let cfg = match &m.transport {
+            ternarywire_core::protocols::McpTransport::Stdio { .. } => {
+                let resolve = ctx.resolver(stdio_vars);
+                ternarywire_mcp::McpConfig::from_request(&m, &resolve)
+            }
+            ternarywire_core::protocols::McpTransport::Http { .. } => {
+                let resolve = ctx.resolver(vars);
+                ternarywire_mcp::McpConfig::from_request(&m, &resolve)
+            }
+        };
         // Starting a server can take long: stop waiting when the run stops
         // (the caller closes the clients already connected).
         let connected = tokio::select! {
@@ -324,6 +333,7 @@ async fn ai_tools(
 }
 
 async fn ai(ctx: &Ctx<'_>, r: &AiRequest, vars: &mut VariableScopes, exec: &mut Execution) {
+    let pre_script_vars = vars.clone();
     let mut req = r.clone();
     if let Some(v) = ctx.scripts(ScriptEvent::PreRequest, proto::ai(&req), vars, exec).await {
         proto::apply_ai(&mut req, &v);
@@ -334,6 +344,8 @@ async fn ai(ctx: &Ctx<'_>, r: &AiRequest, vars: &mut VariableScopes, exec: &mut 
     if exec.skipped || ctx.cancel.is_cancelled() {
         return;
     }
+    // `Inherit` takes the folder's or collection's auth, as for HTTP and MCP requests.
+    req.auth = crate::session::effective_auth(ctx, &req.auth).0;
     let resolve = ctx.resolver(vars);
     // The API key is resolved here (vault references, variables).
     for key in ["token", "value"] {
@@ -350,7 +362,7 @@ async fn ai(ctx: &Ctx<'_>, r: &AiRequest, vars: &mut VariableScopes, exec: &mut 
         Ok(c) => c,
         Err(e) => return fail(exec, e.message),
     };
-    let (clients, tools) = ai_tools(ctx, &req.mcp_servers, vars, &http, exec).await;
+    let (clients, tools) = ai_tools(ctx, &req.mcp_servers, vars, &pre_script_vars, &http, exec).await;
     if ctx.cancel.is_cancelled() {
         for c in clients {
             c.close().await;
@@ -416,6 +428,7 @@ async fn ai(ctx: &Ctx<'_>, r: &AiRequest, vars: &mut VariableScopes, exec: &mut 
 }
 
 async fn mcp(ctx: &Ctx<'_>, r: &McpRequest, vars: &mut VariableScopes, exec: &mut Execution) {
+    let pre_script_vars = vars.clone();
     let mut req = r.clone();
     if let Some(v) = ctx.scripts(ScriptEvent::PreRequest, proto::mcp(&req, req.saved_calls.first()), vars, exec).await {
         let mut first = req.saved_calls.first().cloned();
@@ -435,7 +448,16 @@ async fn mcp(ctx: &Ctx<'_>, r: &McpRequest, vars: &mut VariableScopes, exec: &mu
     // `Inherit` takes the folder's or collection's auth, as for HTTP requests.
     req.auth = crate::session::effective_auth(ctx, &req.auth).0;
     let resolve = ctx.resolver(vars);
-    let cfg = ternarywire_mcp::McpConfig::from_request(&req, &resolve);
+    let cfg = match &req.transport {
+        // Stdio launch parameters must not be influenced by script-mutated variables.
+        ternarywire_core::protocols::McpTransport::Stdio { .. } => {
+            let static_resolve = ctx.resolver(&pre_script_vars);
+            ternarywire_mcp::McpConfig::from_request(&req, &static_resolve)
+        }
+        ternarywire_core::protocols::McpTransport::Http { .. } => {
+            ternarywire_mcp::McpConfig::from_request(&req, &resolve)
+        }
+    };
     let http = match ctx.services.http.default_client() {
         Ok(c) => c,
         Err(e) => return fail(exec, e.message),

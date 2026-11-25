@@ -146,6 +146,7 @@ pub const ERR_OPERAND: &str = "Expected a value or a query starting with @ or $"
 pub const ERR_EQUALS: &str = "Use == to compare";
 pub const ERR_SCRIPT: &str = "Only (@.length-n) is supported inside ( )";
 pub const ERR_REGEX: &str = "Invalid regular expression";
+pub const ERR_DEPTH: &str = "The path is nested too deeply";
 
 /// All error messages, for translation tables.
 pub const ERROR_MESSAGES: &[&str] = &[
@@ -163,6 +164,7 @@ pub const ERROR_MESSAGES: &[&str] = &[
     ERR_EQUALS,
     ERR_SCRIPT,
     ERR_REGEX,
+    ERR_DEPTH,
 ];
 
 // ---------------------------------------------------------------------------
@@ -230,12 +232,27 @@ enum Expr {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Maximum parser nesting depth (bounds parsing, evaluation, and recursive Drop).
+const MAX_PARSE_DEPTH: usize = 128;
+
 struct Parser {
     s: Vec<char>,
     i: usize,
+    depth: usize,
 }
 
 impl Parser {
+    fn enter(&mut self) -> Result<(), ParseError> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return self.err(ERR_DEPTH);
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
     fn peek(&self) -> Option<char> {
         self.s.get(self.i).copied()
     }
@@ -327,20 +344,25 @@ impl Parser {
 
     /// `[ selector (, selector)* ]`
     fn bracket(&mut self) -> Result<Vec<Selector>, ParseError> {
-        self.i += 1; // '['
-        let mut sels = Vec::new();
-        loop {
-            self.ws();
-            sels.push(self.selector()?);
-            self.ws();
-            if self.eat(',') {
-                continue;
+        self.enter()?;
+        let res = (|| {
+            self.i += 1; // '['
+            let mut sels = Vec::new();
+            loop {
+                self.ws();
+                sels.push(self.selector()?);
+                self.ws();
+                if self.eat(',') {
+                    continue;
+                }
+                if self.eat(']') {
+                    return Ok(sels);
+                }
+                return self.err_here_or_end(ERR_BRACKET);
             }
-            if self.eat(']') {
-                return Ok(sels);
-            }
-            return self.err_here_or_end(ERR_BRACKET);
-        }
+        })();
+        self.leave();
+        res
     }
 
     fn selector(&mut self) -> Result<Selector, ParseError> {
@@ -390,7 +412,8 @@ impl Parser {
         self.ws();
         let offset = if self.eat('-') {
             self.ws();
-            -self.int()?
+            let num_start = self.i;
+            self.int()?.checked_neg().ok_or(ParseError { message: ERR_NUMBER, offset: num_start })?
         } else if self.eat('+') {
             self.ws();
             self.int()?
@@ -504,17 +527,25 @@ impl Parser {
     fn not_expr(&mut self) -> Result<Expr, ParseError> {
         self.ws();
         if self.peek() == Some('!') && self.peek_at(1) != Some('=') {
+            self.enter()?;
             self.i += 1;
-            return Ok(Expr::Not(Box::new(self.not_expr()?)));
+            let inner = self.not_expr();
+            self.leave();
+            return Ok(Expr::Not(Box::new(inner?)));
         }
         if self.eat('(') {
-            self.ws();
-            let e = self.or_expr()?;
-            self.ws();
-            if !self.eat(')') {
-                return self.err_here_or_end(ERR_PAREN);
-            }
-            return Ok(e);
+            self.enter()?;
+            let res = (|| {
+                self.ws();
+                let e = self.or_expr()?;
+                self.ws();
+                if !self.eat(')') {
+                    return self.err_here_or_end(ERR_PAREN);
+                }
+                Ok(e)
+            })();
+            self.leave();
+            return res;
         }
         self.comparison()
     }
@@ -656,7 +687,7 @@ impl JsonPath {
         if lead == chars.len() {
             return Err(ParseError { message: ERR_EMPTY, offset: 0 });
         }
-        let mut p = Parser { s: chars[..chars.len() - trail].to_vec(), i: lead };
+        let mut p = Parser { s: chars[..chars.len() - trail].to_vec(), i: lead, depth: 0 };
         match p.peek() {
             Some('$') => p.i += 1,
             Some('.' | '[') => {}
@@ -812,17 +843,20 @@ fn select<'a>(sel: &Selector, v: &'a Value, root: &'a Value, emit: &mut dyn FnMu
             }
         }
         Selector::FromEnd(offset) => {
-            if let Value::Array(a) = v {
-                let idx = a.len() as i64 + offset;
-                if (0..a.len() as i64).contains(&idx) {
-                    emit(Segment::Index(idx as usize), &a[idx as usize]);
-                }
+            if let Value::Array(a) = v
+                && let Some(idx) = (a.len() as i64).checked_add(*offset)
+                && let Ok(u) = usize::try_from(idx)
+                && let Some(item) = a.get(u)
+            {
+                emit(Segment::Index(u), item);
             }
         }
         Selector::Slice(start, end, step) => {
             if let Value::Array(a) = v {
                 for idx in slice_indices(a.len(), *start, *end, *step) {
-                    emit(Segment::Index(idx), &a[idx]);
+                    if let Some(item) = a.get(idx) {
+                        emit(Segment::Index(idx), item);
+                    }
                 }
             }
         }
@@ -837,7 +871,7 @@ fn select<'a>(sel: &Selector, v: &'a Value, root: &'a Value, emit: &mut dyn FnMu
 }
 
 fn normalize(i: i64, len: usize) -> Option<usize> {
-    let idx = if i < 0 { len as i64 + i } else { i };
+    let idx = if i < 0 { (len as i64).checked_add(i)? } else { i };
     (0..len as i64).contains(&idx).then_some(idx as usize)
 }
 
@@ -848,7 +882,7 @@ fn slice_indices(len: usize, start: Option<i64>, end: Option<i64>, step: Option<
     if step == 0 {
         return Vec::new();
     }
-    let norm = |i: i64| if i >= 0 { i } else { len + i };
+    let norm = |i: i64| if i >= 0 { i } else { len.saturating_add(i) };
     let mut out = Vec::new();
     if step > 0 {
         let lower = norm(start.unwrap_or(0)).clamp(0, len);
@@ -856,7 +890,8 @@ fn slice_indices(len: usize, start: Option<i64>, end: Option<i64>, step: Option<
         let mut i = lower;
         while i < upper {
             out.push(i as usize);
-            i += step;
+            let Some(next) = i.checked_add(step) else { break };
+            i = next;
         }
     } else {
         let upper = norm(start.unwrap_or(len - 1)).clamp(-1, len - 1);
@@ -864,7 +899,8 @@ fn slice_indices(len: usize, start: Option<i64>, end: Option<i64>, step: Option<
         let mut i = upper;
         while lower < i {
             out.push(i as usize);
-            i += step;
+            let Some(next) = i.checked_add(step) else { break };
+            i = next;
         }
     }
     out
@@ -992,7 +1028,7 @@ const REGEX_DEPTH: u32 = 1_000;
 
 impl Regex {
     pub fn new(pattern: &str, icase: bool) -> Option<Regex> {
-        let mut p = ReParser { s: pattern.chars().collect(), i: 0 };
+        let mut p = ReParser { s: pattern.chars().collect(), i: 0, depth: 0 };
         let node = p.alt()?;
         if p.i != p.s.len() {
             return None;
@@ -1011,6 +1047,7 @@ impl Regex {
 struct ReParser {
     s: Vec<char>,
     i: usize,
+    depth: usize,
 }
 
 impl ReParser {
@@ -1084,10 +1121,16 @@ impl ReParser {
             '^' => Re::Start,
             '$' => Re::End,
             '(' => {
+                if self.depth >= MAX_PARSE_DEPTH {
+                    return None;
+                }
                 if self.s[self.i..].starts_with(&['?', ':']) {
                     self.i += 2;
                 }
-                let inner = self.alt()?;
+                self.depth += 1;
+                let inner = self.alt();
+                self.depth -= 1;
+                let inner = inner?;
                 if self.peek() != Some(')') {
                     return None;
                 }
@@ -1294,8 +1337,9 @@ impl Matcher<'_> {
         let more = |k: &mut dyn FnMut(usize) -> bool| {
             count < max
                 && self.at(inner, i, &mut |j| {
-                    // An empty iteration would loop forever.
-                    j != i && self.repeat(inner, min, max, greedy, count + 1, j, k)
+                    // Reject empty iterations only once `min` repetitions are satisfied
+                    // (ECMAScript RepeatMatcher semantics; `depth` & `budget` bound `min`).
+                    (j != i || count < min) && self.repeat(inner, min, max, greedy, count + 1, j, k)
                 })
         };
         if count < min {

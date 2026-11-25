@@ -17,6 +17,7 @@ use crate::util::{as_string, pretty, status_text};
 /// Value of the `baseUrl` variable: Smithy models do not define endpoints.
 pub const DEFAULT_BASE_URL: &str = "http://localhost";
 const MAX_DEPTH: usize = 10;
+const MAX_SAMPLE_NODES: usize = 1_000;
 
 /// Where a value is serialized; decides the default timestamp format.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -712,12 +713,15 @@ impl<'a> Converter<'a> {
 
     /// A placeholder value for a shape.
     fn sample(&self, target: &str, member: Option<&Member>, loc: Location, wire: Wire, depth: usize) -> Value {
-        self.sample_in(target, member, loc, wire, depth, &mut Vec::new())
+        let mut budget = MAX_SAMPLE_NODES;
+        self.sample_in(target, member, loc, wire, depth, &mut Vec::new(), &mut budget)
     }
 
     /// `path` holds the structures and unions being sampled: a recursive
     /// shape is left out at its first repetition, like a too deep one (with
-    /// several recursive members the value would grow exponentially).
+    /// several recursive members the value would grow exponentially). `budget`
+    /// bounds total visited nodes so wide acyclic DAGs also stay fast.
+    #[allow(clippy::too_many_arguments)]
     fn sample_in(
         &self,
         target: &str,
@@ -726,7 +730,12 @@ impl<'a> Converter<'a> {
         wire: Wire,
         depth: usize,
         path: &mut Vec<String>,
+        budget: &mut usize,
     ) -> Value {
+        if *budget == 0 {
+            return Value::Null;
+        }
+        *budget -= 1;
         if let Some(d) = member.and_then(|m| m.get_trait("default")).filter(|d| !d.is_null()) {
             return d.clone();
         }
@@ -787,7 +796,7 @@ impl<'a> Converter<'a> {
             ShapeKind::Document => json!({}),
             ShapeKind::List | ShapeKind::Set => {
                 let Some(m) = shape.and_then(|s| s.members.get("member")) else { return json!([]) };
-                match self.sample_in(&m.target, Some(m), loc, wire, depth + 1, path) {
+                match self.sample_in(&m.target, Some(m), loc, wire, depth + 1, path, budget) {
                     Value::Null => json!([]),
                     v => Value::Array(vec![v]),
                 }
@@ -797,14 +806,14 @@ impl<'a> Converter<'a> {
                 let key = s
                     .members
                     .get("key")
-                    .map(|k| self.sample_in(&k.target, Some(k), loc, wire, depth + 1, path))
+                    .map(|k| self.sample_in(&k.target, Some(k), loc, wire, depth + 1, path, budget))
                     .and_then(|v| v.as_str().map(str::to_string))
                     .filter(|k| k != "string")
                     .unwrap_or_else(|| "key".into());
                 let value = s
                     .members
                     .get("value")
-                    .map(|v| self.sample_in(&v.target, Some(v), loc, wire, depth + 1, path))
+                    .map(|v| self.sample_in(&v.target, Some(v), loc, wire, depth + 1, path, budget))
                     .unwrap_or(Value::Null);
                 let mut m = Map::new();
                 m.insert(key, value);
@@ -815,7 +824,10 @@ impl<'a> Converter<'a> {
                 path.push(target.to_string());
                 let mut m = Map::new();
                 for mem in s.members.values() {
-                    let v = self.sample_in(&mem.target, Some(mem), loc, wire, depth + 1, path);
+                    if *budget == 0 {
+                        break;
+                    }
+                    let v = self.sample_in(&mem.target, Some(mem), loc, wire, depth + 1, path, budget);
                     if v.is_null() && (depth + 1 > MAX_DEPTH || path.contains(&mem.target)) {
                         continue;
                     }
@@ -827,7 +839,7 @@ impl<'a> Converter<'a> {
             ShapeKind::Union => {
                 let Some(mem) = shape.and_then(|s| s.members.values().next()) else { return json!({}) };
                 path.push(target.to_string());
-                let v = self.sample_in(&mem.target, Some(mem), loc, wire, depth + 1, path);
+                let v = self.sample_in(&mem.target, Some(mem), loc, wire, depth + 1, path, budget);
                 path.pop();
                 let mut m = Map::new();
                 m.insert(wire_name(mem, wire), v);

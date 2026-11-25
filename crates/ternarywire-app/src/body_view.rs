@@ -2174,7 +2174,7 @@ fn image_preview(ui: &mut Ui, resp: &HttpResponse, size: Option<[u32; 2]>, (uri,
         painter.rect_filled(img_rect, 0.0, light_cell);
         let cols = (img_w / cell).ceil() as i32;
         let rows = (img_h / cell).ceil() as i32;
-        if cols * rows < 40_000 {
+        if cols > 0 && rows > 0 && i64::from(cols).saturating_mul(i64::from(rows)) < 40_000 {
             for r in 0..rows {
                 for c in 0..cols {
                     if (r + c) % 2 == 0 {

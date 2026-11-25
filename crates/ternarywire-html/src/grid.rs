@@ -242,7 +242,11 @@ pub(crate) fn parse_line(v: &str) -> GridLine {
             Err(_) => GridLine::Area(n.to_string()),
         },
         // `2 name` and other forms with line names: the number wins.
-        _ => toks.iter().find_map(|t| t.parse::<i32>().ok()).filter(|n| *n != 0).map_or(GridLine::Auto, GridLine::Line),
+        _ => toks
+            .iter()
+            .find_map(|t| t.parse::<i32>().ok())
+            .filter(|n| *n != 0)
+            .map_or(GridLine::Auto, |n| GridLine::Line(n.clamp(-1000, 1000))),
     }
 }
 
@@ -373,8 +377,8 @@ fn resolve_axis(start: &GridLine, end: &GridLine, explicit: usize, areas: &[Vec<
     // Line number -> 0-based line index (negative from the end of the explicit grid).
     let line = |l: &GridLine, is_end: bool| -> Option<usize> {
         match l {
-            GridLine::Line(n) if *n > 0 => Some(*n as usize - 1),
-            GridLine::Line(n) => Some((explicit as i32 + 1 + n).max(0) as usize),
+            GridLine::Line(n) if *n > 0 => Some((*n as usize - 1).min(MAX_TRACKS)),
+            GridLine::Line(n) => Some((explicit as i64 + 1 + i64::from(*n)).clamp(0, MAX_TRACKS as i64) as usize),
             GridLine::Area(name) => {
                 let (a, b) = area_lines(areas, name, columns)?;
                 Some(if name.ends_with("-end") || (is_end && !name.ends_with("-start")) { b } else { a })
@@ -383,7 +387,7 @@ fn resolve_axis(start: &GridLine, end: &GridLine, explicit: usize, areas: &[Vec<
         }
     };
     let span = |l: &GridLine| match l {
-        GridLine::Span(n) => Some(*n as usize),
+        GridLine::Span(n) => Some((*n as usize).clamp(1, MAX_TRACKS)),
         _ => None,
     };
     match (line(start, false), line(end, true)) {
@@ -832,5 +836,39 @@ mod tests {
         assert_eq!((cols, rows), (2, 2));
         assert_eq!(cells[0], Cell { row: (1, 2), col: (1, 2) });
         assert_eq!(cells[1], Cell { row: (0, 1), col: (0, 2) });
+    }
+
+    #[test]
+    fn huge_multi_token_grid_line_and_links_and_nonfinite_flex_are_safe() {
+        // Multi-token huge grid line must be clamped, never causing multi-GB allocations or i32 overflow.
+        let p = parse_line("500000000 foo");
+        assert_eq!(p, GridLine::Line(1000));
+        let p_neg = parse_line("-500000000 foo");
+        assert_eq!(p_neg, GridLine::Line(-1000));
+        let huge = GridPlacement {
+            row_start: GridLine::Line(i32::MAX),
+            row_end: GridLine::Line(i32::MIN),
+            column_start: GridLine::Line(i32::MAX),
+            column_end: GridLine::Span(u16::MAX),
+        };
+        let (_, cols, rows) = place(&[&huge], 2, 2, &[], false);
+        assert!(cols <= MAX_TRACKS * 2 && rows <= MAX_TRACKS * 2, "{cols}x{rows}");
+
+        // End-to-end HTML layout with huge grid-row, non-finite flex, and dangerous link schemes.
+        let html = r#"
+            <div style="display:grid"><div style="grid-row: 500000000 foo; grid-column: 500000000 bar">x</div></div>
+            <div style="display:flex"><div style="flex-grow: inf; flex-shrink: nan; flex: inf 0 auto">y</div></div>
+            <a href="file:///etc/passwd">bad1</a>
+            <a href="java&#x09;script:alert(1)">bad2</a>
+            <a href="//evil.example/x">bad3</a>
+            <a href="https://example.com/ok">good</a>
+        "#;
+        let doc = crate::Document::from_html(html);
+        let text = format!("{:?}", doc.root);
+        assert!(!text.contains("file:///etc/passwd"), "{text}");
+        assert!(!text.contains("javascript:"), "{text}");
+        assert!(!text.contains("//evil.example"), "{text}");
+        assert!(text.contains("Some(\"https://example.com/ok\")"), "{text}");
+        assert!(text.contains("flex_grow: 0.0, flex_shrink: 1.0"), "{text}");
     }
 }

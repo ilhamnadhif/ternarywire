@@ -285,7 +285,7 @@ impl SocketIoArg {
         use base64::Engine as _;
         use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
         let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-        let hex = compact.strip_prefix("0x").unwrap_or(&compact);
+        let hex = compact.strip_prefix("0x").or_else(|| compact.strip_prefix("0X")).unwrap_or(&compact);
         if hex.len().is_multiple_of(2) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect();
         }

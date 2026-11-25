@@ -167,7 +167,7 @@ async fn run(config: WsConfig, mut rx: mpsc::UnboundedReceiver<Command>, on_even
     {
         request.headers_mut().insert("Sec-WebSocket-Protocol", v);
     }
-    let wss = config.url.starts_with("wss://");
+    let wss = config.url.trim_start().get(..6).is_some_and(|s| s.eq_ignore_ascii_case("wss://"));
     let https_proxy =
         || crate::proxy::proxy_for_url(&config.proxy, &config.url, "ws").is_some_and(|p| p.kind() == ProxyKind::Https);
     if config.verify_ssl && (wss || https_proxy()) {

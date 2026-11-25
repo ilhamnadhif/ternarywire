@@ -143,10 +143,10 @@ pub fn apply_merge(link: &mut ForkLink, plan: &Plan, fork: &Collection, parent: 
         }
     }
     rename(&mut parent.items, &local, &mut link.ids);
-    link.base = next_base(&link.base, plan, parent);
+    link.base = next_base_merge(&link.base, plan, &link.ids, parent);
 }
 
-/// The base after a sync: the parent as it is now, except for the entries
+/// The base after a pull: the parent as it is now, except for the entries
 /// not applied, which keep their old base version. Otherwise a declined
 /// change would vanish from the next pull, and the next merge would offer
 /// the fork's older version as a fork change (reverting the parent).
@@ -156,6 +156,29 @@ fn next_base(base: &Collection, plan: &Plan, parent: &Collection) -> Collection 
         Plan { entries: entries.map(|e| PlanEntry { apply: true, take_source: true, ..e.clone() }).collect() };
     let mut next = scrub(parent);
     apply(&skipped, base, &mut next);
+    next
+}
+
+/// The base after a merge: `base` updated ONLY with the entries actually
+/// merged into `parent` (using their post-rename parent ids). Unpulled parent
+/// changes and conflicts kept as "Keep parent" are NOT absorbed into `base`,
+/// so future pulls still see them and the next merge never reverts parent.
+fn next_base_merge(base: &Collection, plan: &Plan, ids: &BTreeMap<Id, Id>, parent: &Collection) -> Collection {
+    let entries: Vec<PlanEntry> = plan
+        .entries
+        .iter()
+        .filter(|e| e.apply && (e.kind != ChangeKind::Conflict || e.take_source))
+        .map(|e| PlanEntry {
+            id: ids.get(&e.id).cloned().unwrap_or_else(|| e.id.clone()),
+            apply: true,
+            take_source: true,
+            ..e.clone()
+        })
+        .collect();
+    let merged = Plan { entries };
+    let mut next = scrub(base);
+    let scrubbed_parent = scrub(parent);
+    apply(&merged, &scrubbed_parent, &mut next);
     next
 }
 
@@ -306,43 +329,143 @@ fn changed_inside(id: &str, b: &HashMap<Id, Node>, t: &HashMap<Id, Node>) -> boo
 
 fn apply(plan: &Plan, source: &Collection, target: &mut Collection) {
     let s = flatten(source);
-    // The plan is sorted by name for display. Apply removals first, then
-    // parents before children and siblings in source order, so that each
-    // insert at its source index keeps the source's order.
-    let mut entries: Vec<&PlanEntry> =
+    let chosen: Vec<&PlanEntry> =
         plan.entries.iter().filter(|e| e.apply && (e.kind != ChangeKind::Conflict || e.take_source)).collect();
-    entries.sort_by_cached_key(|e| match s.get(&e.id) {
-        None => (0, 0, 0),
-        Some(n) => (1, n.depth, position(source, &e.id)),
+    let mut removals: Vec<&PlanEntry> = Vec::new();
+    let mut upserts: Vec<&PlanEntry> = Vec::new();
+    for e in chosen {
+        if s.contains_key(&e.id) {
+            upserts.push(e);
+        } else {
+            removals.push(e);
+        }
+    }
+    // Phase 1: Detach items being updated/moved (deepest first) BEFORE running
+    // removals, so moving a subfolder out of a deleted folder keeps its
+    // unchanged children intact.
+    let mut detach_order = upserts.clone();
+    detach_order.sort_by_cached_key(|e| std::cmp::Reverse(s.get(&e.id).map_or(0, |n| n.depth)));
+    let mut detached: HashMap<Id, Item> = HashMap::new();
+    for e in detach_order {
+        if e.id != ROOT
+            && let Some(item) = take(&mut target.items, &e.id)
+        {
+            detached.insert(e.id.clone(), item);
+        }
+    }
+    // Phase 2: Apply removals both on `target` and inside any detached folders.
+    for e in removals {
+        if !remove(&mut target.items, &e.id) {
+            for item in detached.values_mut() {
+                if let Item::Folder(f) = item
+                    && remove(&mut f.items, &e.id)
+                {
+                    break;
+                }
+            }
+        }
+    }
+    // Phase 3: Insert parents before children and siblings in source order,
+    // preserving target's secrets and local `current` variable values.
+    upserts.sort_by_cached_key(|e| {
+        let n = &s[&e.id];
+        (n.depth, position(source, &e.id))
     });
-    for e in entries {
+    for e in upserts {
         if e.id == ROOT {
             if let Some(Node { content: Content::Root(r), .. }) = s.get(ROOT) {
+                let mut new_auth = r.auth.clone();
+                preserve_auth_secrets(&mut new_auth, &target.auth);
+                let mut new_vars = r.variables.clone();
+                preserve_var_secrets(&mut new_vars, &target.variables);
                 target.description = r.description.clone();
-                target.auth = r.auth.clone();
+                target.auth = new_auth;
                 target.scripts = r.scripts.clone();
-                target.variables = r.variables.clone();
+                target.variables = new_vars;
             }
             continue;
         }
-        match s.get(&e.id) {
-            // Removed in the source.
-            None => {
-                remove(&mut target.items, &e.id);
+        let node = &s[&e.id];
+        let existing = detached.remove(&e.id);
+        let item = match (&node.content, existing) {
+            (Content::Request(r), Some(Item::Request(old))) => {
+                let mut next = r.clone();
+                preserve_request_secrets(&mut next, &old);
+                Item::Request(next)
             }
-            Some(node) => {
-                let existing = take(&mut target.items, &e.id);
-                let item = match (&node.content, existing) {
-                    (Content::Request(r), _) => Item::Request(r.clone()),
-                    (Content::Folder(f), Some(Item::Folder(old))) => {
-                        Item::Folder(Folder { items: old.items, ..f.clone() })
-                    }
-                    (Content::Folder(f), _) => Item::Folder(f.clone()),
-                    (Content::Root(_), _) => continue,
-                };
-                let index = position(source, &e.id);
-                insert(target, node.parent.as_deref(), item, index);
+            (Content::Request(r), _) => Item::Request(r.clone()),
+            (Content::Folder(f), Some(Item::Folder(old))) => {
+                let mut next = Folder { items: old.items, ..f.clone() };
+                preserve_auth_secrets(&mut next.auth, &old.auth);
+                preserve_var_secrets(&mut next.variables, &old.variables);
+                Item::Folder(next)
             }
+            (Content::Folder(f), _) => Item::Folder(f.clone()),
+            (Content::Root(_), _) => continue,
+        };
+        let index = position(source, &e.id);
+        insert(target, node.parent.as_deref(), item, index);
+    }
+}
+
+/// Preserves `old`'s literal sensitive auth parameters when `new` shares the
+/// same auth kind and does not replace them with a pure `{{variable}}` ref.
+fn preserve_auth_secrets(new: &mut Auth, old: &Auth) {
+    if new.kind != old.kind {
+        return;
+    }
+    for &k in new.kind.sensitive_params() {
+        let new_is_ref = matches!(
+            new.params.get(k),
+            Some(serde_json::Value::String(s)) if crate::variables::is_pure_reference(s)
+        );
+        if new_is_ref {
+            continue;
+        }
+        if let Some(old_val) = old.params.get(k) {
+            let old_is_literal = match old_val {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(s) => !s.is_empty() && !crate::variables::is_pure_reference(s),
+                _ => true,
+            };
+            if old_is_literal {
+                new.params.insert(k.to_string(), old_val.clone());
+            }
+        }
+    }
+}
+
+fn preserve_request_secrets(new: &mut RequestItem, old: &RequestItem) {
+    preserve_auth_secrets(new.request.auth_mut(), old.request.auth());
+    for ex in &mut new.examples {
+        if let Some(new_req) = &mut ex.request
+            && let Some(old_req) = old.examples.iter().find(|o| o.id == ex.id).and_then(|o| o.request.as_ref())
+        {
+            preserve_auth_secrets(&mut new_req.auth, &old_req.auth);
+        }
+    }
+}
+
+/// Preserves `old`'s secret variable values and local `current` values by
+/// `(key, occurrence)` slot.
+fn preserve_var_secrets(new: &mut [Variable], old: &[Variable]) {
+    let mut old_by_slot: HashMap<(String, usize), &Variable> = HashMap::new();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for v in old {
+        let n = counts.entry(v.key.as_str()).or_default();
+        old_by_slot.insert((v.key.clone(), *n), v);
+        *n += 1;
+    }
+    counts.clear();
+    for v in new {
+        let n = counts.entry(v.key.as_str()).or_default();
+        let slot = (v.key.clone(), *n);
+        *n += 1;
+        if let Some(prev) = old_by_slot.get(&slot) {
+            if v.is_secret() && prev.is_secret() && !prev.value.is_empty() {
+                v.value = prev.value.clone();
+            }
+            v.current = prev.current.clone();
         }
     }
 }
@@ -503,34 +626,56 @@ pub enum DiffOp {
     Added,
 }
 
-/// Line diff (longest common subsequence) of two texts.
+/// Maximum LCS cells (`(n + 1) * (m + 1)`) allocated by [`line_diff`].
+const MAX_DIFF_CELLS: usize = 4_000_000;
+
+/// Line diff (longest common subsequence) of two texts, trimming common
+/// leading/trailing lines and capping memory for huge inputs.
 pub fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<(DiffOp, &'a str)> {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
-    let (n, m) = (a.len(), b.len());
-    // Texts here are single items, so the quadratic table stays small.
-    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if a[i] == b[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let max_suffix = (a.len() - prefix).min(b.len() - prefix);
+    let suffix =
+        a[prefix..].iter().rev().zip(b[prefix..].iter().rev()).take(max_suffix).take_while(|(x, y)| x == y).count();
+    let a_mid = &a[prefix..a.len() - suffix];
+    let b_mid = &b[prefix..b.len() - suffix];
+    let (n, m) = (a_mid.len(), b_mid.len());
+    let mut out = Vec::with_capacity(a.len().max(b.len()));
+    out.extend(a[..prefix].iter().map(|l| (DiffOp::Same, *l)));
+    if n == 0 || m == 0 || (n + 1).saturating_mul(m + 1) > MAX_DIFF_CELLS {
+        out.extend(a_mid.iter().map(|l| (DiffOp::Removed, *l)));
+        out.extend(b_mid.iter().map(|l| (DiffOp::Added, *l)));
+    } else {
+        let stride = m + 1;
+        let mut lcs = vec![0u32; (n + 1) * stride];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i * stride + j] = if a_mid[i] == b_mid[j] {
+                    lcs[(i + 1) * stride + j + 1] + 1
+                } else {
+                    lcs[(i + 1) * stride + j].max(lcs[i * stride + j + 1])
+                };
+            }
         }
-    }
-    let (mut i, mut j, mut out) = (0, 0, Vec::with_capacity(n.max(m)));
-    while i < n && j < m {
-        if a[i] == b[j] {
-            out.push((DiffOp::Same, a[i]));
-            i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            out.push((DiffOp::Removed, a[i]));
-            i += 1;
-        } else {
-            out.push((DiffOp::Added, b[j]));
-            j += 1;
+        let (mut i, mut j) = (0, 0);
+        while i < n && j < m {
+            if a_mid[i] == b_mid[j] {
+                out.push((DiffOp::Same, a_mid[i]));
+                i += 1;
+                j += 1;
+            } else if lcs[(i + 1) * stride + j] >= lcs[i * stride + j + 1] {
+                out.push((DiffOp::Removed, a_mid[i]));
+                i += 1;
+            } else {
+                out.push((DiffOp::Added, b_mid[j]));
+                j += 1;
+            }
         }
+        out.extend(a_mid[i..].iter().map(|l| (DiffOp::Removed, *l)));
+        out.extend(b_mid[j..].iter().map(|l| (DiffOp::Added, *l)));
     }
-    out.extend(a[i..].iter().map(|l| (DiffOp::Removed, *l)));
-    out.extend(b[j..].iter().map(|l| (DiffOp::Added, *l)));
+    out.extend(a[a.len() - suffix..].iter().map(|l| (DiffOp::Same, *l)));
     out
 }
 

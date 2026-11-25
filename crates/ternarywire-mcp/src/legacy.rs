@@ -190,7 +190,10 @@ pub(crate) async fn start(
     let host = url.host_str().unwrap_or("server").to_string();
     let mut stream = resp.bytes_stream();
     let mut parser = SseParser::new();
+    const MAX_EARLY_EVENTS: usize = 1_024;
+    const MAX_EARLY_BYTES: usize = 4 * 1024 * 1024;
     let mut early: Vec<SseEvent> = Vec::new();
+    let mut early_bytes = 0usize;
     let wait_endpoint = async {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| net_err(&e, &host))?;
@@ -198,8 +201,18 @@ pub(crate) async fn start(
             for ev in events.by_ref() {
                 if ev.event == "endpoint" {
                     let endpoint = resolve_endpoint(&url, &ev.data)?;
-                    early.extend(events);
+                    for rem in events {
+                        early_bytes = early_bytes.saturating_add(rem.event.len() + rem.data.len());
+                        if early.len() >= MAX_EARLY_EVENTS || early_bytes > MAX_EARLY_BYTES {
+                            return Err(McpError::Protocol("too many SSE events before endpoint announcement".into()));
+                        }
+                        early.push(rem);
+                    }
                     return Ok(endpoint);
+                }
+                early_bytes = early_bytes.saturating_add(ev.event.len() + ev.data.len());
+                if early.len() >= MAX_EARLY_EVENTS || early_bytes > MAX_EARLY_BYTES {
+                    return Err(McpError::Protocol("too many SSE events before endpoint announcement".into()));
                 }
                 early.push(ev);
             }

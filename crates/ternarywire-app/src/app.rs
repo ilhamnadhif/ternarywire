@@ -1209,8 +1209,11 @@ impl TernaryWireApp {
                         self.ws.mark_cookies();
                     }
                     if !rerun && let Some(req) = &exec.request {
-                        let secrets =
+                        let mut secrets =
                             self.secret_values(collection.as_deref(), env.as_deref(), &before, exec.prepared.as_ref());
+                        secrets.extend(self.secret_values(collection.as_deref(), env.as_deref(), &after, None));
+                        secrets.sort_by_key(|v| std::cmp::Reverse(v.len()));
+                        secrets.dedup();
                         let mut request = req.clone();
                         redact_request(&mut request, &secrets);
                         let resolved = exec
@@ -1377,6 +1380,11 @@ impl TernaryWireApp {
                         && let TabKind::Flow(t) = &mut self.tabs[i].kind
                         && current(t.run_epoch(), epoch)
                     {
+                        if let crate::flow_tab::FlowMsg::Done { ws, env, before, after, .. } = &event
+                            && *ws == self.ws_gen
+                        {
+                            self.ws.apply_var_changes(None, env.as_deref(), before, after);
+                        }
                         t.on_msg(event);
                     }
                 }
@@ -3740,7 +3748,13 @@ mod tests {
         press(&mut app, Key::Enter, Modifiers::COMMAND);
         frame(&mut app, Vec::new());
         assert!(flow_state(&app).0);
-        let done = crate::flow_tab::FlowMsg::Done(Box::new(FlowResult { cancelled: true, ..Default::default() }));
+        let done = crate::flow_tab::FlowMsg::Done {
+            result: Box::new(FlowResult { cancelled: true, ..Default::default() }),
+            ws: app.ws_gen,
+            env: None,
+            before: Box::default(),
+            after: Box::default(),
+        };
         app.tx.send(Msg::Flow { tab: id, epoch: first, event: done }).unwrap();
         app.pump_messages();
         assert!(flow_state(&app).0, "the new run still runs");
@@ -3816,5 +3830,85 @@ mod tests {
         assert!(cancel.is_cancelled());
         assert_eq!(tab_names(&app), ["a"]);
         assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn history_redacts_secrets_updated_by_pre_request_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let mut env = ternarywire_core::environment::Environment::new("Dev");
+        env.variables.push(ternarywire_core::variables::Variable::secret("api_tok", "old-secret-1111"));
+        let env_id = app.ws.add_environment(env);
+        app.ws.set_active_environment(Some(env_id.clone()));
+
+        let mut before = app.ws.scopes_for(None);
+        let mut after = before.clone();
+        before.environment.insert("api_tok".into(), "old-secret-1111".into());
+        after.environment.insert("api_tok".into(), "refreshed-secret-9999".into());
+
+        let tab = scratch_tab(&mut app, "req");
+        let mut req = HttpRequest::new("GET", "https://api.test/x?k=refreshed-secret-9999");
+        req.headers.push(ternarywire_core::model::KeyValue::new("X-Refreshed", "refreshed-secret-9999"));
+        let exec = ternarywire_runner::Execution {
+            request: Some(req),
+            sent: Some(ternarywire_http::SentRequest {
+                method: "GET".into(),
+                url: "https://api.test/x?k=refreshed-secret-9999".into(),
+                headers: vec![],
+                body_size: Some(0),
+            }),
+            ..Default::default()
+        };
+        app.tx
+            .send(Msg::Request {
+                tab,
+                ws: app.ws_gen,
+                exec: Box::new(exec),
+                before,
+                after,
+                collection: None,
+                env: Some(env_id),
+                rerun: false,
+            })
+            .unwrap();
+        app.pump_messages();
+        let hist = app.ws.history.first().expect("history entry added");
+        assert!(!hist.resolved_url.contains("refreshed-secret-9999"), "{}", hist.resolved_url);
+        assert!(
+            !serde_json::to_string(hist).unwrap().contains("refreshed-secret-9999"),
+            "post-script secret leaked into history"
+        );
+    }
+
+    #[test]
+    fn completed_flow_persists_variable_changes_to_workspace() {
+        use ternarywire_flows::{Flow, FlowResult};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let mut env = ternarywire_core::environment::Environment::new("Dev");
+        env.variables.push(ternarywire_core::variables::Variable::new("token", "initial"));
+        let env_id = app.ws.add_environment(env);
+        app.ws.set_active_environment(Some(env_id.clone()));
+
+        let flow_tab = crate::flow_tab::FlowTab::new(Flow::new("f"), None);
+        let epoch = flow_tab.run_epoch();
+        let id = app.add_tab(TabKind::Flow(Box::new(flow_tab)));
+        let before = app.ws.scopes_for(None);
+        let mut after = before.clone();
+        after.environment.insert("token".into(), "from-flow".into());
+        after.globals.insert("global_from_flow".into(), "hello".into());
+        let done = crate::flow_tab::FlowMsg::Done {
+            result: Box::new(FlowResult { success: true, ..Default::default() }),
+            ws: app.ws_gen,
+            env: Some(env_id.clone()),
+            before: Box::new(before),
+            after: Box::new(after),
+        };
+        app.tx.send(Msg::Flow { tab: id, epoch, event: done }).unwrap();
+        app.pump_messages();
+
+        let env = app.ws.data.environment(&env_id).unwrap();
+        assert_eq!(env.variables.iter().find(|v| v.key == "token").unwrap().effective(), "from-flow");
+        assert_eq!(app.ws.data.globals.iter().find(|v| v.key == "global_from_flow").unwrap().effective(), "hello");
     }
 }

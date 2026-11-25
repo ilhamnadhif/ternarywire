@@ -349,28 +349,35 @@ pub(crate) fn start(
         tokio::spawn(async move {
             tokio::select! {
                 status = child.wait() => {
+                    // Signal lingering grandchildren in the group immediately
+                    // before sleeping to drain stderr, minimizing any PID reuse window.
+                    #[cfg(unix)]
+                    signal_group(pid, libc::SIGKILL);
                     // Let the stderr reader drain the last lines.
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     shared.mark_closed(describe_exit(status, &shared));
-                    // What the server left running in its group (`npx`
-                    // exiting before its `node`) goes with it.
-                    #[cfg(unix)]
-                    signal_group(pid, libc::SIGKILL);
                 }
                 _ = cancel.cancelled() => {
-                    // stdin is closed by the writer; most servers exit now.
-                    if tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_err() {
+                    // stdin is closed by the writer; give the child a moment to
+                    // exit cleanly. Signal the process group BEFORE reaping so
+                    // the OS cannot reuse `pid` as an unrelated PGID.
+                    let exited_cleanly = tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_ok();
+                    if !exited_cleanly {
                         #[cfg(unix)]
                         {
                             signal_group(pid, libc::SIGTERM);
                             if tokio::time::timeout(Duration::from_secs(1), child.wait()).await.is_err() {
                                 signal_group(pid, libc::SIGKILL);
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
                             }
                         }
-                        let _ = child.kill().await;
+                        #[cfg(not(unix))]
+                        {
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                        }
                     }
-                    #[cfg(unix)]
-                    signal_group(pid, libc::SIGKILL);
                     #[cfg(not(unix))]
                     let _ = pid;
                 }

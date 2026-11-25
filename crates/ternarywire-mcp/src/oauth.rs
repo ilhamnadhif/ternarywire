@@ -1085,7 +1085,9 @@ impl AuthManager {
             access_token: str_of(v, "access_token").unwrap_or_default(),
             token_type: str_of(v, "token_type").unwrap_or_else(|| "Bearer".into()),
             refresh_token: str_of(v, "refresh_token"),
-            expires_at: expires_in.map(|e| now + e as i64),
+            expires_at: expires_in
+                .filter(|e| e.is_finite() && *e >= 0.0)
+                .map(|e| now.saturating_add(e.min(i64::MAX as f64) as i64)),
             scope: str_of(v, "scope"),
             issuer: d_issuer.to_string(),
             token_endpoint: token_endpoint.to_string(),

@@ -103,10 +103,28 @@ fn description(v: Option<&Value>) -> String {
     }
 }
 
+fn valid_imported_id(s: &str) -> bool {
+    !s.is_empty()
+        && s != crate::storage::GLOBALS_OWNER
+        && !s.contains([':', '/', '\\'])
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 fn id_or_new(v: &Value, key: &str) -> String {
     match v.get(key).and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s.to_string(),
+        Some(s) if valid_imported_id(s) => s.to_string(),
         _ => new_id(),
+    }
+}
+
+fn unique_id_or_new(v: &Value, key: &str, seen: &mut std::collections::HashSet<String>) -> String {
+    let candidate = id_or_new(v, key);
+    if seen.insert(candidate.clone()) {
+        candidate
+    } else {
+        let fresh = new_id();
+        seen.insert(fresh.clone());
+        fresh
     }
 }
 
@@ -119,9 +137,10 @@ pub fn import_collection(v: &Value) -> Result<(Collection, ImportReport)> {
     {
         report.warn(format!("unknown schema {schema}; importing as v2.1"));
     }
+    let mut seen_ids = std::collections::HashSet::new();
     let inherited = import_settings(v.get("protocolProfileBehavior"), &RequestSettings::default(), &mut report);
     let mut c = Collection {
-        id: id_or_new(info, "_postman_id"),
+        id: unique_id_or_new(info, "_postman_id", &mut seen_ids),
         name: str_field(info, "name"),
         description: description(info.get("description")),
         auth: import_auth(v.get("auth"), &mut report),
@@ -137,7 +156,7 @@ pub fn import_collection(v: &Value) -> Result<(Collection, ImportReport)> {
         c.auth = Auth::default();
     }
     let no_pruning = disables_body_pruning(v, false);
-    c.items = import_items(v.get("item"), &inherited, no_pruning, &mut report);
+    c.items = import_items(v.get("item"), &inherited, no_pruning, &mut seen_ids, &mut report);
     for key in ["proxy", "certificate"] {
         if v.get(key).is_some() {
             report.warn(format!("collection-level `{key}` is not imported; configure it in Settings"));
@@ -160,13 +179,20 @@ fn import_items(
     v: Option<&Value>,
     inherited: &RequestSettings,
     no_pruning: bool,
+    seen_ids: &mut std::collections::HashSet<String>,
     report: &mut ImportReport,
 ) -> Vec<Item> {
     let Some(Value::Array(items)) = v else { return Vec::new() };
-    items.iter().filter_map(|i| import_item(i, inherited, no_pruning, report)).collect()
+    items.iter().filter_map(|i| import_item(i, inherited, no_pruning, seen_ids, report)).collect()
 }
 
-fn import_item(v: &Value, inherited: &RequestSettings, no_pruning: bool, report: &mut ImportReport) -> Option<Item> {
+fn import_item(
+    v: &Value,
+    inherited: &RequestSettings,
+    no_pruning: bool,
+    seen_ids: &mut std::collections::HashSet<String>,
+    report: &mut ImportReport,
+) -> Option<Item> {
     if !v.is_object() {
         report.warn("skipped an item that is not an object");
         return None;
@@ -175,13 +201,13 @@ fn import_item(v: &Value, inherited: &RequestSettings, no_pruning: bool, report:
     let no_pruning = disables_body_pruning(v, no_pruning);
     if v.get("item").is_some() || v.get("request").is_none() && v.get("response").is_none() {
         let folder = Folder {
-            id: id_or_new(v, "id"),
+            id: unique_id_or_new(v, "id", seen_ids),
             name: str_field(v, "name"),
             description: description(v.get("description")),
             auth: import_auth(v.get("auth"), report),
             scripts: import_events(v.get("event"), report),
             variables: import_variables(v.get("variable")),
-            items: import_items(v.get("item"), &settings, no_pruning, report),
+            items: import_items(v.get("item"), &settings, no_pruning, seen_ids, report),
         };
         return Some(Item::Folder(folder));
     }
@@ -206,11 +232,11 @@ fn import_item(v: &Value, inherited: &RequestSettings, no_pruning: bool, report:
         desc = description(v.get("description"));
     }
     let examples = match v.get("response") {
-        Some(Value::Array(rs)) => rs.iter().map(|r| import_example(r, report)).collect(),
+        Some(Value::Array(rs)) => rs.iter().map(|r| import_example(r, seen_ids, report)).collect(),
         _ => Vec::new(),
     };
     Some(Item::Request(RequestItem {
-        id: id_or_new(v, "id"),
+        id: unique_id_or_new(v, "id", seen_ids),
         name: str_field(v, "name"),
         description: desc,
         request: RequestKind::Http(request),
@@ -619,11 +645,11 @@ fn import_variables(v: Option<&Value>) -> Vec<Variable> {
         .collect()
 }
 
-fn import_example(v: &Value, report: &mut ImportReport) -> Example {
+fn import_example(v: &Value, seen_ids: &mut std::collections::HashSet<String>, report: &mut ImportReport) -> Example {
     let request = v.get("originalRequest").filter(|r| !r.is_null()).map(|r| import_request(r, report));
     let headers = import_headers(v.get("header"));
     Example {
-        id: id_or_new(v, "id"),
+        id: unique_id_or_new(v, "id", seen_ids),
         name: {
             let n = str_field(v, "name");
             if n.is_empty() { "Example".into() } else { n }
@@ -754,12 +780,11 @@ impl Exporter {
                     .iter()
                     .map(|(k, v)| {
                         let mut value = v.clone();
-                        if !self.opts.include_secrets
+                        let should_redact = !self.opts.include_secrets
                             && sensitive.contains(&k.as_str())
-                            && let Value::String(s) = v
-                            && !s.is_empty()
-                            && !is_pure_reference(s)
-                        {
+                            && !matches!(v, Value::Null)
+                            && !matches!(v, Value::String(s) if s.is_empty() || is_pure_reference(s));
+                        if should_redact {
                             self.report.redacted += 1;
                             value = Value::String(String::new());
                         }
@@ -1043,9 +1068,20 @@ fn export_body(b: &Body) -> Option<Value> {
     Some(Value::Object(o))
 }
 
-/// Splits a host part on dots unless it contains variables.
+/// Splits a host part on dots unless it contains variables, keeping userinfo
+/// (`user.name:pass@`) intact in the first segment.
 fn host_parts(host: &str) -> Vec<String> {
-    if host.contains("{{") { vec![host.to_string()] } else { host.split('.').map(str::to_string).collect() }
+    if host.contains("{{") {
+        return vec![host.to_string()];
+    }
+    if let Some((userinfo, rest)) = host.rsplit_once('@') {
+        let mut parts: Vec<String> = rest.split('.').map(str::to_string).collect();
+        if let Some(first) = parts.first_mut() {
+            *first = format!("{userinfo}@{first}");
+        }
+        return parts;
+    }
+    host.split('.').map(str::to_string).collect()
 }
 
 /// Builds Postman's structured URL object. Tools like newman read the parts
@@ -1087,8 +1123,13 @@ pub fn export_url(raw: &str, params: &[KeyValue], path_vars: &[KeyValue]) -> Val
     }
     let (hostport, path) = rest.split_at(host_end);
     let (host, port) = match hostport.rfind(':') {
-        // Not a colon inside `{{ }}` or an IPv6 literal (`[::1]`).
-        Some(c) if !in_var(hostport, c) && !hostport[c + 1..].is_empty() && !hostport[c + 1..].contains(']') => {
+        // Not a colon inside `{{ }}`, an IPv6 literal (`[::1]`), or userinfo (`user:pass@host`).
+        Some(c)
+            if !in_var(hostport, c)
+                && !hostport[c + 1..].is_empty()
+                && !hostport[c + 1..].contains(']')
+                && !hostport[c + 1..].contains('@') =>
+        {
             (&hostport[..c], Some(&hostport[c + 1..]))
         }
         _ => (hostport, None),
@@ -1109,8 +1150,10 @@ pub fn export_url(raw: &str, params: &[KeyValue], path_vars: &[KeyValue]) -> Val
         // `?flag` has a null value in Postman; "" would be sent as `flag=`.
         let mut pieces = query.unwrap_or("").split('&').filter(|p| !p.is_empty());
         if let Value::Array(rows) = &mut rows {
-            for (row, p) in rows.iter_mut().zip(params).filter(|(_, p)| p.enabled) {
-                if pieces.next() == Some(p.key.as_str()) && p.value.is_empty() {
+            for (row, p) in
+                rows.iter_mut().zip(params).filter(|(_, p)| p.enabled && !(p.key.is_empty() && p.value.is_empty()))
+            {
+                if pieces.next().is_some_and(|piece| !piece.contains('=')) && p.value.is_empty() {
                     row["value"] = Value::Null;
                 }
             }

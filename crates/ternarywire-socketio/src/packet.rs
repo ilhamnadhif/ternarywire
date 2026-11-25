@@ -150,22 +150,49 @@ pub(crate) fn deconstruct(args: &[EmitArg]) -> (Vec<Value>, Vec<Vec<u8>>) {
     (json, attachments)
 }
 
+/// Maximum total base64 bytes expanded from binary placeholders in one packet,
+/// preventing placeholder-amplification attacks where one attachment is
+/// referenced thousands of times.
+const MAX_PLACEHOLDER_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
+
 /// Replaces `{"_placeholder": true, "num": n}` with attachment `n` as base64.
-pub(crate) fn fill_placeholders(v: &mut Value, attachments: &[Vec<u8>]) {
-    if let Value::Object(o) = v
-        && o.get("_placeholder") == Some(&Value::Bool(true))
-    {
-        let bin = o.get("num").and_then(Value::as_u64).and_then(|n| attachments.get(n as usize));
-        if let Some(bin) = bin {
-            *v = Value::String(base64::engine::general_purpose::STANDARD.encode(bin));
+/// Returns `Err` if total expanded output would exceed the safety budget.
+pub(crate) fn fill_placeholders(v: &mut Value, attachments: &[Vec<u8>]) -> Result<(), String> {
+    fn walk(v: &mut Value, attachments: &[Vec<u8>], total: &mut usize) -> Result<(), String> {
+        if let Value::Object(o) = v
+            && o.get("_placeholder") == Some(&Value::Bool(true))
+        {
+            let bin = o.get("num").and_then(Value::as_u64).and_then(|n| attachments.get(n as usize));
+            if let Some(bin) = bin {
+                let encoded_len = bin.len().div_ceil(3).saturating_mul(4);
+                *total = total.saturating_add(encoded_len);
+                if *total > MAX_PLACEHOLDER_EXPANDED_BYTES {
+                    return Err(format!(
+                        "binary placeholder expansion exceeds the {} MiB limit",
+                        MAX_PLACEHOLDER_EXPANDED_BYTES >> 20
+                    ));
+                }
+                *v = Value::String(base64::engine::general_purpose::STANDARD.encode(bin));
+            }
+            return Ok(());
         }
-        return;
+        match v {
+            Value::Array(items) => {
+                for x in items {
+                    walk(x, attachments, total)?;
+                }
+            }
+            Value::Object(o) => {
+                for x in o.values_mut() {
+                    walk(x, attachments, total)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
-    match v {
-        Value::Array(items) => items.iter_mut().for_each(|x| fill_placeholders(x, attachments)),
-        Value::Object(o) => o.values_mut().for_each(|x| fill_placeholders(x, attachments)),
-        _ => {}
-    }
+    let mut total = 0usize;
+    walk(v, attachments, &mut total)
 }
 
 #[cfg(test)]
@@ -248,14 +275,23 @@ mod tests {
 
         // What the receiving side reconstructs.
         let mut v = decode_packet(&text).unwrap().data.unwrap();
-        fill_placeholders(&mut v, &[vec![1], vec![2]]);
+        fill_placeholders(&mut v, &[vec![1], vec![2]]).unwrap();
         assert_eq!(v, json!(["AQ==", "Ag=="]));
     }
 
     #[test]
     fn placeholders_become_base64() {
         let mut v = json!(["f", {"_placeholder": true, "num": 0}, {"nested": [{"_placeholder": true, "num": 1}]}]);
-        fill_placeholders(&mut v, &[vec![1, 2, 3], b"hi".to_vec()]);
+        fill_placeholders(&mut v, &[vec![1, 2, 3], b"hi".to_vec()]).unwrap();
         assert_eq!(v, json!(["f", "AQID", {"nested": ["aGk="]}]));
+    }
+
+    #[test]
+    fn placeholder_amplification_is_rejected() {
+        let big = vec![0u8; 2 * 1024 * 1024]; // ~2.7 MiB base64 per reference
+        let placeholders: Vec<Value> = (0..30).map(|_| json!({"_placeholder": true, "num": 0})).collect();
+        let mut v = Value::Array(placeholders);
+        let err = fill_placeholders(&mut v, &[big]).unwrap_err();
+        assert!(err.contains("limit"), "{err}");
     }
 }

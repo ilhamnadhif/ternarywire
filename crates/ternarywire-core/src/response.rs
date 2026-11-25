@@ -187,7 +187,9 @@ impl BodyLanguage {
                     BodyLanguage::Xml
                 }
             }
-            _ if std::str::from_utf8(head).is_ok() || head.is_empty() => BodyLanguage::Text,
+            _ if head.is_empty() || std::str::from_utf8(head).map_or_else(|e| e.error_len().is_none(), |_| true) => {
+                BodyLanguage::Text
+            }
             _ => BodyLanguage::Binary,
         }
     }

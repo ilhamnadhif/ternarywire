@@ -2471,8 +2471,9 @@ impl<'d> Renderer<'_, 'd> {
         let t = &g.template;
         let explicit = (cols.len().max(t.areas.first().map_or(0, Vec::len)), rows.len().max(t.areas.len()));
         let placed = Self::grid_placement(g, &items, explicit);
+        let ncols = placed.cols.min(grid::MAX_TRACKS * 2);
         let n_explicit = cols.len();
-        while cols.len() < placed.cols {
+        while cols.len() < ncols {
             cols.push(Self::implicit(&t.auto_columns, cols.len() - n_explicit));
         }
         let contribs: Vec<Contribution> = items
@@ -2548,7 +2549,7 @@ impl<'d> Renderer<'_, 'd> {
             Some(c) if c.explicit == explicit && c.cells.len() == items.len() => c,
             _ => Self::grid_placement(g, &items, explicit),
         };
-        let (ncols, nrows) = (cache.cols, cache.rows);
+        let (ncols, nrows) = (cache.cols.min(grid::MAX_TRACKS * 2), cache.rows.min(grid::MAX_TRACKS * 2));
         let n_explicit = cols.len();
         while cols.len() < ncols {
             cols.push(Self::implicit(&t.auto_columns, cols.len() - n_explicit));
@@ -2594,6 +2595,9 @@ impl<'d> Renderer<'_, 'd> {
         }
         let grid_right = x;
         let span_w = |c: (usize, usize)| {
+            if ncols == 0 || c.0 >= ncols {
+                return 0.0;
+            }
             let end = c.1.min(ncols).max(c.0 + 1);
             xs[end - 1] + widths[end - 1] - xs[c.0]
         };

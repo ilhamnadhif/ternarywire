@@ -2106,7 +2106,15 @@ impl<'r, 'a> Run<'r, 'a> {
         let (mut req, scope_id): (AiRequest, Option<String>) = match &cfg.request {
             Some(r) => match self.find_saved(r) {
                 Some((c, item)) => match &item.request {
-                    RequestKind::Ai(a) => (a.clone(), Some(c.id.clone())),
+                    RequestKind::Ai(a) => {
+                        let mut a = a.clone();
+                        if a.auth.is_inherit()
+                            && let Some(eff) = c.effective_auth(&item.id)
+                        {
+                            a.auth = eff.auth.clone();
+                        }
+                        (a, Some(c.id.clone()))
+                    }
                     _ => return Outcome::fail(format!("\"{}\" is not an AI request", item.name)),
                 },
                 None => return Outcome::fail(format!("saved AI request {} not found", r.request_id)),
@@ -2154,6 +2162,11 @@ impl<'r, 'a> Run<'r, 'a> {
             req.auth = auth;
             let ai_cfg = AiConfig::from_request(&req, &resolve);
             let mut mcp: Vec<(String, McpConfig)> = Vec::new();
+            let mut static_res = ternarywire_core::Resolver::new(&scopes);
+            if let Some(v) = env.services.vault.as_deref() {
+                static_res = static_res.with_vault(v);
+            }
+            let resolve_stdio = |s: &str| static_res.resolve(s);
             for id in &req.mcp_servers {
                 for c in &env.collections {
                     if let Some(item) = c.find_request(id)
@@ -2164,7 +2177,16 @@ impl<'r, 'a> Run<'r, 'a> {
                         if let Some(eff) = c.effective_auth(id) {
                             m.auth = eff.auth.clone();
                         }
-                        mcp.push((item.name.clone(), McpConfig::from_request(&m, &resolve)));
+                        // Stdio MCP servers must not resolve untrusted flow payload refs into args/env/cwd.
+                        let cfg = match &m.transport {
+                            ternarywire_core::protocols::McpTransport::Stdio { .. } => {
+                                McpConfig::from_request(&m, &resolve_stdio)
+                            }
+                            ternarywire_core::protocols::McpTransport::Http { .. } => {
+                                McpConfig::from_request(&m, &resolve)
+                            }
+                        };
+                        mcp.push((item.name.clone(), cfg));
                     }
                 }
             }

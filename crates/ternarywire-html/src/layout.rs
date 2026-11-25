@@ -723,10 +723,8 @@ impl Builder<'_> {
             _ => {}
         }
 
-        let own_link = (tag == "a")
-            .then(|| dom.attr(id, "href").map(str::trim))
-            .flatten()
-            .filter(|h| !h.to_ascii_lowercase().starts_with("javascript:"));
+        let own_link =
+            (tag == "a").then(|| dom.attr(id, "href").map(str::trim)).flatten().filter(|h| is_safe_link_href(h));
         if out_of_flow {
             let c = blockify(c);
             let mut block = self.element_block(id, &c);
@@ -778,7 +776,7 @@ impl Builder<'_> {
             && let Some(href) = dom.attr(id, "href")
         {
             let href = href.trim();
-            if !href.to_ascii_lowercase().starts_with("javascript:") {
+            if is_safe_link_href(href) {
                 inner.link = Some(href.to_string());
             }
         }
@@ -1061,4 +1059,26 @@ fn trim_trailing(out: &mut Vec<Inline>) {
             break;
         }
     }
+}
+
+/// Allowlist safe link targets (`http://`, `https://`, `mailto:`, `#…`, or
+/// relative paths without a scheme prefix). Rejects `javascript:`, `file:`,
+/// `data:`, `vbscript:`, protocol-relative `//…`, and control characters.
+fn is_safe_link_href(href: &str) -> bool {
+    let href = href.trim();
+    if href.is_empty() || href.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return false;
+    }
+    if href.starts_with('#') {
+        return true;
+    }
+    if href.starts_with("//") {
+        return false;
+    }
+    let lower = href.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:") {
+        return true;
+    }
+    let before_delim = href.split(['/', '?', '#']).next().unwrap_or(href);
+    !before_delim.contains(':')
 }

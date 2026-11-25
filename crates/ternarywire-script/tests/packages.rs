@@ -681,3 +681,39 @@ fn package_library_files_are_limited_and_interruptible() {
     assert_eq!(out.errors[0].location, "request \"t\"");
     assert!(out.errors[0].message.contains("timed out"), "{:?}", out.errors);
 }
+
+#[test]
+fn remote_module_mutations_and_intl_streams_prototypes_do_not_leak_across_jobs() {
+    let (_cdn, base) = standard_cdn();
+    let ws = Workspace::new();
+    let e = BoaEngine::new();
+    // Job 1 mutates a remote module export AND Intl / ReadableStream prototypes.
+    run_ok(
+        &e,
+        job(
+            r#"
+            const g = pm.require('npm:greet@1.0.0');
+            g.greet = () => 'PWNED';
+            Intl.DateTimeFormat.prototype.format = () => 'PWNED_INTL';
+            ReadableStream.prototype.pwned = true;
+            "#,
+            Some(ws.ctx(&base)),
+        ),
+    );
+    // Job 2 on the same worker must see clean remote module exports and untouched prototypes.
+    run_ok(
+        &e,
+        job(
+            r#"
+            pm.test('remote module state is isolated per job', () => {
+                pm.expect(pm.require('npm:greet@1.0.0').greet('ada')).to.equal('HELLO ADA');
+            });
+            pm.test('Intl and ReadableStream prototypes are restored', () => {
+                pm.expect(new Intl.DateTimeFormat('en').format(0)).to.not.equal('PWNED_INTL');
+                pm.expect(ReadableStream.prototype.pwned).to.equal(undefined);
+            });
+            "#,
+            Some(ws.ctx(&base)),
+        ),
+    );
+}

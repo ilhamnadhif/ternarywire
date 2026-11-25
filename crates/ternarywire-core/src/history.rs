@@ -88,8 +88,21 @@ impl HistoryStore {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refusing to append history through a symlink",
+            ));
+        }
         let mut lines = self.lines.lock();
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&self.path)?;
         f.write_all(&to_line(entry)?)?;
         drop(f);
         let count = match *lines {
@@ -124,7 +137,7 @@ impl HistoryStore {
         for e in &entries {
             out.extend_from_slice(&to_line(e)?);
         }
-        crate::storage::write_atomic(&self.path, &out)?;
+        crate::storage::write_atomic_private(&self.path, &out)?;
         Ok(entries.len())
     }
 

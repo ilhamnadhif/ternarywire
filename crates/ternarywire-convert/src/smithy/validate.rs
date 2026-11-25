@@ -27,8 +27,8 @@ pub(super) fn protocol(service: &Shape) -> Option<&'static str> {
 /// Operations of a service in model order: the service's own operations,
 /// then those of each resource (lifecycle first), recursively.
 pub(super) fn bound_operations(m: &Model, service: &Shape) -> Vec<String> {
-    fn resource(m: &Model, id: &str, out: &mut Vec<String>, seen: &mut HashSet<String>) {
-        if !seen.insert(id.to_string()) {
+    fn resource(m: &Model, id: &str, depth: usize, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+        if depth >= 256 || !seen.insert(id.to_string()) {
             return;
         }
         let Some(r) = m.shape(id).filter(|r| r.kind == ShapeKind::Resource) else { return };
@@ -38,7 +38,7 @@ pub(super) fn bound_operations(m: &Model, service: &Shape) -> Vec<String> {
             }
         }
         for child in &r.resources {
-            resource(m, &child.id, out, seen);
+            resource(m, &child.id, depth + 1, out, seen);
         }
     }
     let mut out: Vec<String> = Vec::new();
@@ -49,7 +49,7 @@ pub(super) fn bound_operations(m: &Model, service: &Shape) -> Vec<String> {
     }
     let mut seen = HashSet::new();
     for r in &service.resources {
-        resource(m, &r.id, &mut out, &mut seen);
+        resource(m, &r.id, 0, &mut out, &mut seen);
     }
     out
 }

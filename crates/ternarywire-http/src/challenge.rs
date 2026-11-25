@@ -86,8 +86,15 @@ impl<'a> Lexer<'a> {
         while j < self.s.len() && (self.s[j] == b' ' || self.s[j] == b'\t') {
             j += 1;
         }
-        // `name=` but not `token68==` padding (`=` followed by `=`, `,` or end).
-        j < self.s.len() && self.s[j] == b'=' && !matches!(self.s.get(j + 1), Some(b'=') | Some(b',') | None)
+        // `name=` but not `token68==` padding (`=` followed by `=`, `,`, whitespace+`,` or end).
+        if j >= self.s.len() || self.s[j] != b'=' {
+            return false;
+        }
+        let mut k = j + 1;
+        while k < self.s.len() && (self.s[k] == b' ' || self.s[k] == b'\t') {
+            k += 1;
+        }
+        k < self.s.len() && self.s[k] != b'=' && self.s[k] != b','
     }
 }
 
@@ -113,7 +120,7 @@ pub fn parse_challenges<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<Ch
             // token68?
             if lx.peek().is_some() && lx.peek() != Some(b',') && !lx.at_param() {
                 let start = lx.i;
-                while lx.i < lx.s.len() && lx.s[lx.i] != b',' && lx.s[lx.i] != b' ' {
+                while lx.i < lx.s.len() && !matches!(lx.s[lx.i], b',' | b' ' | b'\t') {
                     lx.i += 1;
                 }
                 let t = String::from_utf8_lossy(&lx.s[start..lx.i]).into_owned();
@@ -175,5 +182,18 @@ mod tests {
         let c = parse_challenges([r#"Digest realm="a \"b\" c", nonce=abc"#]);
         assert_eq!(c[0].param("realm"), Some(r#"a "b" c"#));
         assert_eq!(c[0].param("nonce"), Some("abc"));
+    }
+
+    #[test]
+    fn token68_trailing_ws_and_tabs() {
+        // Tab separator before token68 and trailing space after '=' padding.
+        let c = parse_challenges(["NTLM\tTlRMTVNTUA== "]);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].scheme, "ntlm");
+        assert_eq!(c[0].token68.as_deref(), Some("TlRMTVNTUA=="));
+        // Parameter with spaces around '=' is still parsed as a param, not token68.
+        let p = parse_challenges([r#"Digest realm = "x", nonce = abc"#]);
+        assert_eq!(p[0].param("realm"), Some("x"));
+        assert_eq!(p[0].param("nonce"), Some("abc"));
     }
 }

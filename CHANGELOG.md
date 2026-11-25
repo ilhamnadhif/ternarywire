@@ -2,6 +2,28 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.4 — 2026-11-25
+
+Comprehensive security hardening, stability, and correctness release across all 18 workspace crates.
+
+### Security
+- **MCP stdio execution boundary.** Pre-request scripts can no longer overwrite local `McpTransport::Stdio` command, arguments, environment variables, or working directory. Stdio commands are kept literal (never variable-interpolated), and runner/flow stdio config resolves only from static/pre-script scopes.
+- **Script and protocol file-read confinement.** Pre-request scripts can no longer redirect existing binary or multipart file fields outside the workspace by mutating referenced variables; `SocketIoArgKind::File` arguments are strictly confined to the canonical workspace directory.
+- **Symlink confinement and private file permissions.** Workspace storage, history (`history.jsonl`), cookies, and file-backed secret stores now refuse to traverse or overwrite external symlinks and create sensitive files with `0600` permissions on Unix. `smithy-build.json` scanning rejects path traversal, escaping symlinks, and symlink cycles.
+- **Complete secret redaction.** Unsaved session tabs now scrub and stash credentials for gRPC, Socket.IO, MCP, MQTT, and AI requests; HTTP history redacts secrets created or refreshed by pre-request scripts; non-string sensitive auth parameters are scrubbed everywhere; `ternarywire flow run -r json` redacts secrets, URLs, and auth headers unless `--show-secrets` is passed; generated documentation masks credential-like query parameters embedded directly in URLs.
+- **Script worker isolation & IPC limits.** Remote ES module caches (`remotePkgs` and parsed loader graphs) are isolated per job so mutations and lockfile checks never leak across runs; `Intl` and Web Streams constructors/prototypes are tracked and restored between jobs; isolated worker IPC frames are bounded to 64 MiB.
+- **Safe links, shell quoting, and pinned packaging.** Recorded `curl` export shell-quotes non-token HTTP methods; HTML previews allowlist `http://`, `https://`, `mailto:`, and safe relative links; OAuth 2.0 `authorization_url` validates `http`/`https` schemes; Linux packaging pins `appimagetool` `1.9.1` with SHA-256 checksum verification.
+
+### Fixed
+- **DoS, overflow, and panic hardening.** Added depth and size caps for nested `google.protobuf.Any` JSON rendering (64 levels), CSS Grid lines/spans and non-finite flex values, JSONPath slicing/negation/nesting and zero-width regex quantifiers, variable expansion DAGs, Socket.IO binary placeholder amplification, proxy WebSocket `permessage-deflate` inflation, MCP legacy SSE early buffers, Smithy model resolution/samples, webhook body drain, and image checkerboard sizing. Fixed a UTF-8 char-boundary panic in `redact_urls`.
+- **Fork sync and three-way merge.** `apply_merge` preserves unpulled parent changes in the fork base; moving children out of a deleted folder no longer drops them; target secrets and local `current` variable values are preserved on apply; `line_diff` trims common prefix/suffix and caps memory.
+- **Secret backends and external vaults.** Keychain storage now chunks large payloads across UTF-16 boundaries (fixing Windows Credential Manager's size limit), rejects volatile `UntilReboot` backends so Linux falls back to persistent `0600` files, and reports save errors. AWS Secrets Manager preserves leading `/` in secret names, path segment encoding escapes `.` and `..`, and Azure Key Vault selects sovereign cloud Entra ID authorities automatically.
+- **AI inherited auth and Flow variable persistence.** Inherited collection/folder auth now applies to AI requests (GUI, runner, flows, and MCP sampling), and GUI Flow runs persist environment/global variable changes back to the workspace.
+- **Protocol, parser, and UI fixes.** Fixed proxy in-flight request body double-counting against total capture budgets, MCP stdio PGID signaling order, Postman import ID validation/deduplication and userinfo/valueless query export, `ClientCertificate::matches` port/IPv6 handling, `Environment::set_current` skipping disabled duplicates, `urlutil` brace-aware `#` splitting, OAuth1/Digest `PreparedBody::File` hashing, OAuth2 `expires_in` overflow clamping, script `await` detection ignoring comments/strings, lockfile owner-token cleanup, and per-frame UI caching in request, mock, capture, and fork diff views.
+
+### Changed
+- Wired `rust-version.workspace = true` (MSRV 1.88) across all workspace crates and removed unused workspace/crate dependencies.
+
 ## 0.3.3 — 2026-11-25
 
 Unified Ternary family theme, typography defaults, and English-only interface.

@@ -152,6 +152,8 @@ pub struct RequestTab {
     docs_preview: bool,
     /// UI automation asked for the GraphQL schema.
     pending_schema: bool,
+    /// Cached JSON validity of the raw body: `(len, hash, valid)`.
+    raw_json_valid: Option<(usize, u64, bool)>,
 }
 
 pub struct GqlSubscription {
@@ -268,6 +270,7 @@ impl RequestTab {
             from_history: None,
             docs_preview: false,
             pending_schema: false,
+            raw_json_valid: None,
         }
     }
 
@@ -1618,7 +1621,7 @@ fn body_section(ui: &mut Ui, tab: &mut RequestTab, http: &mut HttpRequest, ectx:
         );
         tools.spacing_mut().item_spacing.x = 8.0;
         match mode {
-            BodyMode::Raw => raw_tools(&mut tools, &mut http.body),
+            BodyMode::Raw => raw_tools(&mut tools, tab, &mut http.body),
             BodyMode::GraphQl => graphql_tools(&mut tools, tab, &mut http.body),
             _ => {}
         }
@@ -1730,9 +1733,24 @@ fn raw_language_icon(l: RawLanguage) -> &'static str {
 }
 
 /// Raw body: JSON validity, Beautify and the language picker.
-fn raw_tools(ui: &mut Ui, body: &mut Body) {
+fn raw_tools(ui: &mut Ui, tab: &mut RequestTab, body: &mut Body) {
     if body.raw_language == RawLanguage::Json {
-        let valid = body.raw.trim().is_empty() || beautify_json_with_vars(&body.raw).is_some();
+        let valid = if body.raw.trim().is_empty() {
+            true
+        } else {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            body.raw.hash(&mut hasher);
+            let h = hasher.finish();
+            match tab.raw_json_valid {
+                Some((len, prev, v)) if len == body.raw.len() && prev == h => v,
+                _ => {
+                    let v = beautify_json_with_vars(&body.raw).is_some();
+                    tab.raw_json_valid = Some((body.raw.len(), h, v));
+                    v
+                }
+            }
+        };
         if !valid {
             kit::pill_ex(
                 ui,
@@ -1746,6 +1764,7 @@ fn raw_tools(ui: &mut Ui, body: &mut Body) {
             && let Some(p) = beautify_json_with_vars(&body.raw)
         {
             body.raw = p;
+            tab.raw_json_valid = None;
         }
     }
     let label = body.raw_language.label();

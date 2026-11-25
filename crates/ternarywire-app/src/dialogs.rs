@@ -1132,9 +1132,10 @@ fn credential_header(name: &str) -> bool {
 /// says it is one (a header such as Authorization, a password parameter).
 fn credential_fields(item: &mut RequestItem) -> Vec<(String, bool, &mut String)> {
     use ternarywire_core::model::{KeyValue, RequestKind};
+    use ternarywire_core::protocols::McpTransport;
     fn list<'a>(out: &mut Vec<(String, bool, &'a mut String)>, name: &str, kvs: &'a mut [KeyValue]) {
         for (i, kv) in kvs.iter_mut().enumerate() {
-            let named = name == "header" && credential_header(&kv.key);
+            let named = matches!(name, "header" | "metadata" | "env" | "param") && credential_header(&kv.key);
             out.push((format!("{name}.{i}"), named, &mut kv.value));
         }
     }
@@ -1160,7 +1161,43 @@ fn credential_fields(item: &mut RequestItem) -> Vec<(String, bool, &mut String)>
             list(&mut out, "header", &mut w.headers);
             &mut w.auth
         }
-        other => other.auth_mut(),
+        RequestKind::Grpc(g) => {
+            out.push(("url".to_string(), false, &mut g.url));
+            list(&mut out, "metadata", &mut g.metadata);
+            out.push(("message".to_string(), false, &mut g.message));
+            &mut g.auth
+        }
+        RequestKind::Mqtt(m) => {
+            out.push(("url".to_string(), false, &mut m.url));
+            &mut m.auth
+        }
+        RequestKind::SocketIo(s) => {
+            out.push(("url".to_string(), false, &mut s.url));
+            list(&mut out, "param", &mut s.params);
+            list(&mut out, "header", &mut s.headers);
+            out.push(("auth_payload".to_string(), true, &mut s.auth_payload));
+            &mut s.auth
+        }
+        RequestKind::Mcp(m) => {
+            match &mut m.transport {
+                McpTransport::Http { url, headers } => {
+                    out.push(("url".to_string(), false, url));
+                    list(&mut out, "header", headers);
+                }
+                McpTransport::Stdio { args, env, .. } => {
+                    list(&mut out, "env", env);
+                    for (i, a) in args.iter_mut().enumerate() {
+                        out.push((format!("arg.{i}"), false, a));
+                    }
+                }
+            }
+            &mut m.auth
+        }
+        RequestKind::Ai(a) => {
+            out.push(("base_url".to_string(), false, &mut a.base_url));
+            out.push(("extra".to_string(), false, &mut a.extra));
+            &mut a.auth
+        }
     };
     let sensitive = auth.kind.sensitive_params();
     for (k, v) in auth.params.iter_mut() {
@@ -1187,6 +1224,9 @@ fn scrub(item: Option<&RequestItem>, secrets: &[String], stash: &mut Stash) -> O
             taken.insert(name, std::mem::take(value));
         }
     }
+    let auth = item.request.auth_mut();
+    let sensitive = auth.kind.sensitive_params();
+    auth.params.retain(|k, v| !sensitive.contains(&k.as_str()) || v.is_string());
     if !taken.is_empty() {
         stash.insert(item.id.clone(), taken);
     }
@@ -5168,6 +5208,72 @@ mod tests {
         restore_session(&mut app);
         assert_eq!(app.tabs[0].kind.scratch().and_then(|i| i.http()), Some(&req));
         assert!(!app.tab_has_unsaved_work(0));
+    }
+
+    #[test]
+    fn session_scrubs_and_restores_non_http_protocol_credentials() {
+        use ternarywire_core::model::{KeyValue, RequestKind};
+        use ternarywire_core::protocols::{GrpcRequest, McpRequest, McpTransport, SocketIoRequest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(dir.path());
+        let mut env = ternarywire_core::environment::Environment::new("Dev");
+        env.variables.push(ternarywire_core::variables::Variable::secret("tok", "super-secret-9999"));
+        let env = app.ws.add_environment(env);
+        app.ws.set_active_environment(Some(env));
+
+        let mut grpc_item = RequestItem::new("g", HttpRequest::default());
+        grpc_item.request = RequestKind::Grpc(GrpcRequest {
+            url: "grpcs://u:super-secret-9999@api.test".into(),
+            metadata: vec![KeyValue::new("authorization", "Bearer grpc-tok-1234")],
+            ..Default::default()
+        });
+        let mut sio_item = RequestItem::new("s", HttpRequest::default());
+        sio_item.request = RequestKind::SocketIo(SocketIoRequest {
+            url: "https://sio.test".into(),
+            headers: vec![KeyValue::new("x-api-key", "sio-key-5678")],
+            auth_payload: r#"{"token":"sio-handshake-secret"}"#.into(),
+            ..Default::default()
+        });
+        let mut mcp_item = RequestItem::new("m", HttpRequest::default());
+        mcp_item.request = RequestKind::Mcp(McpRequest {
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["server".into()],
+                env: vec![KeyValue::new("OPENAI_API_KEY", "sk-mcp-stdio-secret")],
+                cwd: String::new(),
+            },
+            ..Default::default()
+        });
+        let orig_grpc = grpc_item.clone();
+        let orig_sio = sio_item.clone();
+        let orig_mcp = mcp_item.clone();
+
+        app.add_tab(TabKind::Grpc(Box::new(crate::grpc_tab::GrpcTab::new(crate::proto_common::ItemSlot {
+            location: None,
+            scratch: Some(grpc_item),
+        }))));
+        app.add_tab(TabKind::SocketIo(Box::new(crate::sio_tab::SioTab::new(crate::proto_common::ItemSlot {
+            location: None,
+            scratch: Some(sio_item),
+        }))));
+        app.add_tab(TabKind::Mcp(Box::new(crate::mcp_tab::McpTab::new(crate::proto_common::ItemSlot {
+            location: None,
+            scratch: Some(mcp_item),
+        }))));
+
+        save_session(&mut app);
+        let file = std::fs::read_to_string(session_path(&app)).unwrap();
+        for secret in
+            ["super-secret-9999", "grpc-tok-1234", "sio-key-5678", "sio-handshake-secret", "sk-mcp-stdio-secret"]
+        {
+            assert!(!file.contains(secret), "{secret} leaked to session.json: {file}");
+        }
+        app.tabs.clear();
+        restore_session(&mut app);
+        assert_eq!(app.tabs[0].kind.scratch(), Some(&orig_grpc));
+        assert_eq!(app.tabs[1].kind.scratch(), Some(&orig_sio));
+        assert_eq!(app.tabs[2].kind.scratch(), Some(&orig_mcp));
     }
 
     /// External secrets that cannot be set up (the CA file is gone) are

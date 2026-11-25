@@ -123,10 +123,19 @@ ln -s usr/bin/ternarywire-app "$APPDIR/AppRun"
 cp packaging/linux/ternarywire.desktop "$APPDIR/ternarywire.desktop"
 cp packaging/linux/icons/hicolor/256x256/apps/ternarywire.png "$APPDIR/ternarywire.png"
 TOOL="${APPIMAGETOOL:-$ROOT/target/appimagetool-$ARCH.AppImage}"
+APPIMAGETOOL_VERSION="1.9.1"
+case "$ARCH" in
+  x86_64) APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0" ;;
+  aarch64) APPIMAGETOOL_SHA256="d6a061996de690434996c2a523eafedd0a23780aaf02d69ce364537e71607e94" ;;
+esac
 if [[ ! -x "$TOOL" ]]; then
-  curl --proto '=https' --tlsv1.2 -fsSL -o "$TOOL" \
-    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
-  chmod +x "$TOOL"
+  TMP_TOOL="${TOOL}.tmp.$$"
+  trap 'rm -f "$TMP_TOOL"' EXIT
+  curl --proto '=https' --tlsv1.2 -fsSL -o "$TMP_TOOL" \
+    "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${ARCH}.AppImage"
+  echo "${APPIMAGETOOL_SHA256}  ${TMP_TOOL}" | sha256sum -c - >/dev/null
+  chmod +x "$TMP_TOOL"
+  mv "$TMP_TOOL" "$TOOL"
 fi
 # Extract-and-run: CI machines have no FUSE.
 ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" "$OUT/TernaryWire-$VERSION-$ARCH.AppImage" >/dev/null

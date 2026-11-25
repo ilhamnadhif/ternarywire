@@ -3,6 +3,7 @@ name = "ternarywire-flows"
 description = "Local Flows: block-based request/condition/loop/script/AI flows, storage and executor"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

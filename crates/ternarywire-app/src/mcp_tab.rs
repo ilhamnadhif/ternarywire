@@ -1995,6 +1995,14 @@ fn answer_sampling(app: &mut TernaryWireApp, tab_id: u64, tab: &mut McpTab) {
         ai.temperature = Some(t as f32);
     }
     ai.mcp_servers.clear();
+    if ai.auth.is_inherit() {
+        ai.auth = app
+            .ws
+            .data
+            .collection(&cid)
+            .and_then(|c| c.effective_auth(&item.id).map(|e| e.auth.clone()))
+            .unwrap_or_else(ternarywire_core::auth::Auth::none);
+    }
     let resolve = resolver(app, Some(&cid));
     for key in ["token", "value"] {
         let v = ai.auth.get_string(key);

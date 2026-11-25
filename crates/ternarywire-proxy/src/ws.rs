@@ -43,6 +43,7 @@ struct Message {
     opcode: WsOpcode,
     compressed: bool,
     size: u64,
+    inflated: usize,
     data: Vec<u8>,
     cap: usize,
     truncated: bool,
@@ -202,6 +203,7 @@ impl WsSniffer {
                     opcode: if frame.opcode == 1 { WsOpcode::Text } else { WsOpcode::Binary },
                     compressed: rsv1,
                     size: 0,
+                    inflated: 0,
                     data: Vec::new(),
                     cap,
                     truncated: false,
@@ -218,6 +220,7 @@ impl WsSniffer {
                     opcode,
                     compressed: false,
                     size: len,
+                    inflated: 0,
                     data: Vec::new(),
                     cap: 125,
                     truncated: false,
@@ -297,9 +300,14 @@ impl WsSniffer {
     }
 }
 
+/// Maximum decompressed bytes inflated per WebSocket message before giving up
+/// on `permessage-deflate` (guards against deflate bombs).
+const MAX_INFLATE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Inflates `input` (raw DEFLATE, permessage-deflate) into `msg`, keeping
 /// the decompressor state across messages (context takeover).
 fn inflate(inflater: &mut Decompress, msg: &mut Message, mut input: &[u8]) -> Result<(), ()> {
+    let limit = msg.cap.saturating_mul(4).clamp(1024 * 1024, MAX_INFLATE_BYTES);
     let mut out = vec![0u8; 16 * 1024];
     loop {
         let (in_before, out_before) = (inflater.total_in(), inflater.total_out());
@@ -307,6 +315,10 @@ fn inflate(inflater: &mut Decompress, msg: &mut Message, mut input: &[u8]) -> Re
         let consumed = (inflater.total_in() - in_before) as usize;
         let produced = (inflater.total_out() - out_before) as usize;
         msg.push(&out[..produced]);
+        msg.inflated = msg.inflated.saturating_add(produced);
+        if msg.inflated > limit {
+            return Err(());
+        }
         input = &input[consumed..];
         match status {
             Status::StreamEnd => {
@@ -404,5 +416,26 @@ mod tests {
         s.feed(&[0x8f, 0x00, 0x81, 0x01, b'a']);
         assert!(s.broken);
         assert!(log.lock().messages.is_empty());
+    }
+
+    #[test]
+    fn compressed_deflate_bomb_is_bounded() {
+        use std::io::Write;
+        let log: SharedWsLog = Arc::new(Mutex::new(WsLog::new(64 * 1024)));
+        let mut s = WsSniffer::new(false, log.clone());
+        // Compress 3 MiB of zeros into a tiny ~3 KiB deflate payload.
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&vec![b'A'; 3 * 1024 * 1024]).unwrap();
+        enc.flush().unwrap();
+        let out = enc.finish().unwrap();
+        let payload = out.strip_suffix(&[0x00, 0x00, 0xff, 0xff]).unwrap_or(&out);
+        assert!(payload.len() < 16 * 1024);
+        let wire = frame(1, true, true, payload, None);
+        s.feed(&wire);
+        assert!(s.inflate_broken, "deflate bomb exceeding cap should stop inflation");
+        let log = log.lock();
+        assert_eq!(log.messages.len(), 1);
+        assert!(log.messages[0].truncated);
+        assert!(log.messages[0].size <= 1024 * 1024 + 16 * 1024, "inflated too far: {}", log.messages[0].size);
     }
 }

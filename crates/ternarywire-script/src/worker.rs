@@ -197,7 +197,7 @@ impl Worker {
     /// `__mp.exec(function () { ... })`. Returns the script and the length of
     /// the wrapper prefix on line 1.
     fn compile(&mut self, code: &str) -> Result<(Script, usize), String> {
-        let is_async = code.contains("await");
+        let is_async = Self::has_await_keyword(code);
         let prefix = if is_async { "__mp.exec(async function () {" } else { "__mp.exec(function () {" };
         let key = format!("{}{code}", if is_async { 'a' } else { 's' });
         if let Some(s) = self.cache.get(&key) {
@@ -215,6 +215,116 @@ impl Worker {
             }
             Err(e) => Err(syntax_message(&js_err_to_string(e, &mut self.ctx), prefix.len())),
         }
+    }
+
+    /// Returns true if `code` contains a standalone `await` keyword outside
+    /// comments (`//`, `/* */`) and string/template literals (still scanning
+    /// inside `${ ... }` template expressions).
+    fn has_await_keyword(code: &str) -> bool {
+        let b = code.as_bytes();
+        let n = b.len();
+        let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
+        let mut i = 0;
+        // Stack of brace depths for active `${ ... }` template expressions.
+        let mut tpl_braces: Vec<usize> = Vec::new();
+        while i < n {
+            match b[i] {
+                b'/' if i + 1 < n && b[i + 1] == b'/' => {
+                    i += 2;
+                    while i < n && b[i] != b'\n' && b[i] != b'\r' {
+                        i += 1;
+                    }
+                }
+                b'/' if i + 1 < n && b[i + 1] == b'*' => {
+                    i += 2;
+                    while i + 1 < n && !(b[i] == b'*' && b[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(n);
+                }
+                b'\'' | b'"' => {
+                    let q = b[i];
+                    i += 1;
+                    while i < n {
+                        if b[i] == b'\\' {
+                            i = (i + 2).min(n);
+                        } else if b[i] == q {
+                            i += 1;
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                b'`' => {
+                    i += 1;
+                    while i < n {
+                        if b[i] == b'\\' {
+                            i = (i + 2).min(n);
+                        } else if b[i] == b'$' && i + 1 < n && b[i + 1] == b'{' {
+                            tpl_braces.push(0);
+                            i += 2;
+                            break;
+                        } else if b[i] == b'`' {
+                            i += 1;
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                b'{' if !tpl_braces.is_empty() => {
+                    if let Some(d) = tpl_braces.last_mut() {
+                        *d += 1;
+                    }
+                    i += 1;
+                }
+                b'}' if !tpl_braces.is_empty() => {
+                    if let Some(d) = tpl_braces.last_mut() {
+                        if *d == 0 {
+                            tpl_braces.pop();
+                            i += 1;
+                            // Resume scanning the enclosing template literal.
+                            while i < n {
+                                if b[i] == b'\\' {
+                                    i = (i + 2).min(n);
+                                } else if b[i] == b'$' && i + 1 < n && b[i + 1] == b'{' {
+                                    tpl_braces.push(0);
+                                    i += 2;
+                                    break;
+                                } else if b[i] == b'`' {
+                                    i += 1;
+                                    break;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            continue;
+                        }
+                        *d -= 1;
+                    }
+                    i += 1;
+                }
+                c if is_ident(c) => {
+                    let start = i;
+                    while i < n && is_ident(b[i]) {
+                        i += 1;
+                    }
+                    if &b[start..i] == b"await" {
+                        // Skip property access like `obj.await`.
+                        let mut p = start;
+                        while p > 0 && b[p - 1].is_ascii_whitespace() {
+                            p -= 1;
+                        }
+                        if p == 0 || b[p - 1] != b'.' {
+                            return true;
+                        }
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        false
     }
 
     /// Evaluates a script, yielding regularly to check the deadline.

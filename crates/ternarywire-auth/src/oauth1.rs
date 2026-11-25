@@ -169,16 +169,45 @@ pub(crate) fn apply_with(req: &mut PreparedRequest, ov: &Overrides) -> Result<()
     }
 
     let form_body = is_form_body(req);
-    if auth.get_bool("includeBodyHash", false)
-        && !form_body
-        && let Some(body) = req.body.as_bytes()
-    {
-        let hash = match method {
-            Method::HmacSha256 | Method::RsaSha256 => B64.encode(Sha256::digest(body)),
-            Method::HmacSha512 | Method::RsaSha512 => B64.encode(Sha512::digest(body)),
-            _ => B64.encode(Sha1::digest(body)),
+    if auth.get_bool("includeBodyHash", false) && !form_body {
+        let hash = match &req.body {
+            PreparedBody::Bytes(body) => Some(match method {
+                Method::HmacSha256 | Method::RsaSha256 => B64.encode(Sha256::digest(body)),
+                Method::HmacSha512 | Method::RsaSha512 => B64.encode(Sha512::digest(body)),
+                _ => B64.encode(Sha1::digest(body)),
+            }),
+            PreparedBody::None => Some(match method {
+                Method::HmacSha256 | Method::RsaSha256 => B64.encode(Sha256::digest([])),
+                Method::HmacSha512 | Method::RsaSha512 => B64.encode(Sha512::digest([])),
+                _ => B64.encode(Sha1::digest([])),
+            }),
+            PreparedBody::File(path) => {
+                let h: String = crate::util::blocking(|| -> Result<String, AuthError> {
+                    match method {
+                        Method::HmacSha256 | Method::RsaSha256 => {
+                            let mut d = Sha256::new();
+                            crate::util::read_file(path, &mut |c| d.update(c))?;
+                            Ok(B64.encode(d.finalize()))
+                        }
+                        Method::HmacSha512 | Method::RsaSha512 => {
+                            let mut d = Sha512::new();
+                            crate::util::read_file(path, &mut |c| d.update(c))?;
+                            Ok(B64.encode(d.finalize()))
+                        }
+                        _ => {
+                            let mut d = Sha1::new();
+                            crate::util::read_file(path, &mut |c| d.update(c))?;
+                            Ok(B64.encode(d.finalize()))
+                        }
+                    }
+                })?;
+                Some(h)
+            }
+            PreparedBody::Multipart(_) => None,
         };
-        oauth.push(("oauth_body_hash".into(), hash));
+        if let Some(hash) = hash {
+            oauth.push(("oauth_body_hash".into(), hash));
+        }
     }
 
     // Signature parameters: query + oauth_* + form body.

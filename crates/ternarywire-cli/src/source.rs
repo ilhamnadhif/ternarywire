@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use ternarywire_core::environment::Environment;
 use ternarywire_core::model::Collection;
-use ternarywire_core::secrets::{FileBackend, KeychainBackend, SecretBackend, SecretStore};
+use ternarywire_core::secrets::{FileBackend, KeychainBackend, SecretStore};
 use ternarywire_core::storage::{LOCAL_DIR, Workspace, WorkspaceStore};
 use ternarywire_core::variables::{self, Variable, VariableScopes};
 
@@ -36,12 +36,13 @@ pub fn keychain_allowed(no_keychain: bool) -> bool {
 /// (or the keychain is disabled), otherwise the OS keychain.
 pub fn secret_store(root: &Path, workspace_id: &str, keychain: bool) -> SecretStore {
     let file = root.join(LOCAL_DIR).join("secrets.json");
-    let backend: Box<dyn SecretBackend> = if file.exists() || !keychain || !KeychainBackend::available() {
-        Box::new(FileBackend { path: file })
-    } else {
-        Box::new(KeychainBackend::for_workspace(workspace_id))
-    };
-    SecretStore::new(backend)
+    if !file.exists() && keychain && KeychainBackend::available() {
+        let store = SecretStore::new(Box::new(KeychainBackend::for_workspace(workspace_id)));
+        if store.load_error().is_none() {
+            return store;
+        }
+    }
+    SecretStore::new(Box::new(FileBackend { path: file }))
 }
 
 pub fn open_workspace(root: &Path, keychain: bool) -> Result<WsCtx> {

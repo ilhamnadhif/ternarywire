@@ -359,12 +359,16 @@ async fn run_flow(args: FlowRunArgs) -> Result<i32> {
             .reporter_json_export
             .clone()
             .unwrap_or_else(|| util::default_report_path("ternarywire-reports", &flow.name, "json"));
-        let report = json!({
+        let mut report = json!({
             "flow": {"id": flow.id, "name": flow.name, "file": file.path},
             "environment": vars.environment_name,
             "diagnostics": diags,
             "run": result,
         });
+        if !args.show_secrets {
+            let secrets = collect_flow_secrets(&ctx, &globals, environment.as_ref(), &vars);
+            redact_json_value(&mut report, &secrets);
+        }
         util::write_output(Some(&path), &serde_json::to_string_pretty(&report)?)
             .with_context(|| format!("could not write {}", path.display()))?;
         if !args.silent {
@@ -372,6 +376,120 @@ async fn run_flow(args: FlowRunArgs) -> Result<i32> {
         }
     }
     Ok(if result.success { 0 } else { 1 })
+}
+
+fn collect_flow_secrets(
+    ctx: &source::WsCtx,
+    globals: &[ternarywire_core::variables::Variable],
+    environment: Option<&ternarywire_core::Environment>,
+    vars: &VariableScopes,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for v in globals.iter().filter(|v| v.is_secret()) {
+        if !v.value.is_empty() {
+            out.push(v.value.clone());
+        }
+        if let Some(cur) = &v.current {
+            out.push(cur.clone());
+        }
+        if let Some(cur) = vars.globals.get(&v.key) {
+            out.push(cur.clone());
+        }
+    }
+    if let Some(env) = environment {
+        for v in env.variables.iter().filter(|v| v.is_secret()) {
+            if !v.value.is_empty() {
+                out.push(v.value.clone());
+            }
+            if let Some(cur) = &v.current {
+                out.push(cur.clone());
+            }
+            if let Some(cur) = vars.environment.get(&v.key) {
+                out.push(cur.clone());
+            }
+        }
+    }
+    for name in ctx.secrets.vault_names() {
+        if let Some(v) = ctx.secrets.vault_get(&name) {
+            out.push(v);
+        }
+    }
+    fn walk_auth(auth: &ternarywire_core::Auth, out: &mut Vec<String>) {
+        for &p in auth.kind.sensitive_params() {
+            let v = auth.get_string(p);
+            if !v.is_empty() && !ternarywire_core::variables::is_pure_reference(&v) {
+                out.push(v);
+            }
+        }
+    }
+    fn walk_items(items: &[ternarywire_core::Item], out: &mut Vec<String>) {
+        for item in items {
+            match item {
+                ternarywire_core::Item::Folder(f) => {
+                    walk_auth(&f.auth, out);
+                    for v in f.variables.iter().filter(|v| v.is_secret()) {
+                        out.push(v.value.clone());
+                        if let Some(cur) = &v.current {
+                            out.push(cur.clone());
+                        }
+                    }
+                    walk_items(&f.items, out);
+                }
+                ternarywire_core::Item::Request(r) => walk_auth(r.request.auth(), out),
+            }
+        }
+    }
+    for c in &ctx.ws.collections {
+        walk_auth(&c.auth, &mut out);
+        for v in c.variables.iter().filter(|v| v.is_secret()) {
+            out.push(v.value.clone());
+            if let Some(cur) = &v.current {
+                out.push(cur.clone());
+            }
+        }
+        walk_items(&c.items, &mut out);
+    }
+    out.retain(|s| s.len() >= 4);
+    out.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    out.dedup();
+    out
+}
+
+fn redact_json_value(v: &mut Value, secrets: &[String]) {
+    match v {
+        Value::String(s) => {
+            let masked_urls = ternarywire_runner::report::redact_urls_in(s);
+            if masked_urls != *s {
+                *s = masked_urls;
+            }
+            for secret in secrets {
+                if s.contains(secret.as_str()) {
+                    *s = s.replace(secret.as_str(), "•••");
+                }
+                let encoded = ternarywire_core::urlutil::encode_loose(secret);
+                if encoded != *secret && s.contains(encoded.as_str()) {
+                    *s = s.replace(&encoded, "•••");
+                }
+            }
+        }
+        Value::Array(items) => {
+            for x in items {
+                redact_json_value(x, secrets);
+            }
+        }
+        Value::Object(map) => {
+            for (k, x) in map.iter_mut() {
+                if let Value::String(val) = x {
+                    let masked = ternarywire_runner::report::redact_header(k, val);
+                    if masked != *val {
+                        *val = masked.to_string();
+                    }
+                }
+                redact_json_value(x, secrets);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A block that is running.
@@ -615,5 +733,34 @@ fn short(v: &Value) -> String {
         format!("{}…", one_line.chars().take(200).collect::<String>())
     } else {
         one_line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn redact_json_value_masks_secrets_urls_and_auth_headers() {
+        let mut report = json!({
+            "steps": [{
+                "output": {
+                    "url": "https://user:pw123@api.test/v1?api_key=raw_tok_9999",
+                    "headers": {
+                        "Authorization": "Bearer super_secret_token",
+                        "Content-Type": "application/json"
+                    },
+                    "body": "echo raw_tok_9999 and vault_val_1234"
+                }
+            }]
+        });
+        let secrets = vec!["raw_tok_9999".to_string(), "vault_val_1234".to_string()];
+        redact_json_value(&mut report, &secrets);
+        let text = report.to_string();
+        for leak in ["pw123", "raw_tok_9999", "super_secret_token", "vault_val_1234"] {
+            assert!(!text.contains(leak), "{leak} leaked in JSON report: {text}");
+        }
+        assert!(text.contains("application/json"), "{text}");
     }
 }

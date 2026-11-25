@@ -32,17 +32,42 @@ fn query_start(url: &str) -> Option<usize> {
     None
 }
 
+/// Byte index of the first `needle` byte outside `{{ }}` braces.
+fn find_outside_vars(s: &str, needle: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' if bytes.get(i + 1) == Some(&b'{') => {
+                depth += 1;
+                i += 2;
+                continue;
+            }
+            b'}' if bytes.get(i + 1) == Some(&b'}') && depth > 0 => {
+                depth -= 1;
+                i += 2;
+                continue;
+            }
+            b if b == needle && depth == 0 => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Splits into (before query, query without `?`, fragment including `#`).
 pub fn split(url: &str) -> (&str, Option<&str>, &str) {
     match query_start(url) {
         Some(q) => {
             let rest = &url[q + 1..];
-            match rest.find('#') {
+            match find_outside_vars(rest, b'#') {
                 Some(h) => (&url[..q], Some(&rest[..h]), &rest[h..]),
                 None => (&url[..q], Some(rest), ""),
             }
         }
-        None => match url.find('#') {
+        None => match find_outside_vars(url, b'#') {
             Some(h) => (&url[..h], None, &url[h..]),
             None => (url, None, ""),
         },
@@ -156,7 +181,11 @@ pub fn replace_query(url: &str, params: &[KeyValue]) -> String {
 
 /// Start of the path part (after `scheme://host`), tolerating variables.
 fn path_start(base: &str) -> usize {
-    let after_scheme = base.find("://").map(|i| i + 3).unwrap_or(0);
+    let in_var = |s: &str, at: usize| s[..at].matches("{{").count() > s[..at].matches("}}").count();
+    let after_scheme = match base.find("://") {
+        Some(i) if i > 0 && !base[..i].contains('/') && !in_var(base, i) => i + 3,
+        _ => 0,
+    };
     // Skip a leading `{{baseUrl}}`-style host.
     let rest = &base[after_scheme..];
     let mut i = 0;

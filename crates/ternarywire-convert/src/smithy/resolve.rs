@@ -680,6 +680,10 @@ fn flatten_one(
         diags.push(Diagnostic::error(shape.pos, format!("mixin cycle through `{}`", shape.name())).on(id));
         return;
     }
+    if stack.len() >= 256 {
+        diags.push(Diagnostic::error(shape.pos, format!("mixin nesting too deep at `{}`", shape.name())).on(id));
+        return;
+    }
     stack.push(id.to_string());
     let mixins: Vec<ShapeRef> = shape.mixins.clone();
     for m in &mixins {

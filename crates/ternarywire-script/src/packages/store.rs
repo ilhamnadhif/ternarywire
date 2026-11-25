@@ -25,25 +25,47 @@ const FILE_LOCK_STALE: Duration = Duration::from_secs(5);
 
 /// Serialises lockfile updates across processes (worker processes of the
 /// isolated engine, parallel CLI runs): `<lockfile>.lock`, created
-/// exclusively and removed when dropped.
-struct FileLock(PathBuf);
+/// exclusively with a unique owner token and removed only by its owner.
+struct FileLock {
+    path: PathBuf,
+    token: String,
+}
 
 impl FileLock {
     fn acquire(lockfile: &Path) -> Result<FileLock, String> {
+        use std::io::Write;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let mut name = lockfile.file_name().unwrap_or_default().to_os_string();
         name.push(".lock");
         let path = lockfile.with_file_name(name);
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        let token = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        );
         let started = Instant::now();
         loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(FileLock(path)),
+                Ok(mut f) => {
+                    let _ = f.write_all(token.as_bytes());
+                    return Ok(FileLock { path, token });
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
                     if age.is_some_and(|a| a >= FILE_LOCK_STALE) {
-                        let _ = std::fs::remove_file(&path);
+                        // Atomically rename the stale lock aside before removing
+                        // so two racing cleaners cannot unlink a fresh lock.
+                        let stale = path.with_file_name(format!(
+                            "{}.stale.{token}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                        if std::fs::rename(&path, &stale).is_ok() {
+                            let _ = std::fs::remove_file(&stale);
+                        }
                         continue;
                     }
                     if started.elapsed() >= FILE_LOCK_WAIT {
@@ -63,7 +85,9 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if std::fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

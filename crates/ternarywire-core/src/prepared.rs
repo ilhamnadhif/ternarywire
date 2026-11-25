@@ -234,11 +234,15 @@ pub fn prepare(req: &HttpRequest, ctx: &PrepareContext<'_>) -> PreparedRequest {
                     }
                     FormFieldKind::File => {
                         for file in &f.files {
-                            parts.push(MultipartPart {
-                                name: name.clone(),
-                                value: MultipartValue::File(resolve_path(&r(file), ctx.base_dir)),
-                                content_type: content_type.clone(),
-                            });
+                            let path = r(file.trim());
+                            let path = path.trim();
+                            if !path.is_empty() {
+                                parts.push(MultipartPart {
+                                    name: name.clone(),
+                                    value: MultipartValue::File(resolve_path(path, ctx.base_dir)),
+                                    content_type: content_type.clone(),
+                                });
+                            }
                         }
                     }
                 }

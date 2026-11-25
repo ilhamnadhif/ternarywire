@@ -137,7 +137,7 @@ impl CookieJar {
             cookie_store::serde::json::save_incl_expired_and_nonpersistent(&fresh, &mut buf)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
-        ternarywire_core::storage::write_atomic(path, &buf)
+        ternarywire_core::storage::write_atomic_private(path, &buf)
     }
 
     pub fn list(&self) -> Vec<CookieInfo> {

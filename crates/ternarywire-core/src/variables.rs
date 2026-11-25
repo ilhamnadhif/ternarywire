@@ -497,6 +497,17 @@ pub trait VaultLookup: Send + Sync {
 
 pub const VAULT_PREFIX: &str = "vault:";
 const MAX_DEPTH: usize = 10;
+/// Total variable expansions allowed in a single [`Resolver::resolve`] call,
+/// preventing exponential DAG ("billion laughs") blowups within `MAX_DEPTH`.
+const MAX_EXPANSIONS: usize = 10_000;
+/// Maximum output size produced by a single [`Resolver::resolve`] call.
+const MAX_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Default)]
+struct ResolveBudget {
+    expansions: usize,
+    bytes: usize,
+}
 
 /// Resolves `{{name}}` references against a set of scopes.
 #[derive(Clone, Copy)]
@@ -533,40 +544,76 @@ impl<'a> Resolver<'a> {
 
     /// Resolves every reference in `input`. Unknown names are left as-is.
     pub fn resolve(&self, input: &str) -> String {
-        self.resolve_inner(input, &mut Vec::new(), &mut None)
+        let mut budget = ResolveBudget::default();
+        self.resolve_inner(input, &mut Vec::new(), &mut None, &mut budget)
     }
 
     /// Like [`resolve`](Self::resolve) and also reports unresolved names.
     pub fn resolve_tracking(&self, input: &str, unresolved: &mut Vec<String>) -> String {
         let mut sink = Some(std::mem::take(unresolved));
-        let out = self.resolve_inner(input, &mut Vec::new(), &mut sink);
+        let mut budget = ResolveBudget::default();
+        let out = self.resolve_inner(input, &mut Vec::new(), &mut sink, &mut budget);
         *unresolved = sink.unwrap_or_default();
         out
     }
 
     /// `expanding` holds the names whose values are being resolved; a
     /// reference back to one of them (a cycle) is left as-is.
-    fn resolve_inner(&self, input: &str, expanding: &mut Vec<String>, unresolved: &mut Option<Vec<String>>) -> String {
+    fn resolve_inner(
+        &self,
+        input: &str,
+        expanding: &mut Vec<String>,
+        unresolved: &mut Option<Vec<String>>,
+        budget: &mut ResolveBudget,
+    ) -> String {
         if !input.contains("{{") {
             return input.to_string();
         }
-        let mut out = String::with_capacity(input.len());
+        let mut out = String::with_capacity(input.len().min(64 * 1024));
         for tok in tokenize(input) {
             match tok.kind {
-                TokenKind::Text => out.push_str(&input[tok.range]),
+                TokenKind::Text => {
+                    let s = &input[tok.range];
+                    if budget.bytes.saturating_add(s.len()) <= MAX_EXPANDED_BYTES {
+                        out.push_str(s);
+                        budget.bytes = budget.bytes.saturating_add(s.len());
+                    }
+                }
                 TokenKind::Variable => {
+                    let raw = &input[tok.range.clone()];
                     let name = &input[tok.name_range.clone()];
-                    if expanding.iter().any(|n| n == name.trim()) {
-                        out.push_str(&input[tok.range]);
+                    if expanding.iter().any(|n| n == name.trim())
+                        || budget.expansions >= MAX_EXPANSIONS
+                        || budget.bytes >= MAX_EXPANDED_BYTES
+                    {
+                        if budget.bytes.saturating_add(raw.len()) <= MAX_EXPANDED_BYTES {
+                            out.push_str(raw);
+                            budget.bytes = budget.bytes.saturating_add(raw.len());
+                        }
                         continue;
                     }
                     match self.lookup(name) {
                         Some((value, _)) if expanding.len() < MAX_DEPTH && value.contains("{{") => {
+                            budget.expansions += 1;
                             expanding.push(name.trim().to_string());
-                            out.push_str(&self.resolve_inner(&value, expanding, unresolved));
+                            let expanded = self.resolve_inner(&value, expanding, unresolved, budget);
                             expanding.pop();
+                            out.push_str(&expanded);
                         }
-                        Some((value, _)) => out.push_str(&value),
+                        Some((value, _)) => {
+                            budget.expansions += 1;
+                            if budget.bytes.saturating_add(value.len()) <= MAX_EXPANDED_BYTES {
+                                out.push_str(&value);
+                                budget.bytes = budget.bytes.saturating_add(value.len());
+                            } else {
+                                let mut cut = MAX_EXPANDED_BYTES.saturating_sub(budget.bytes).min(value.len());
+                                while cut > 0 && !value.is_char_boundary(cut) {
+                                    cut -= 1;
+                                }
+                                out.push_str(&value[..cut]);
+                                budget.bytes = MAX_EXPANDED_BYTES;
+                            }
+                        }
                         None => {
                             // Trimmed like the lookup (and `references`).
                             let name = name.trim();
@@ -575,7 +622,10 @@ impl<'a> Resolver<'a> {
                             {
                                 list.push(name.to_string());
                             }
-                            out.push_str(&input[tok.range]);
+                            if budget.bytes.saturating_add(raw.len()) <= MAX_EXPANDED_BYTES {
+                                out.push_str(raw);
+                                budget.bytes = budget.bytes.saturating_add(raw.len());
+                            }
                         }
                     }
                 }

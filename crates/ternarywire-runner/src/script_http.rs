@@ -59,7 +59,9 @@ impl ScriptHttp for PipelineHttp {
         if let Some(v) = &self.services.vault {
             resolver = resolver.with_vault(v.as_ref());
         }
-        check_script_files(&Body::default(), &http.body, &resolver, self.base_dir.as_deref())
+        let empty_scopes = VariableScopes::default();
+        let empty_resolver = Resolver::new(&empty_scopes);
+        check_script_files(&Body::default(), &http.body, &empty_resolver, &resolver, self.base_dir.as_deref())
             .map_err(|e| format!("pm.sendRequest: {e}"))?;
         let auth = Auth::none();
         let ctx = PrepareContext {
@@ -103,21 +105,31 @@ fn body_files(b: &Body) -> Vec<&str> {
     }
 }
 
-/// Checks the files a script put in `body`: like Postman's working
-/// directory, they must be relative paths that stay inside `base_dir`
-/// (symlinks resolved), so a script cannot upload arbitrary local files.
-/// Paths that `saved` (the request before the script ran) already had are
-/// the user's own and keep working as before.
+/// Checks the files a script put in `body` — OR redirected via variable
+/// mutations in a pre-request script: like Postman's working directory, they
+/// must be relative paths that stay inside `base_dir` (symlinks resolved), so
+/// a script cannot upload arbitrary local files. Paths whose resolved target
+/// matches what `saved` already resolved to before scripts ran are the user's
+/// own and keep working as before.
 pub(crate) fn check_script_files(
     saved: &Body,
     body: &Body,
-    resolver: &Resolver<'_>,
+    before_resolver: &Resolver<'_>,
+    after_resolver: &Resolver<'_>,
     base_dir: Option<&Path>,
 ) -> Result<(), String> {
-    let known = |p: &str| saved.binary_path == p || saved.form_data.iter().any(|f| f.files.iter().any(|s| s == p));
-    for raw in body_files(body).into_iter().filter(|p| !known(p)) {
-        let resolved = resolver.resolve(raw);
-        let path = Path::new(&resolved);
+    let known_resolved: Vec<String> = body_files(saved)
+        .into_iter()
+        .map(|p| before_resolver.resolve(p.trim()).trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    for raw in body_files(body) {
+        let resolved = after_resolver.resolve(raw.trim());
+        let resolved = resolved.trim();
+        if resolved.is_empty() || known_resolved.iter().any(|k| k == resolved) {
+            continue;
+        }
+        let path = Path::new(resolved);
         let refused = |why: &str| format!("file \"{resolved}\" set by a script was not sent: {why}");
         let Some(base) = base_dir else {
             return Err(refused("scripts can only send files from the working directory, and this run has none"));
@@ -132,4 +144,49 @@ pub(crate) fn check_script_files(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variable_mutation_cannot_redirect_binary_body_outside_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("etc_passwd_mock");
+        std::fs::write(&victim, "root:x:0:0").unwrap();
+
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("safe.bin"), "safe").unwrap();
+
+        let body = Body { mode: BodyMode::Binary, binary_path: "{{upload_path}}".into(), ..Default::default() };
+
+        let mut before_scopes = VariableScopes::default();
+        before_scopes.environment.insert("upload_path".into(), "safe.bin".into());
+        let mut after_scopes = VariableScopes::default();
+        after_scopes.environment.insert("upload_path".into(), victim.display().to_string());
+
+        // Even though `body` itself did not change, the resolved path changed via variable mutation -> MUST BE BLOCKED!
+        let err = check_script_files(
+            &body,
+            &body,
+            &Resolver::new(&before_scopes),
+            &Resolver::new(&after_scopes),
+            Some(ws.path()),
+        )
+        .unwrap_err();
+        assert!(err.contains("relative"), "{err}");
+
+        // Without variable mutation (same resolved path as before script), allowed.
+        assert!(
+            check_script_files(
+                &body,
+                &body,
+                &Resolver::new(&before_scopes),
+                &Resolver::new(&before_scopes),
+                Some(ws.path()),
+            )
+            .is_ok()
+        );
+    }
 }

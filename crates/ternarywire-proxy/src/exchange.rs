@@ -85,6 +85,9 @@ struct Inner {
     entry: CaptureEntry,
     req: Recorder,
     resp: Recorder,
+    /// Bytes currently reserved in `Store::in_flight` for this exchange (not yet
+    /// moved into a published `CaptureEntry` snapshot).
+    in_flight: usize,
     published: bool,
     /// Set when a content-type filter decides visibility at response time.
     deferred_filter: Option<CaptureFilter>,
@@ -98,11 +101,6 @@ impl Inner {
         e.request_body = self.req.snapshot();
         e.response_body = self.resp.snapshot();
         e
-    }
-
-    /// Body bytes buffered (reserved in the store as in flight).
-    fn buffered(&self) -> usize {
-        self.req.buf.len() + self.resp.buf.len()
     }
 }
 
@@ -121,6 +119,7 @@ impl Exchange {
                 entry,
                 req: Recorder::new(max_body),
                 resp: Recorder::new(max_body),
+                in_flight: 0,
                 published: !deferred,
                 deferred_filter: deferred.then(|| filter.clone()),
                 discarded: false,
@@ -137,13 +136,16 @@ impl Exchange {
             return;
         }
         let id = inner.entry.id;
-        let recorder = match side {
-            Side::Request => &mut inner.req,
-            Side::Response => &mut inner.resp,
+        let want = match side {
+            Side::Request => inner.req.room(data.len()),
+            Side::Response => inner.resp.room(data.len()),
         };
-        let want = recorder.room(data.len());
         let keep = if want > 0 { self.store.reserve(id, want) } else { 0 };
-        recorder.push(data, keep);
+        inner.in_flight += keep;
+        match side {
+            Side::Request => inner.req.push(data, keep),
+            Side::Response => inner.resp.push(data, keep),
+        }
     }
 
     fn trailers(&self, side: Side, trailers: &HeaderMap) {
@@ -169,7 +171,7 @@ impl Exchange {
     /// Response headers arrived: fills the entry and publishes it (or drops
     /// it when the content-type filter rejects it).
     pub fn response_head(&self, status: u16, headers: &HeaderMap, upstream_version: &str, timings: crate::Timings) {
-        let (snapshot, was_published) = {
+        let (snapshot, was_published, release) = {
             let mut inner = self.inner.lock();
             if inner.finished {
                 return;
@@ -183,7 +185,7 @@ impl Exchange {
                 && !f.allows_content_type(inner.entry.response_header("content-type"))
             {
                 inner.discarded = true;
-                let freed = inner.buffered();
+                let freed = std::mem::take(&mut inner.in_flight);
                 inner.req = Recorder::new(0);
                 inner.resp = Recorder::new(0);
                 drop(inner);
@@ -192,18 +194,15 @@ impl Exchange {
             }
             let was = inner.published;
             inner.published = true;
-            (inner.snapshot(), was)
+            let release = std::mem::take(&mut inner.in_flight);
+            (inner.snapshot(), was, release)
         };
-        if was_published {
-            self.store.update(snapshot);
-        } else {
-            self.store.insert(snapshot);
-        }
+        self.store.put(snapshot, !was_published, release);
     }
 
     /// Changes the entry and publishes the change (if it is visible).
     pub fn update(&self, f: impl FnOnce(&mut CaptureEntry)) {
-        let snapshot = {
+        let (snapshot, release) = {
             let mut inner = self.inner.lock();
             if inner.finished {
                 return;
@@ -212,14 +211,15 @@ impl Exchange {
             if inner.discarded || !inner.published {
                 return;
             }
-            inner.snapshot()
+            let release = std::mem::take(&mut inner.in_flight);
+            (inner.snapshot(), release)
         };
-        self.store.update(snapshot);
+        self.store.put(snapshot, false, release);
     }
 
     /// Finalizes the entry: bodies, total time, state. Later calls are ignored.
     pub fn finish(&self, error: Option<String>) {
-        let (entry, was_published, buffered) = {
+        let (entry, was_published, release) = {
             let mut inner = self.inner.lock();
             if inner.finished {
                 return;
@@ -230,7 +230,7 @@ impl Exchange {
                 inner.entry.error = error;
             }
             inner.entry.state = if inner.entry.error.is_some() { EntryState::Failed } else { EntryState::Complete };
-            let buffered = inner.buffered();
+            let release = std::mem::take(&mut inner.in_flight);
             let hidden = inner.discarded
                 || (!inner.published
                     && inner
@@ -241,17 +241,17 @@ impl Exchange {
                 inner.req = Recorder::new(0);
                 inner.resp = Recorder::new(0);
                 drop(inner);
-                self.store.release(buffered);
+                self.store.release(release);
                 return;
             }
             let req = inner.req.take();
             let resp = inner.resp.take();
             inner.entry.request_body = req;
             inner.entry.response_body = resp;
-            (inner.entry.clone(), inner.published, buffered)
+            (inner.entry.clone(), inner.published, release)
         };
         // The buffers move into the stored entry: stored, no longer in flight.
-        self.store.put(entry, !was_published, buffered);
+        self.store.put(entry, !was_published, release);
     }
 
     /// Finalizes with an error.
@@ -335,5 +335,36 @@ impl Drop for TeeBody {
             Side::Response => "the client closed the connection before the response finished".to_owned(),
         });
         self.exchange.body_end(self.side, error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entry::CaptureEntry;
+    use crate::{CaptureFilter, EntryKind};
+
+    #[test]
+    fn request_body_is_not_double_counted_at_response_head() {
+        let store = Arc::new(Store::new(10, 100, None));
+        let entry = CaptureEntry::new(store.next_id(), "127.0.0.1:1".parse().unwrap(), EntryKind::Http);
+        let id = entry.id;
+        let ex = Exchange::begin(store.clone(), entry, 100, &CaptureFilter::default());
+        // Request body takes 60% of the 100-byte total store budget.
+        ex.record(Side::Request, &[b'q'; 60]);
+        assert_eq!((store.stored_bytes(), store.in_flight_bytes()), (0, 60));
+
+        // Publishing response head moves request bytes into stored without double-counting.
+        ex.response_head(200, &HeaderMap::new(), "HTTP/1.1", crate::Timings::default());
+        assert_eq!((store.stored_bytes(), store.in_flight_bytes()), (60, 0));
+
+        // Remaining 40 bytes of budget are available for the response body!
+        ex.record(Side::Response, &[b'r'; 40]);
+        assert_eq!((store.stored_bytes(), store.in_flight_bytes()), (60, 40));
+        ex.finish(None);
+        assert_eq!((store.stored_bytes(), store.in_flight_bytes()), (100, 0));
+        let final_entry = store.get(id).unwrap();
+        assert_eq!(final_entry.request_body.data.len(), 60);
+        assert_eq!(final_entry.response_body.data.len(), 40);
     }
 }

@@ -3,6 +3,7 @@ name = "ternarywire-proxy"
 description = "Local capture proxy for TernaryWire: HTTP forwarding, HTTPS interception with a local CA, CONNECT tunnels"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

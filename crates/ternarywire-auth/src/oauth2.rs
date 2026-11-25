@@ -146,7 +146,10 @@ pub(crate) fn parse_token(fields: &HashMap<String, Value>, token_name: &str) -> 
     }
     let access_token = s("access_token").ok_or_else(|| AuthError::OAuth2("response has no access_token".into()))?;
     let now = now_secs();
-    let expires_at = s("expires_in").and_then(|e| e.parse::<f64>().ok()).map(|e| now + e as i64);
+    let expires_at = s("expires_in")
+        .and_then(|e| e.parse::<f64>().ok())
+        .filter(|e| e.is_finite() && *e >= 0.0)
+        .map(|e| now.saturating_add(e.min(i64::MAX as f64) as i64));
     Ok(OAuth2Token {
         access_token,
         token_type: s("token_type").unwrap_or_else(|| "Bearer".into()),
@@ -450,6 +453,9 @@ pub fn authorization_url(
 ) -> Result<String, AuthError> {
     let base = require(auth, "authUrl")?;
     let mut url = url::Url::parse(base).map_err(|_| AuthError::Url(base.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AuthError::OAuth2(format!("authorization URL must use http or https (got {}://)", url.scheme())));
+    }
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", response_type);
@@ -737,5 +743,26 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let err = rt.block_on(bind_redirect("https://oauth.example.com/callback")).err().unwrap();
         assert!(err.to_string().contains("localhost"));
+    }
+
+    #[test]
+    fn authorization_url_rejects_unsafe_schemes() {
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com/auth"] {
+            let auth = Auth::new(ternarywire_core::AuthType::OAuth2).with("authUrl", bad).with("clientId", "c");
+            assert!(authorization_url(&auth, "code", "http://localhost:1/cb", "s", None).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parse_token_clamps_extreme_expires_in() {
+        let map = |v: Value| -> HashMap<String, Value> {
+            HashMap::from([("access_token".to_string(), Value::String("a".into())), ("expires_in".to_string(), v)])
+        };
+        let huge = parse_token(&map(serde_json::json!(1e30)), "").unwrap();
+        assert!(huge.expires_at.is_some());
+        let neg = parse_token(&map(serde_json::json!(-5)), "").unwrap();
+        assert!(neg.expires_at.is_none());
+        let nan_str = parse_token(&map(serde_json::json!("NaN")), "").unwrap();
+        assert!(nan_str.expires_at.is_none());
     }
 }

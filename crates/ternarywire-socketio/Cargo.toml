@@ -3,6 +3,7 @@ name = "ternarywire-socketio"
 description = "Socket.IO v2/v3/v4 (Engine.IO 3/4, polling and WebSocket) client sessions for TernaryWire"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

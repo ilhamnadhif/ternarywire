@@ -14,6 +14,16 @@ pub(crate) struct Reference {
 
 impl Reference {
     pub fn parse(input: &str) -> Result<Reference, SecretError> {
+        Self::parse_inner(input, true)
+    }
+
+    /// Parses a reference while preserving leading/trailing `/` in the secret
+    /// name (e.g. AWS Secrets Manager names like `/prod/api/key`).
+    pub fn parse_raw(input: &str) -> Result<Reference, SecretError> {
+        Self::parse_inner(input, false)
+    }
+
+    fn parse_inner(input: &str, trim_slashes: bool) -> Result<Reference, SecretError> {
         let input = input.trim();
         let (rest, field) = match input.rsplit_once('#') {
             Some((r, f)) => (r, Some(f.trim().to_string()).filter(|f| !f.is_empty())),
@@ -23,7 +33,8 @@ impl Reference {
             Some((p, q)) => (p, q),
             None => (rest, ""),
         };
-        let path = path.trim().trim_matches('/').to_string();
+        let path = path.trim();
+        let path = if trim_slashes { path.trim_matches('/') } else { path }.to_string();
         if path.is_empty() {
             return Err(SecretError::reference(format!("Reference \"{input}\" has no secret name or path.")));
         }
@@ -115,7 +126,11 @@ pub(crate) fn encode_path(path: &str) -> String {
         .remove(b',');
     path.split('/')
         .filter(|s| !s.is_empty())
-        .map(|s| percent_encoding::utf8_percent_encode(s, SEGMENT).to_string())
+        .map(|s| match s {
+            "." => "%2E".to_string(),
+            ".." => "%2E%2E".to_string(),
+            _ => percent_encoding::utf8_percent_encode(s, SEGMENT).to_string(),
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -155,5 +170,15 @@ mod tests {
     #[test]
     fn encodes_segments() {
         assert_eq!(encode_path("/a b/c%d//e"), "a%20b/c%25d/e");
+        assert_eq!(encode_path("/a/.././b"), "a/%2E%2E/%2E/b");
+    }
+
+    #[test]
+    fn parse_raw_preserves_leading_slash() {
+        let r = Reference::parse_raw(" /prod/api/key#pw ").unwrap();
+        assert_eq!(r.path, "/prod/api/key");
+        assert_eq!(r.field.as_deref(), Some("pw"));
+        let r2 = Reference::parse_raw("prod/api/key").unwrap();
+        assert_eq!(r2.path, "prod/api/key");
     }
 }

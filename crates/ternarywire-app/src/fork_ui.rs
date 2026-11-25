@@ -12,12 +12,16 @@ use crate::dialogs::{
 use crate::i18n::{tr, trf};
 use crate::{icons, kit, theme};
 
+type DiffRow = (DiffOp, Option<usize>, Option<usize>, String);
+
 pub struct ForkSync {
     pub fork: Id,
     /// Pull parent → fork, or merge fork → parent.
     pub pull: bool,
     pub plan: Plan,
     pub selected: usize,
+    /// Cached `line_diff` rows and longest line width for `selected`.
+    diff_cache: Option<(usize, Vec<DiffRow>, f32)>,
 }
 
 impl ForkSync {
@@ -26,7 +30,7 @@ impl ForkSync {
         let parent = app.ws.data.collection(&link.parent)?;
         let fork = app.ws.data.collection(fork_id)?;
         let plan = if pull { fork::plan_pull(link, parent, fork) } else { fork::plan_merge(link, parent, fork) };
-        Some(ForkSync { fork: fork_id.to_string(), pull, plan, selected: 0 })
+        Some(ForkSync { fork: fork_id.to_string(), pull, plan, selected: 0, diff_cache: None })
     }
 }
 
@@ -88,9 +92,15 @@ pub fn show(app: &mut TernaryWireApp, ctx: &egui::Context, s: &mut ForkSync) -> 
             let current = s.selected;
             let mut select = None;
             let n = s.plan.entries.iter().filter(|e| e.apply).count();
+            let shown = s.plan.entries.get(current).map(|e| (e.name.clone(), e.kind));
+            if let Some(e) = s.plan.entries.get(current)
+                && s.diff_cache.as_ref().is_none_or(|(idx, _, _)| *idx != current)
+            {
+                let (rows, longest) = compute_diff_rows(&e.target_text, &e.source_text);
+                s.diff_cache = Some((current, rows, longest));
+            }
             let entries = &mut s.plan.entries;
-            let shown =
-                entries.get(current).map(|e| (e.name.clone(), e.kind, e.target_text.clone(), e.source_text.clone()));
+            let diff_cache = &s.diff_cache;
             let height = room(ui).min(440.0);
             split(
                 ui,
@@ -113,7 +123,7 @@ pub fn show(app: &mut TernaryWireApp, ctx: &egui::Context, s: &mut ForkSync) -> 
                     });
                 },
                 |ui| {
-                    let Some((name, kind, old, new)) = &shown else { return };
+                    let Some((name, kind)) = &shown else { return };
                     pane_bar(ui, 48.0, 16.0, |ui| {
                         let p = theme::pal(ui);
                         ui.label(RichText::new(name).font(theme::semibold(13.0)).color(p.text));
@@ -125,7 +135,9 @@ pub fn show(app: &mut TernaryWireApp, ctx: &egui::Context, s: &mut ForkSync) -> 
                             ui.label(RichText::new(format!("+ {source}")).size(12.0).color(p.ok));
                         });
                     });
-                    diff_view(ui, old, new);
+                    if let Some((_, rows, longest)) = diff_cache {
+                        diff_view(ui, rows, *longest);
+                    }
                 },
             );
             if let Some(i) = select {
@@ -244,11 +256,7 @@ fn change_row(ui: &mut Ui, e: &mut fork::PlanEntry, selected: bool, source: &str
     resp.clicked()
 }
 
-/// The line diff (`.dl-diffv`): 22 px mono rows with the old and new line
-/// numbers, a +/− column, added lines on the ok tint and removed ones on
-/// the err tint.
-fn diff_view(ui: &mut Ui, old: &str, new: &str) {
-    let p = theme::pal(ui);
+fn compute_diff_rows(old: &str, new: &str) -> (Vec<DiffRow>, f32) {
     let mut rows = Vec::new();
     let (mut a, mut b) = (0usize, 0usize);
     for (op, line) in fork::line_diff(old, new) {
@@ -267,14 +275,22 @@ fn diff_view(ui: &mut Ui, old: &str, new: &str) {
                 (None, Some(b))
             }
         };
-        rows.push((op, na, nb, line));
+        rows.push((op, na, nb, line.to_string()));
     }
     let longest = rows.iter().map(|r| r.3.chars().count()).max().unwrap_or(0) as f32;
+    (rows, longest)
+}
+
+/// The line diff (`.dl-diffv`): 22 px mono rows with the old and new line
+/// numbers, a +/− column, added lines on the ok tint and removed ones on
+/// the err tint.
+fn diff_view(ui: &mut Ui, rows: &[DiffRow], longest: f32) {
+    let p = theme::pal(ui);
     egui::ScrollArea::both().id_salt("fork-diff").auto_shrink([false; 2]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let width = ui.available_width().max(34.0 * 2.0 + 26.0 + longest * 7.3 + 16.0);
         ui.add_space(8.0);
-        for (op, na, nb, line) in &rows {
+        for (op, na, nb, line) in rows {
             let (rect, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
             if !ui.is_rect_visible(rect) {
                 continue;

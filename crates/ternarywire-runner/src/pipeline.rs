@@ -424,15 +424,17 @@ pub(crate) async fn execute_keeping_locals(
 
     // Pre-request scripts.
     let pre = script_chain(&chain, &item.scripts, &item.name, ScriptEvent::PreRequest);
-    // The body before scripts: files it names are the user's, not a script's.
+    // The body and variable scopes before scripts: files they already resolve
+    // to are the user's, not a script's.
     let own_body = request.body.clone();
+    let pre_scopes = (!pre.is_empty()).then(|| with_folder_vars(vars, &chain));
     if !pre.is_empty() {
-        let before = with_folder_vars(vars, &chain);
+        let before = pre_scopes.as_ref().expect("pre_scopes");
         let mut job = ScriptJob::new(ScriptEvent::PreRequest, pre, script_request(&item.id, &item.name, &request));
         job.info = info.clone();
         job.variables = before.clone();
         // The URL as it will be sent: folder variables and vault included.
-        let mut url_resolver = Resolver::new(&before);
+        let mut url_resolver = Resolver::new(before);
         if let Some(v) = &services.vault {
             url_resolver = url_resolver.with_vault(v.as_ref());
         }
@@ -441,7 +443,7 @@ pub(crate) async fn execute_keeping_locals(
         job.packages = services.packages.clone();
         let mut outcome = run_scripts(services, job, cancel).await;
         exec.absorb(ScriptEvent::PreRequest, &mut outcome);
-        merge_script_scopes(vars, &before, std::mem::take(&mut outcome.variables));
+        merge_script_scopes(vars, before, std::mem::take(&mut outcome.variables));
         apply_script_request(&mut request, &outcome.request);
         if outcome.skip_request {
             exec.skipped = true;
@@ -471,13 +473,23 @@ pub(crate) async fn execute_keeping_locals(
     if let Some(v) = &services.vault {
         resolver = resolver.with_vault(v.as_ref());
     }
-    if request.body != own_body
-        && let Err(e) = crate::script_http::check_script_files(&own_body, &request.body, &resolver, input.base_dir)
-    {
-        exec.network(ConsoleKind::Error, e.clone());
-        exec.error = Some(HttpError::new(ternarywire_http::HttpErrorKind::Other, e));
-        exec.request = Some(request);
-        return exec;
+    if let Some(before) = &pre_scopes {
+        let mut before_resolver = Resolver::new(before);
+        if let Some(v) = &services.vault {
+            before_resolver = before_resolver.with_vault(v.as_ref());
+        }
+        if let Err(e) = crate::script_http::check_script_files(
+            &own_body,
+            &request.body,
+            &before_resolver,
+            &resolver,
+            input.base_dir,
+        ) {
+            exec.network(ConsoleKind::Error, e.clone());
+            exec.error = Some(HttpError::new(ternarywire_http::HttpErrorKind::Other, e));
+            exec.request = Some(request);
+            return exec;
+        }
     }
     let ctx = PrepareContext {
         resolver,

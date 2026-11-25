@@ -725,13 +725,9 @@ pub mod protocol {
                 set_str(url, v, "url");
                 set_kv(headers, v, "headers");
             }
-            McpTransport::Stdio { command, args, env, cwd } => {
-                set_str(command, v, "command");
-                if let Some(list) = v.get("args").and_then(|a| serde_json::from_value::<Vec<String>>(a.clone()).ok()) {
-                    *args = list;
-                }
-                set_kv(env, v, "env");
-                set_str(cwd, v, "cwd");
+            McpTransport::Stdio { .. } => {
+                // Sandbox boundary: pre-request scripts must not overwrite local
+                // OS process execution parameters (`command`, `args`, `env`, `cwd`).
             }
         }
         if let Some(c) = call {

@@ -42,7 +42,16 @@ impl KeychainCa {
             Ok("file") => SecretStore::new(Box::new(file())),
             Ok("memory") => SecretStore::memory(),
             _ if KeychainBackend::available() => {
-                SecretStore::new(Box::new(KeychainBackend::for_workspace("capture-proxy")))
+                let s = SecretStore::new(Box::new(KeychainBackend::for_workspace("capture-proxy")));
+                if s.load_error().is_none() {
+                    s
+                } else {
+                    tracing::warn!(
+                        "capture CA keychain unavailable ({:?}); falling back to a local file",
+                        s.load_error()
+                    );
+                    SecretStore::new(Box::new(file()))
+                }
             }
             _ => SecretStore::new(Box::new(file())),
         };
@@ -60,9 +69,23 @@ impl CaStore for KeychainCa {
 
     fn save(&self, pem: &CaPem) -> Result<(), String> {
         self.0.set("ca_cert", &pem.cert_pem);
+        if let Some(err) = self.0.last_save_error() {
+            return Err(err);
+        }
         self.0.set("ca_key", &pem.key_pem);
+        if let Some(err) = self.0.last_save_error() {
+            return Err(err);
+        }
         Ok(())
     }
+}
+
+struct DecodedBodies {
+    key: (u64, EntryState, usize, usize),
+    req_display: Option<String>,
+    resp_display: Option<String>,
+    resp_full: Option<String>,
+    resp_truncated: bool,
 }
 
 pub struct CaptureTab {
@@ -87,6 +110,8 @@ pub struct CaptureTab {
     /// Options open while stopped (`[0]`) and while running (`[1]`): open
     /// while stopped, folded into a summary once the proxy runs.
     options_open: [bool; 2],
+    /// Cached decoded/formatted bodies for the currently inspected entry.
+    detail_cache: Option<DecodedBodies>,
     /// Automation: start on the next frame.
     pub auto_start: bool,
     /// Automation: `start`, `stop`, `settings`, `cert`, `select[:n]` (the
@@ -117,6 +142,7 @@ impl Default for CaptureTab {
             error: None,
             show_ca: false,
             options_open: [true, false],
+            detail_cache: None,
             auto_start: false,
             auto: None,
         }
@@ -400,10 +426,11 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut Captur
             traffic(ui, &mut t, &entries, &collections, &mut export, &mut clear, &mut save);
         },
         |ui| {
-            let t = cell.borrow();
-            match t.selected.and_then(|sel| entries.iter().find(|e| e.id == sel)) {
+            let mut t = cell.borrow_mut();
+            let sel = t.selected;
+            match sel.and_then(|sel| entries.iter().find(|e| e.id == sel)) {
                 Some(e) => {
-                    detail(ui, e, rejected.contains(&e.host), &mut acts);
+                    detail(ui, e, rejected.contains(&e.host), &mut t.detail_cache, &mut acts);
                     acts.close |= !dialog_open && sv::esc_closes(ui);
                 }
                 None => sv::select_hint(ui, tr("Its headers, bodies and timings appear here.")),
@@ -917,7 +944,7 @@ fn ms(d: Duration) -> String {
 }
 
 /// The selected request: head, metrics, headers, bodies or messages.
-fn detail(ui: &mut Ui, e: &CaptureEntry, rejected: bool, acts: &mut Acts) {
+fn detail(ui: &mut Ui, e: &CaptureEntry, rejected: bool, cache: &mut Option<DecodedBodies>, acts: &mut Acts) {
     let p = theme::pal(ui);
     let tunnelled = e.kind == EntryKind::Tunnel;
     let method = if e.method.is_empty() || tunnelled { "CONNECT" } else { e.method.as_str() };
@@ -1073,22 +1100,43 @@ fn detail(ui: &mut Ui, e: &CaptureEntry, rejected: bool, acts: &mut Acts) {
                 }
             },
         );
-        let req = e.decoded_request_body();
+        let key = (e.id, e.state, e.request_body.data.len(), e.response_body.data.len());
+        if cache.as_ref().is_none_or(|c| c.key != key) {
+            let req = e.decoded_request_body();
+            let req_display = if req.data.is_empty() {
+                None
+            } else {
+                let text = req.text().map(|t| t.into_owned()).unwrap_or_else(|| tr("(binary)").into());
+                Some(crate::proto_common::payload_text(text.as_bytes()))
+            };
+            let (resp_display, resp_full, resp_truncated) = if ws {
+                (None, None, false)
+            } else {
+                let resp = e.decoded_response_body();
+                if resp.data.is_empty() {
+                    (None, None, resp.truncated)
+                } else {
+                    let full = resp.text().map(|t| t.into_owned());
+                    let shown = full
+                        .as_deref()
+                        .map(|t| crate::dialogs::ellipsize(t, 100_000))
+                        .unwrap_or_else(|| tr("(binary)").into());
+                    (Some(crate::proto_common::payload_text(shown.as_bytes())), full, resp.truncated)
+                }
+            };
+            *cache = Some(DecodedBodies { key, req_display, resp_display, resp_full, resp_truncated });
+        }
+        let decoded = cache.as_ref().unwrap();
         sv::section(
             ui,
             tr("Request body"),
             None,
             |_| {},
             |ui| {
-                if req.data.is_empty() {
-                    sv::no_body(ui, tr("No body"));
+                if let Some(display) = &decoded.req_display {
+                    sv::body_box(ui, ui.make_persistent_id(("cap-req", e.id)), display);
                 } else {
-                    let text = req.text().map(|t| t.into_owned()).unwrap_or_else(|| tr("(binary)").into());
-                    sv::body_box(
-                        ui,
-                        ui.make_persistent_id(("cap-req", e.id)),
-                        &crate::proto_common::payload_text(text.as_bytes()),
-                    );
+                    sv::no_body(ui, tr("No body"));
                 }
             },
         );
@@ -1106,42 +1154,33 @@ fn detail(ui: &mut Ui, e: &CaptureEntry, rejected: bool, acts: &mut Acts) {
             sv::section(ui, tr("Messages"), Some(n), |_| {}, |ui| messages(ui, e));
             return;
         }
-        let resp = e.decoded_response_body();
         let mut copy = false;
         sv::section(
             ui,
             tr("Response body"),
             None,
             |ui| {
-                if !resp.data.is_empty() {
+                if decoded.resp_display.is_some() {
                     copy = kit::icon_button_sm(ui, icons::COPY, tr("Copy body")).clicked();
                 }
-                if resp.truncated {
+                if decoded.resp_truncated {
                     kit::tone_pill(ui, tr("truncated"), Tone::Warn);
                 }
             },
             |ui| {
-                if resp.data.is_empty() {
+                if let Some(display) = &decoded.resp_display {
+                    sv::body_box(ui, ui.make_persistent_id(("cap-resp", e.id)), display);
+                } else {
                     let text = match e.status {
                         Some(s @ (204 | 304)) => format!("{} ({s} {})", tr("No body"), e.status_text()),
                         _ => tr("No body").to_string(),
                     };
                     sv::no_body(ui, &text);
-                } else {
-                    let text = resp
-                        .text()
-                        .map(|t| crate::dialogs::ellipsize(&t, 100_000))
-                        .unwrap_or_else(|| tr("(binary)").into());
-                    sv::body_box(
-                        ui,
-                        ui.make_persistent_id(("cap-resp", e.id)),
-                        &crate::proto_common::payload_text(text.as_bytes()),
-                    );
                 }
             },
         );
-        if copy && let Some(t) = resp.text() {
-            acts.copy = Some(t.into_owned());
+        if copy && let Some(t) = &decoded.resp_full {
+            acts.copy = Some(t.clone());
         }
     });
     let _ = p;

@@ -525,13 +525,53 @@ impl Drop for Worker {
     }
 }
 
+/// Maximum size of a single JSON-lines IPC frame read from a worker process,
+/// preventing an untrusted or misbehaving worker from OOM-crashing the host.
+const MAX_IPC_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reads up to `limit` bytes until `\n` or EOF. Returns `Ok(None)` on EOF,
+/// `Ok(Some(true))` on a complete line within `limit`, or `Ok(Some(false))` if
+/// the line exceeded `limit`.
+fn read_line_bounded<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>, limit: usize) -> std::io::Result<Option<bool>> {
+    buf.clear();
+    loop {
+        let avail = match reader.fill_buf() {
+            Ok([]) => return Ok(if buf.is_empty() { None } else { Some(true) }),
+            Ok(b) => b,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if let Some(pos) = avail.iter().position(|&b| b == b'\n') {
+            let take = pos + 1;
+            if buf.len().saturating_add(take) > limit {
+                reader.consume(take);
+                return Ok(Some(false));
+            }
+            buf.extend_from_slice(&avail[..take]);
+            reader.consume(take);
+            return Ok(Some(true));
+        }
+        let n = avail.len();
+        if buf.len().saturating_add(n) > limit {
+            reader.consume(n);
+            return Ok(Some(false));
+        }
+        buf.extend_from_slice(avail);
+        reader.consume(n);
+    }
+}
+
 fn read_events(stdout: ChildStdout, events: Sender<Event>, stray: &Mutex<Vec<u8>>) {
     let mut reader = BufReader::with_capacity(64 * 1024, stdout);
     let mut line = Vec::new();
     loop {
-        line.clear();
-        if !matches!(reader.read_until(b'\n', &mut line), Ok(n) if n > 0) {
-            break;
+        match read_line_bounded(&mut reader, &mut line, MAX_IPC_LINE_BYTES) {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => {
+                push_tail(stray, b"worker IPC frame exceeded maximum allowed size\n");
+                break;
+            }
+            Ok(None) | Err(_) => break,
         }
         match serde_json::from_slice::<FromWorker>(&line) {
             Ok(msg) => {
@@ -636,5 +676,14 @@ mod tests {
         let after = super::process_memory(std::process::id()).unwrap();
         assert!(after >= before + 60 * 1024 * 1024, "{before} -> {after}");
         drop(block);
+    }
+
+    #[test]
+    fn read_line_bounded_rejects_oversized_ipc_frame() {
+        let mut r = std::io::Cursor::new(b"ok\n0123456789abcdef\n".as_slice());
+        let mut buf = Vec::new();
+        assert_eq!(super::read_line_bounded(&mut r, &mut buf, 8).unwrap(), Some(true));
+        assert_eq!(buf, b"ok\n");
+        assert_eq!(super::read_line_bounded(&mut r, &mut buf, 8).unwrap(), Some(false));
     }
 }

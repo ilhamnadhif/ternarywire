@@ -826,8 +826,10 @@ impl Session {
         if partial.attachments.len() >= partial.packet.attachments
             && let Some(Partial { mut packet, attachments, .. }) = self.partial.take()
         {
-            if let Some(data) = &mut packet.data {
-                fill_placeholders(data, &attachments);
+            if let Some(data) = &mut packet.data
+                && let Err(msg) = fill_placeholders(data, &attachments)
+            {
+                return self.protocol_error(format!("{msg}; closing the connection"));
             }
             packet.kind = if packet.kind == BINARY_EVENT { EVENT } else { ACK };
             self.dispatch(packet);

@@ -130,22 +130,40 @@ impl ClientCertificate {
     }
 
     pub fn matches(&self, host: &str, port: Option<u16>) -> bool {
-        if self.host.trim() == "*" {
+        let pat = self.host.trim();
+        if pat == "*" {
             return true;
         }
-        let (h, p) = match self.host.rsplit_once(':') {
-            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, p.parse::<u16>().ok()),
-            _ => (self.host.as_str(), None),
+        let (h, p) = if let Some(rest) = pat.strip_prefix('[') {
+            let Some((ipv6, tail)) = rest.split_once(']') else { return false };
+            if tail.is_empty() {
+                (ipv6, None)
+            } else if let Some(port_str) = tail.strip_prefix(':') {
+                let Ok(port_num) = port_str.parse::<u16>() else { return false };
+                (ipv6, Some(port_num))
+            } else {
+                return false;
+            }
+        } else if pat.matches(':').count() == 1 {
+            let (h, port_str) = pat.split_once(':').unwrap();
+            let Ok(port_num) = port_str.parse::<u16>() else { return false };
+            (h, Some(port_num))
+        } else {
+            (pat, None)
         };
-        if let (Some(want), Some(have)) = (p, port)
-            && want != have
+        if let Some(want) = p
+            && port != Some(want)
         {
             return false;
         }
         let h = h.trim().to_ascii_lowercase();
-        let host = host.to_ascii_lowercase();
+        if h.is_empty() {
+            return false;
+        }
+        let host = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
         match h.strip_prefix("*.") {
-            Some(suffix) => host.ends_with(&format!(".{suffix}")),
+            Some(suffix) if !suffix.is_empty() => host.ends_with(&format!(".{suffix}")),
+            Some(_) => false,
             None => h == host,
         }
     }

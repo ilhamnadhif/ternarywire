@@ -74,7 +74,18 @@ pub fn settings_secrets() -> Arc<SecretStore> {
             Arc::new(match std::env::var("TERNARYWIRE_SECRETS").as_deref() {
                 Ok("file") => SecretStore::new(Box::new(file())),
                 Ok("memory") => SecretStore::memory(),
-                _ if KeychainBackend::available() => SecretStore::new(Box::new(KeychainBackend::for_settings())),
+                _ if KeychainBackend::available() => {
+                    let store = SecretStore::new(Box::new(KeychainBackend::for_settings()));
+                    if store.load_error().is_none() {
+                        store
+                    } else {
+                        tracing::warn!(
+                            "settings keychain unavailable ({:?}); falling back to a local file",
+                            store.load_error()
+                        );
+                        SecretStore::new(Box::new(file()))
+                    }
+                }
                 _ => SecretStore::new(Box::new(file())),
             })
         })

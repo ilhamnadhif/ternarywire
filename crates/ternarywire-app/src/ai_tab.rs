@@ -140,9 +140,21 @@ impl AiTab {
     }
 }
 
+/// Effective auth of an AI request (resolving `Inherit` from its folder/collection).
+fn effective_auth(app: &TernaryWireApp, collection: Option<&str>, item_id: Option<&str>, own: &Auth) -> Auth {
+    if !own.is_inherit() {
+        return own.clone();
+    }
+    match (collection.and_then(|cid| app.ws.data.collection(cid)), item_id) {
+        (Some(c), Some(id)) => c.effective_auth(id).map(|e| e.auth.clone()).unwrap_or_else(Auth::none),
+        (Some(c), None) => c.auth.clone(),
+        _ => Auth::none(),
+    }
+}
+
 /// The API key (Bearer token) with variables resolved.
-fn api_key(req: &AiRequest, resolve: &dyn Fn(&str) -> String) -> Auth {
-    let mut auth = req.auth.clone();
+fn api_key(auth: &Auth, resolve: &dyn Fn(&str) -> String) -> Auth {
+    let mut auth = auth.clone();
     for key in ["token", "value"] {
         let v = auth.get_string(key);
         if !v.is_empty() {
@@ -779,7 +791,13 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut AiTab)
     tab.slot.store(app, &original, item);
     if fetch_models {
         let r = resolver(app, collection.as_deref());
-        let auth = api_key(&req_clone, &r);
+        let inherited = effective_auth(
+            app,
+            collection.as_deref(),
+            tab.slot.location.as_ref().map(|l| l.item.as_str()),
+            &req_clone.auth,
+        );
+        let auth = api_key(&inherited, &r);
         let key = match auth.kind {
             AuthType::Bearer => Some(auth.get_string("token")),
             AuthType::ApiKey => Some(auth.get_string("value")),
@@ -1147,7 +1165,8 @@ fn answer(
 
 pub fn start(app: &mut TernaryWireApp, tab_id: u64, tab: &mut AiTab, mut req: AiRequest, collection: Option<&str>) {
     let r = resolver(app, collection);
-    req.auth = api_key(&req, &r);
+    let inherited = effective_auth(app, collection, tab.slot.location.as_ref().map(|l| l.item.as_str()), &req.auth);
+    req.auth = api_key(&inherited, &r);
     tab.text.clear();
     tab.steps.clear();
     tab.usage = None;

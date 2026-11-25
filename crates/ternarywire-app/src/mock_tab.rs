@@ -50,6 +50,8 @@ pub struct MockTab {
     filter: String,
     selected_route: usize,
     settings_open: bool,
+    /// Last collection pushed to the running mock server, to avoid cloning on every frame.
+    synced: Option<Collection>,
     /// Automation: `start`, `stop`, `routes`, `logs`, `settings`, `port:<n>`,
     /// `select[:n]` (n-th row from the top), `route:<request name>`,
     /// `hit:<METHOD> <path> [body]`.
@@ -74,12 +76,14 @@ impl MockTab {
             filter: String::new(),
             selected_route: 0,
             settings_open: false,
+            synced: None,
             auto: None,
         }
     }
 
     pub fn started(&mut self, server: MockServer) {
         self.starting = false;
+        self.synced = None;
         self.server = Some(server);
     }
 
@@ -220,8 +224,11 @@ pub fn show(app: &mut TernaryWireApp, ui: &mut Ui, tab_id: u64, tab: &mut MockTa
         return;
     };
     // Keep the running server in sync with edits to the collection.
-    if let Some(s) = &tab.server {
+    if let Some(s) = &tab.server
+        && tab.synced.as_ref() != Some(&collection)
+    {
         s.set_collection(collection.clone());
+        tab.synced = Some(collection.clone());
     }
     let id = ui.make_persistent_id("mock-view");
     let mut do_start = false;

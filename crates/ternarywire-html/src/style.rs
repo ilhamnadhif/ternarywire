@@ -1056,13 +1056,19 @@ fn apply(c: &mut Computed, d: &Decl, parent: &Computed) {
             c.flex_wrap = lower.split_whitespace().any(|t| t == "wrap" || t == "wrap-reverse");
         }
         "flex-grow" => {
-            if let Ok(g) = lower.parse::<f32>() {
-                c.flex_grow = g.max(0.0);
+            if let Ok(g) = lower.parse::<f32>()
+                && g.is_finite()
+                && g >= 0.0
+            {
+                c.flex_grow = g;
             }
         }
         "flex-shrink" => {
-            if let Ok(g) = lower.parse::<f32>() {
-                c.flex_shrink = g.max(0.0);
+            if let Ok(g) = lower.parse::<f32>()
+                && g.is_finite()
+                && g >= 0.0
+            {
+                c.flex_shrink = g;
             }
         }
         "flex-basis" => {
@@ -1246,7 +1252,7 @@ fn apply_flex(c: &mut Computed, v: &str, fs: f32) {
             let mut basis = None;
             for t in tokens(v) {
                 match t.parse::<f32>() {
-                    Ok(n) if nums.len() < 2 && basis.is_none() => nums.push(n.max(0.0)),
+                    Ok(n) if n.is_finite() && n >= 0.0 && nums.len() < 2 && basis.is_none() => nums.push(n),
                     _ => basis = parse_length(t, fs).or(basis),
                 }
             }

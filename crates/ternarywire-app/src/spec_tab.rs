@@ -740,31 +740,70 @@ fn smithy_siblings(dir: &Path, open: &Path) -> Vec<PathBuf> {
 /// `sources` and `imports`, folders read recursively (hidden and `build`
 /// folders skipped), without the open file.
 fn smithy_build_files(open: &Path) -> Option<(Vec<PathBuf>, PathBuf)> {
+    const MAX_DEPTH: usize = 32;
+    const MAX_FILES: usize = 1_000;
     let dir = open.ancestors().skip(1).find(|d| {
         d.join("smithy-build.json").is_file() || d.join("ternarywire.json").is_file() || d.parent().is_none()
     })?;
+    let root = std::fs::canonicalize(dir).ok()?;
+    let open_canon = std::fs::canonicalize(open).ok();
     let text = std::fs::read_to_string(dir.join("smithy-build.json")).ok()?;
     let entries = smithy::build_config_paths(&text).ok()?;
-    fn walk(path: &Path, out: &mut Vec<PathBuf>) {
-        if path.is_dir() {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        path: &Path,
+        out: &mut Vec<PathBuf>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        depth: usize,
+    ) {
+        if depth > MAX_DEPTH || out.len() >= MAX_FILES {
+            return;
+        }
+        let Ok(canon) = std::fs::canonicalize(path) else {
+            return;
+        };
+        let Ok(rel) = canon.strip_prefix(root) else {
+            return;
+        };
+        if canon.is_dir() {
+            if !visited.insert(canon) {
+                return;
+            }
             let mut entries: Vec<PathBuf> =
                 std::fs::read_dir(path).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
             entries.sort();
             for p in entries {
+                if out.len() >= MAX_FILES {
+                    break;
+                }
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if p.is_file() || (!name.starts_with('.') && name != "build") {
-                    walk(&p, out);
+                let is_dir = p.is_dir();
+                if !is_dir || (!name.starts_with('.') && name != "build") {
+                    walk(dir, root, &p, out, visited, depth + 1);
                 }
             }
-        } else if is_smithy_candidate(path) && path.file_name().is_some_and(|n| n != "smithy-build.json") {
-            out.push(path.to_path_buf());
+        } else if canon.is_file()
+            && is_smithy_candidate(&canon)
+            && canon.file_name().is_some_and(|n| n != "smithy-build.json")
+        {
+            out.push(dir.join(rel));
         }
     }
     let mut files = Vec::new();
+    let mut visited = std::collections::HashSet::new();
     for e in entries {
-        walk(&dir.join(e), &mut files);
+        if files.len() >= MAX_FILES {
+            break;
+        }
+        let candidate = Path::new(&e);
+        if candidate.is_absolute() {
+            continue;
+        }
+        walk(dir, &root, &dir.join(candidate), &mut files, &mut visited, 0);
     }
-    files.retain(|p| p != open);
+    files.retain(|p| p != open && (open_canon.is_none() || std::fs::canonicalize(p).ok() != open_canon));
+    files.sort();
     files.dedup();
     Some((files, dir.to_path_buf()))
 }
@@ -2725,5 +2764,31 @@ mod tests {
         let users = &target.requests()[0];
         assert!(users.http().unwrap().params.iter().any(|p| p.key == "page"));
         assert!(!users.scripts.post_response.is_empty(), "user scripts are kept");
+    }
+
+    #[test]
+    fn smithy_build_files_rejects_traversal_and_symlink_cycles() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("outside.smithy"), "$version: \"2\"\nnamespace ex\n").unwrap();
+
+        let ws = tempfile::tempdir().unwrap();
+        let proj = ws.path().join("proj");
+        std::fs::create_dir_all(proj.join("model")).unwrap();
+        std::fs::write(proj.join("model/main.smithy"), "$version: \"2\"\nnamespace ex\n").unwrap();
+        std::fs::write(proj.join("model/good.smithy"), "$version: \"2\"\nnamespace ex\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            // Symlink cycle inside model/ and escaping symlink to outside/.
+            std::os::unix::fs::symlink(proj.join("model"), proj.join("model/loop")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), proj.join("model/escape")).unwrap();
+        }
+        let outside_str = outside.path().display().to_string().replace('\\', "/");
+        let build = format!(r#"{{"version":"1.0","sources":["model","../outside","{outside_str}"]}}"#);
+        std::fs::write(proj.join("smithy-build.json"), build).unwrap();
+
+        let (files, _) = smithy_build_files(&proj.join("model/main.smithy")).unwrap();
+        assert_eq!(files.len(), 1, "unexpected files: {files:?}");
+        assert!(files[0].ends_with("model/good.smithy"), "{files:?}");
     }
 }

@@ -334,11 +334,11 @@ async fn get_secret_value(env: &Env, id: &str, s: &AwsSettings, r: &Reference) -
 }
 
 pub(crate) fn check_reference(reference: &str) -> Result<(), SecretError> {
-    Reference::parse(reference)?.only_params(&["versionStage", "versionId"], WHAT)
+    Reference::parse_raw(reference)?.only_params(&["versionStage", "versionId"], WHAT)
 }
 
 pub(crate) async fn fetch(env: &Env, id: &str, s: &AwsSettings, reference: &str) -> Result<String, SecretError> {
-    let r = Reference::parse(reference)?;
+    let r = Reference::parse_raw(reference)?;
     let (label, v) = get_secret_value(env, id, s, &r).await?;
     if let Some(text) = v.get("SecretString").and_then(Value::as_str) {
         return match &r.field {
@@ -411,7 +411,7 @@ pub(crate) async fn test(env: &Env, id: &str, s: &AwsSettings) -> Result<String,
 /// `""` or a name prefix lists secrets; `name#` lists the JSON keys of one.
 pub(crate) async fn browse(env: &Env, id: &str, s: &AwsSettings, path: &str) -> Result<Vec<BrowseEntry>, SecretError> {
     if let Some(name) = path.strip_suffix('#') {
-        let r = Reference::parse(name)?;
+        let r = Reference::parse_raw(name)?;
         let (_, v) = get_secret_value(env, id, s, &r).await?;
         let keys: Vec<String> = v
             .get("SecretString")

@@ -3,6 +3,7 @@ name = "ternarywire-secrets"
 description = "External secret managers for TernaryWire vault variables: HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, 1Password"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

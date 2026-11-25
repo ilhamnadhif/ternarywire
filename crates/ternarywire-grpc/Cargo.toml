@@ -3,6 +3,7 @@ name = "ternarywire-grpc"
 description = "Dynamic gRPC client for TernaryWire: .proto files or server reflection, all four call patterns, JSON messages"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

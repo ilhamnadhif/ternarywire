@@ -207,11 +207,13 @@ impl Auth {
     pub fn scrub_secrets(&mut self) {
         let sensitive = self.kind.sensitive_params();
         for (k, v) in self.params.iter_mut() {
-            if sensitive.contains(&k.as_str())
-                && let Value::String(s) = v
-                && !crate::variables::is_pure_reference(s)
-            {
-                s.clear();
+            if !sensitive.contains(&k.as_str()) {
+                continue;
+            }
+            let keep = matches!(v, Value::Null)
+                || matches!(v, Value::String(s) if s.is_empty() || crate::variables::is_pure_reference(s));
+            if !keep {
+                *v = Value::String(String::new());
             }
         }
     }

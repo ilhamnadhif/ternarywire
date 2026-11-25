@@ -465,17 +465,60 @@ impl Redactor {
         changed.then(|| pairs.join("&"))
     }
 
-    /// Replaces the password of `scheme://user:password@host`.
+    /// Replaces the password of `scheme://user:password@host` and masks
+    /// credential-like query parameters embedded directly in the URL.
     fn mask_userinfo(&mut self, url: &str) -> String {
-        let Some(scheme_end) = url.find("://").map(|i| i + 3) else { return url.to_string() };
-        let rest = &url[scheme_end..];
-        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-        let Some(at) = authority.rfind('@') else { return url.to_string() };
-        let Some(colon) = authority[..at].find(':') else { return url.to_string() };
-        let password = &authority[colon + 1..at];
-        let masked = self.mask(password);
-        format!("{}{}:{masked}{}", &url[..scheme_end], &authority[..colon], &rest[at..])
+        let mut out = url.to_string();
+        if let Some(scheme_end) = out.find("://").map(|i| i + 3) {
+            let rest = &out[scheme_end..];
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = &rest[..authority_end];
+            if let Some(at) = authority.rfind('@')
+                && let Some(colon) = authority[..at].find(':')
+            {
+                let password = &authority[colon + 1..at];
+                let masked = self.mask(password);
+                out = format!("{}{}:{masked}{}", &out[..scheme_end], &authority[..colon], &rest[at..]);
+            }
+        }
+        self.mask_url_query(&out)
+    }
+
+    fn mask_url_query(&mut self, url: &str) -> String {
+        let (base, query, fragment) = urlutil::split(url);
+        let Some(q) = query.filter(|q| !q.is_empty()) else {
+            return url.to_string();
+        };
+        let mut changed = false;
+        let pairs: Vec<String> = q
+            .split('&')
+            .map(|pair| {
+                let Some(eq) = pair.find('=') else {
+                    return pair.to_string();
+                };
+                let raw_key = &pair[..eq];
+                let raw_val = &pair[eq + 1..];
+                if raw_val.is_empty() {
+                    return pair.to_string();
+                }
+                let Some((k, v)) = url::form_urlencoded::parse(pair.as_bytes()).next() else {
+                    return pair.to_string();
+                };
+                if !is_credential_name(&k) {
+                    return pair.to_string();
+                }
+                let masked = self.mask(&v);
+                if masked == v {
+                    return pair.to_string();
+                }
+                changed = true;
+                format!("{raw_key}={masked}")
+            })
+            .collect();
+        if !changed {
+            return url.to_string();
+        }
+        format!("{base}?{}{fragment}", pairs.join("&"))
     }
 
     /// Sensitive auth parameter for snippets: a pure reference stays (it is
@@ -2740,6 +2783,50 @@ mod tests {
         c.items.push(RequestItem::new("X", r).into());
         let md = to_markdown(&c, &DocsOptions { snippet_languages: Vec::new(), ..Default::default() });
         assert!(!md.contains("cURL") && md.contains("```xml\n<a/>\n```"));
+    }
+
+    #[test]
+    fn url_query_credentials_are_masked_across_protocols() {
+        use ternarywire_core::model::{RequestKind, WsRequest};
+        use ternarywire_core::protocols::{McpRequest, McpTransport, SocketIoRequest};
+
+        let mut c = Collection::new("Creds");
+        // HTTP request whose URL query carries an api_key even without synced `params`.
+        let mut http = HttpRequest::new("GET", "https://api.test/v1?api_key=sk_live_http_1&page=2");
+        http.params.clear();
+        c.items.push(RequestItem::new("Http", http).into());
+
+        let mut ws = RequestItem::new("Ws", HttpRequest::default());
+        ws.request = RequestKind::WebSocket(WsRequest {
+            url: "wss://ws.test/live?token=ws_tok_2&room=lobby".into(),
+            ..Default::default()
+        });
+        c.items.push(ws.into());
+
+        let mut sio = RequestItem::new("Sio", HttpRequest::default());
+        sio.request = RequestKind::SocketIo(SocketIoRequest {
+            url: "https://sio.test/?access_token=sio_tok_3&v=4".into(),
+            ..Default::default()
+        });
+        c.items.push(sio.into());
+
+        let mut mcp = RequestItem::new("Mcp", HttpRequest::default());
+        mcp.request = RequestKind::Mcp(McpRequest {
+            transport: McpTransport::Http {
+                url: "https://mcp.test/sse?secret=mcp_sec_4&keep={{api_key}}".into(),
+                headers: vec![],
+            },
+            ..Default::default()
+        });
+        c.items.push(mcp.into());
+
+        let md = to_markdown(&c, &DocsOptions::default());
+        for leak in ["sk_live_http_1", "ws_tok_2", "sio_tok_3", "mcp_sec_4"] {
+            assert!(!md.contains(leak), "{leak} leaked into docs:\n{md}");
+        }
+        assert!(md.contains("api_key=REDACTED") && md.contains("page=2"), "{md}");
+        assert!(md.contains("token=REDACTED") && md.contains("room=lobby"), "{md}");
+        assert!(md.contains("secret=REDACTED") && md.contains("keep={{api_key}}"), "{md}");
     }
 }
 

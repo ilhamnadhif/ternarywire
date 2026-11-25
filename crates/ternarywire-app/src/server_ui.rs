@@ -1350,7 +1350,13 @@ pub fn reason(code: u16) -> &'static str {
 /// `curl` command line that sends a recorded request again.
 pub fn curl(method: &str, url: &str, headers: &[(String, String)], body: &str) -> String {
     let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-    let mut out = format!("curl -X {method} {}", q(url));
+    let method_arg =
+        if !method.is_empty() && method.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
+            method.to_string()
+        } else {
+            q(method)
+        };
+    let mut out = format!("curl -X {method_arg} {}", q(url));
     for (k, v) in headers {
         if ["host", "content-length", "connection", "transfer-encoding"].iter().any(|h| k.eq_ignore_ascii_case(h)) {
             continue;
@@ -1398,6 +1404,8 @@ mod tests {
         let h = vec![("Host".to_string(), "x".to_string()), ("X-A".to_string(), "it's".to_string())];
         let c = curl("POST", "http://127.0.0.1:1/a", &h, "{}");
         assert_eq!(c, "curl -X POST 'http://127.0.0.1:1/a' \\\n  -H 'X-A: it'\\''s' \\\n  --data-raw '{}'");
+        let injected = curl("GET $(id)'x", "http://127.0.0.1:1/a", &[], "");
+        assert_eq!(injected, "curl -X 'GET $(id)'\\''x' 'http://127.0.0.1:1/a'");
     }
 
     #[test]

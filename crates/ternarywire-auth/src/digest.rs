@@ -32,8 +32,35 @@ fn choose_qop(offered: &str, body_known: bool) -> String {
 fn compute(auth: &Auth, req: &PreparedRequest) -> Result<String, AuthError> {
     let url = parse_url(req)?;
     let uri = request_target(&url);
-    let body = body_bytes(req);
-    let qop = choose_qop(param(auth, "qop"), body.is_some());
+    let offered = param(auth, "qop");
+    let owned_body: Option<Vec<u8>>;
+    let body = match body_bytes(req) {
+        Some(b) => Some(b),
+        None => match &req.body {
+            ternarywire_core::PreparedBody::File(path)
+                if choose_qop(offered, false).is_empty() && choose_qop(offered, true) == "auth-int" =>
+            {
+                let bytes = crate::util::blocking(|| {
+                    let meta = std::fs::metadata(path).map_err(|e| {
+                        AuthError::invalid(format!("could not read the body file {}: {e}", path.display()))
+                    })?;
+                    if meta.len() > 64 * 1024 * 1024 {
+                        return Err(AuthError::invalid(format!(
+                            "body file {} exceeds 64 MiB limit for Digest auth-int",
+                            path.display()
+                        )));
+                    }
+                    std::fs::read(path).map_err(|e| {
+                        AuthError::invalid(format!("could not read the body file {}: {e}", path.display()))
+                    })
+                })?;
+                owned_body = Some(bytes);
+                owned_body.as_deref()
+            }
+            _ => None,
+        },
+    };
+    let qop = choose_qop(offered, body.is_some());
     let nc = match param(auth, "nonceCount") {
         "" => "00000001".to_string(),
         n => n.to_string(),
