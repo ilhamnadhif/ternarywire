@@ -439,10 +439,22 @@ impl SpecTab {
     }
 }
 
-/// Spec files in the workspace's `specs/` folder.
+/// Spec files in the workspace's `specs/` folder (confined to `root`).
 pub fn list_specs(root: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(root.join("specs"))
-        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
+    let Ok(canon_root) = std::fs::canonicalize(root) else { return Vec::new() };
+    let specs_dir = root.join("specs");
+    if std::fs::symlink_metadata(&specs_dir).is_ok_and(|m| m.file_type().is_symlink())
+        || std::fs::canonicalize(&specs_dir).is_ok_and(|c| !c.starts_with(&canon_root))
+    {
+        return Vec::new();
+    }
+    let mut out: Vec<PathBuf> = std::fs::read_dir(specs_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && std::fs::canonicalize(p).is_ok_and(|c| c.starts_with(&canon_root)))
+                .collect()
+        })
         .unwrap_or_default();
     out.sort();
     out
@@ -2220,7 +2232,16 @@ fn delete_confirm(app: &mut TernaryWireApp, ui: &mut Ui) {
             if let Some(i) = app.tabs.iter().position(|t| matches!(&t.kind, TabKind::Spec(s) if s.path == path)) {
                 app.close_tab(i);
             }
-            if let Err(e) = std::fs::remove_file(&path) {
+            let confined = std::fs::canonicalize(app.ws.root()).ok().is_some_and(|canon_root| {
+                !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
+                    && path
+                        .parent()
+                        .and_then(|p| std::fs::canonicalize(p).ok())
+                        .is_some_and(|c| c.starts_with(&canon_root))
+            });
+            if !confined {
+                app.toast("Refusing to delete a spec file outside the workspace.", true);
+            } else if let Err(e) = std::fs::remove_file(&path) {
                 app.toast(e.to_string(), true);
             }
         }
@@ -2241,11 +2262,11 @@ pub fn new_spec(app: &mut TernaryWireApp, smithy: bool) {
         if smithy { ("model", "smithy", SMITHY_TEMPLATE) } else { ("openapi", "yaml", OPENAPI_TEMPLATE) };
     let mut path = dir.join(format!("{stem}.{ext}"));
     let mut n = 2;
-    while path.exists() {
+    while path.exists() || std::fs::symlink_metadata(&path).is_ok() {
         path = dir.join(format!("{stem}-{n}.{ext}"));
         n += 1;
     }
-    match ternarywire_core::storage::write_atomic(&path, text.as_bytes()) {
+    match ternarywire_core::storage::write_atomic_confined(app.ws.root(), &path, text.as_bytes(), true) {
         Ok(()) => open_spec(app, path),
         Err(e) => app.toast(e.to_string(), true),
     }
@@ -2790,5 +2811,31 @@ mod tests {
         let (files, _) = smithy_build_files(&proj.join("model/main.smithy")).unwrap();
         assert_eq!(files.len(), 1, "unexpected files: {files:?}");
         assert!(files[0].ends_with("model/good.smithy"), "{files:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn specs_dir_confinement_rejects_escaping_symlinks() {
+        let outside = tempfile::tempdir().unwrap();
+        let outside_spec = outside.path().join("outside.yaml");
+        std::fs::write(&outside_spec, OPENAPI_TEMPLATE).unwrap();
+
+        let ws = tempfile::tempdir().unwrap();
+        let mut app = TernaryWireApp::for_test(ws.path());
+        let specs = ws.path().join("specs");
+        std::fs::create_dir_all(&specs).unwrap();
+        std::fs::write(specs.join("inside.yaml"), OPENAPI_TEMPLATE).unwrap();
+        std::os::unix::fs::symlink(&outside_spec, specs.join("escape.yaml")).unwrap();
+
+        let listed = list_specs(ws.path());
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(listed[0].ends_with("inside.yaml"), "{listed:?}");
+
+        // Replace specs/ with a symlink pointing outside; new_spec must refuse to write there.
+        std::fs::remove_dir_all(&specs).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &specs).unwrap();
+        new_spec(&mut app, false);
+        assert!(!outside.path().join("openapi.yaml").exists());
+        assert!(list_specs(ws.path()).is_empty());
     }
 }

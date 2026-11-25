@@ -992,3 +992,69 @@ async fn grpc_requests_inherit_the_collection_auth() {
     let seen: Vec<String> = seen.lock().unwrap().iter().map(|(a, _)| a.clone()).collect();
     assert_eq!(seen, ["Bearer t-1", "Bearer mine"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ai_request_inherits_collection_auth_e2e() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let s = seen.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |h: axum::http::HeaderMap| async move {
+            let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            s.lock().unwrap().push(auth);
+            Json(json!({
+                "model": "m",
+                "choices": [{"message": {"role": "assistant", "content": "hi back"}, "finish_reason": "stop"}]
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let ai = AiRequest {
+        provider: AiProvider::OpenAiCompatible,
+        base_url: format!("http://{addr}/v1"),
+        model: "m".into(),
+        messages: vec![AiMessage { role: "user".into(), content: "hello".into() }],
+        ..Default::default()
+    };
+    assert!(ai.auth.is_inherit());
+    let mut c = collection(item("Ask", RequestKind::Ai(ai), Scripts::default()));
+    c.auth = Auth::bearer("{{aiSecret}}");
+    let mut vars = VariableScopes::default();
+    vars.collection.insert("aiSecret".into(), "ai-collection-secret".into());
+
+    let exec = run_one(&c, &mut vars, &CancellationToken::new()).await;
+    assert!(exec.error.is_none(), "{:?}\n{}", exec.error, console(&exec));
+    let auths = seen.lock().unwrap().clone();
+    assert_eq!(auths, vec!["Bearer ai-collection-secret"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_stdio_command_stays_literal_and_isolated_from_pre_request_scripts() {
+    let mcp = McpRequest {
+        transport: McpTransport::Stdio {
+            command: "{{injected_cmd}}".into(),
+            args: vec!["--flag".into()],
+            env: Vec::new(),
+            cwd: String::new(),
+        },
+        ..Default::default()
+    };
+    let scripts = Scripts {
+        pre_request: "pm.variables.set('injected_cmd', 'sh'); pm.environment.set('injected_cmd', 'sh');".into(),
+        ..Default::default()
+    };
+    let c = collection(item("Stdio", RequestKind::Mcp(mcp), scripts));
+    let mut vars = VariableScopes::default();
+    vars.environment.insert("injected_cmd".into(), "sh".into());
+    let exec = run_one(&c, &mut vars, &CancellationToken::new()).await;
+    let err = exec.error.as_ref().expect("literal {{injected_cmd}} binary must fail to spawn");
+    assert!(
+        err.message.contains("{{injected_cmd}}")
+            || err.message.to_lowercase().contains("not found")
+            || err.message.contains("No such file"),
+        "expected literal command failure, got: {err:?}"
+    );
+}

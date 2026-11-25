@@ -394,3 +394,92 @@ async fn flow_run_parallel_branches() {
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(!text(&o).contains("│ 1 messages summarized"), "{}", text(&o));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn flow_run_json_report_redacts_secrets_unless_show_secrets() {
+    use ternarywire_core::model::KeyValue;
+    use ternarywire_core::variables::Variable;
+
+    let base = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("ws");
+    let (store, _) = WorkspaceStore::create(&root, "ws").unwrap();
+    let secrets = SecretStore::new(Box::new(ternarywire_core::secrets::FileBackend {
+        path: store.local_dir().join("secrets.json"),
+    }));
+
+    let mut req = HttpRequest::new("GET", "{{baseUrl}}/items?api_key=RAW_QUERY_SECRET_777&page=1");
+    req.headers.push(KeyValue::new("Authorization", "Bearer {{apiSecret}}"));
+    let item = RequestItem::new("Items", req);
+    let item_id = item.id.clone();
+    let mut col = Collection::new("API");
+    let col_id = col.id.clone();
+    col.variables.push(Variable::secret("apiSecret", "tok-ada"));
+    col.items.push(Item::Request(item));
+    store.save_collection(&col, &secrets).unwrap();
+
+    let mut env = Environment::new("Local");
+    env.variables.push(Variable::new("baseUrl", base));
+    store.save_environment(&env, &secrets).unwrap();
+
+    let mut f = Flow::new("SecretFlow");
+    let start = f.start().unwrap().id.clone();
+    f.blocks.push(Block::with_id(
+        "req",
+        "Fetch",
+        BlockConfig::Request(RequestConfig {
+            source: RequestSource::Saved(ItemRef::new(col_id, item_id)),
+            ..Default::default()
+        }),
+    ));
+    f.edges.push(Edge::new(&start, "next", "req", PORT_IN));
+    storage::save(&root, &f).unwrap();
+    let ws = root.to_str().unwrap();
+
+    // Default JSON report redacts secret variables and credential query params in URLs.
+    let redacted_path = dir.path().join("redacted.json");
+    let out = ternarywire(
+        &[
+            "flow",
+            "run",
+            ws,
+            "SecretFlow",
+            "-e",
+            "Local",
+            "-r",
+            "json",
+            "--reporter-json-export",
+            redacted_path.to_str().unwrap(),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let red_text = std::fs::read_to_string(&redacted_path).unwrap();
+    assert!(!red_text.contains("RAW_QUERY_SECRET_777"), "query secret leaked: {red_text}");
+    assert!(!red_text.contains("tok-ada"), "secret variable leaked: {red_text}");
+    assert!(red_text.contains("api_key=***"), "{red_text}");
+
+    // With --show-secrets the raw query parameter is kept.
+    let shown_path = dir.path().join("shown.json");
+    let out = ternarywire(
+        &[
+            "flow",
+            "run",
+            ws,
+            "SecretFlow",
+            "-e",
+            "Local",
+            "-r",
+            "json",
+            "--reporter-json-export",
+            shown_path.to_str().unwrap(),
+            "--show-secrets",
+        ],
+        dir.path(),
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let shown_text = std::fs::read_to_string(&shown_path).unwrap();
+    assert!(shown_text.contains("RAW_QUERY_SECRET_777"), "{shown_text}");
+}

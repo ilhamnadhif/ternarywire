@@ -2577,3 +2577,89 @@ async fn script_blocks_send_files_only_from_the_working_directory() {
     assert_eq!(r.outputs["inside"], json!("hello file"));
     assert_eq!(r.outputs["outside"], json!("refused"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_ai_request_inherits_collection_auth_e2e() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let s = seen.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |h: HeaderMap| async move {
+            let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            s.lock().unwrap().push(auth);
+            axum::Json(json!({
+                "model": "m",
+                "choices": [{"message": {"role": "assistant", "content": "flow ai reply"}, "finish_reason": "stop"}]
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let ai = AiRequest {
+        provider: AiProvider::OpenAiCompatible,
+        base_url: format!("http://{addr}/v1"),
+        model: "m".into(),
+        messages: vec![AiMessage { role: "user".into(), content: "hi".into() }],
+        ..Default::default()
+    };
+    let req_item = RequestItem {
+        id: "ai-1".into(),
+        name: "Ask".into(),
+        description: String::new(),
+        request: RequestKind::Ai(ai),
+        scripts: Scripts::default(),
+        examples: Vec::new(),
+    };
+    let mut col = Collection::new("AI Col");
+    col.auth = Auth::bearer("{{aiKey}}");
+    col.variables.push(Variable::secret("aiKey", "flow-ai-secret"));
+    col.items.push(Item::Request(req_item));
+
+    let f = flow(
+        vec![
+            Block::with_id(
+                "ask",
+                "Ask",
+                BlockConfig::Ai(AiBlockConfig { request: Some(ItemRef::new(&col.id, "ai-1")), ..Default::default() }),
+            ),
+            output("reply", "reply", "{{blocks.ask.output.text}}"),
+        ],
+        &[("start", "next", "ask"), ("ask", "success", "reply")],
+    );
+    let env = FlowEnv { services: services(), collections: vec![col], base_dir: None };
+    let r = run_with(&f, &env, "http://127.0.0.1:1", FlowRunOptions::default(), &CancellationToken::new()).await.result;
+    assert!(r.success, "{r:#?}");
+    assert_eq!(r.outputs["reply"], json!("flow ai reply"));
+    assert_eq!(*seen.lock().unwrap(), vec!["Bearer flow-ai-secret"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn flow_storage_rejects_escaping_symlinks() {
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.flow.json");
+    let orig = storage::to_json(&Flow::new("Victim"));
+    std::fs::write(&victim, &orig).unwrap();
+
+    // Case 1: flows/ directory itself is a symlink escaping the workspace.
+    let ws1 = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws1.path().join("flows")).unwrap();
+    assert!(storage::save(ws1.path(), &Flow::new("Escape")).is_err());
+    assert!(storage::list(ws1.path()).0.is_empty());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), orig);
+
+    // Case 2: a symlinked .flow.json file inside flows/ pointing outside the workspace.
+    let ws2 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws2.path().join("flows")).unwrap();
+    let link = ws2.path().join("flows").join("victim.flow.json");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    assert!(storage::list(ws2.path()).0.is_empty());
+    let mut f = Flow::new("Victim");
+    f.id = "new-id".into();
+    // Saving a flow with the same name must not overwrite the symlink target.
+    let saved = storage::save(ws2.path(), &f).unwrap();
+    assert_ne!(saved, link);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), orig);
+}

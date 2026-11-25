@@ -10,7 +10,7 @@ diimpor dan dijalankan apa adanya untuk pemakaian umum.
 
 **Situs web: [ilhamnadhif.github.io/ternarywire](https://ilhamnadhif.github.io/ternarywire/)**, dengan demo langsung yang bisa Anda klik · [English](README.md)
 
-![TernaryWire dalam bahasa Indonesia: koleksi, request, dan hasil tesnya](docs/screenshots/indonesian.png)
+![TernaryWire: koleksi, request, dan hasil tesnya](docs/screenshots/hero.png)
 
 ## Sorotan
 
@@ -34,8 +34,7 @@ diimpor dan dijalankan apa adanya untuk pemakaian umum.
 - **Mock server, listener webhook, dan proxy penangkap lalu lintas**, semuanya lokal.
 - Dua belas jenis autentikasi, dari Basic dan OAuth 2.0 sampai AWS SigV4, NTLM, dan Akamai
   EdgeGrid.
-- Antarmuka bahasa Inggris dan Indonesia, tema terang dan gelap, ramah keyboard dan pembaca layar,
-  tanpa telemetri.
+- Tema terang dan gelap, ramah keyboard dan pembaca layar, tanpa telemetri.
 - **Native di mana saja**: menu bar macOS sungguhan, installer Windows, serta paket `.deb`, `.rpm`,
   dan AppImage untuk Linux (x86_64 dan ARM64).
 - **Pembaruan** dari rilis GitHub; di macOS dan AppImage cukup satu klik untuk memasang versi baru
@@ -368,11 +367,8 @@ CLI dengan `ternarywire flow run`.
   aksen merah koral, tab ala browser, palet perintah (`⇧⌘P`), dan pencarian cepat (`⌘K`).
 - Tab yang terbuka, termasuk yang belum disimpan, dipulihkan setelah aplikasi dibuka ulang atau
   crash. Menutup request baru atau spec yang sudah diubah selalu ditanyakan dulu.
-- Bahasa Inggris dan Indonesia (Settings › General › Language).
 - Aksesibel: navigasi keyboard, dan setiap tombol, tab, baris sidebar, serta kolom isian punya nama
   untuk pembaca layar (lewat AccessKit).
-
-![Antarmuka bahasa Inggris: request dan responsnya](docs/screenshots/hero.png)
 
 ## Pintasan keyboard
 
@@ -572,7 +568,7 @@ autentikasi, kirim (dengan pengulangan challenge Digest dan NTLM), lalu skrip po
 tes. Run di terminal berperilaku sama seperti run di aplikasi.
 
 Juga di repositori: `docs/` (status setiap persyaratan, [panduan desain](docs/design.md),
-[scripting](docs/scripting.md)), `scripts/` (packaging, installer, benchmark, pemeriksaan i18n dan
+[scripting](docs/scripting.md)), `scripts/` (packaging, installer, benchmark, dan pemeriksaan
 aksesibilitas), `packaging/` (Info.plist, ikon, cask Homebrew, `.desktop` Linux), `docker/`, dan
 `action.yml`.
 
@@ -583,7 +579,6 @@ cargo test --workspace                       # sekitar 1.270 tes, dengan server 
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 scripts/bench.sh                             # target performa di atas (macOS)
-python3 scripts/i18n-scan.py                 # teks UI yang tidak lewat sistem terjemahan
 swift scripts/ax-audit.swift <pid>           # pohon aksesibilitas seperti yang dibaca VoiceOver
 ```
 
@@ -593,9 +588,6 @@ yang butuh layanan sungguhan (socket.io, mosquitto, HashiCorp Vault, Ollama, reg
 
 - **UI**: baca [docs/design.md](docs/design.md) dulu; semua layar memakai token dan komponen
   bersama.
-- **Terjemahan**: teks yang dibaca pengguna lewat `tr()`/`trf()` dengan entri bahasa Indonesia di
-  `crates/ternarywire-app/i18n/id.tsv` (sekitar 2.200 entri); sebuah tes gagal bila ada yang belum
-  diterjemahkan.
 - **Variabel lingkungan**: `TERNARYWIRE_CONFIG_DIR` (folder pengaturan lain),
   `TERNARYWIRE_SECRETS=file|memory` (tanpa prompt Keychain untuk build yang tidak ditandatangani), dan
   `TERNARYWIRE_AUTOMATION=steps.json` (menggerakkan aplikasi dari daftar langkah dan mengambil tangkapan

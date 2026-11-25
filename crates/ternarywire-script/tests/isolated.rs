@@ -525,3 +525,26 @@ fn maybe_run_worker_returns_in_a_normal_process() {
     ternarywire_script::maybe_run_worker();
     assert!(started.elapsed() < Duration::from_millis(50));
 }
+
+#[test]
+fn worker_isolates_intl_streams_and_prototypes_across_jobs() {
+    let e = engine();
+    // Job 1 mutates Intl, ReadableStream, and Object.prototype on the reused worker process.
+    let out1 = e.run(pre("Intl.DateTimeFormat.prototype.format = () => 'POISONED'; \
+         ReadableStream.prototype.getReader = () => { throw new Error('POISONED'); }; \
+         Object.prototype.polluted = 'yes';"));
+    assert!(out1.errors.is_empty(), "{:?}", out1.errors);
+
+    // Job 2 runs on the same worker and must observe clean built-ins and prototypes.
+    let out2 = e.run(pre(
+        "pm.test('intl clean', () => pm.expect(new Intl.DateTimeFormat('en-US').format(new Date(0))).to.not.equal('POISONED')); \
+         pm.test('stream clean', () => { \
+             const s = new ReadableStream({ start(c) { c.enqueue('ok'); c.close(); } }); \
+             pm.expect(typeof s.getReader().read).to.equal('function'); \
+         }); \
+         pm.test('object proto clean', () => pm.expect(({}).polluted).to.equal(undefined));",
+    ));
+    assert!(out2.errors.is_empty(), "{:?}", out2.errors);
+    assert_eq!(out2.tests.len(), 3, "{:?}", out2.tests);
+    assert!(out2.tests.iter().all(|t| t.passed), "{:?}", out2.tests);
+}

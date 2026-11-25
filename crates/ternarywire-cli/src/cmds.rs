@@ -259,12 +259,16 @@ pub fn import(args: ImportArgs) -> Result<i32> {
 /// `maven.dependencies` of a `smithy-build.json` are read from the local
 /// Maven repository and come after the project's own files.
 fn import_smithy_model(paths: &[PathBuf]) -> Result<(Option<String>, ternarywire_convert::Imported)> {
+    use std::collections::HashSet;
     use ternarywire_convert::smithy::SourceFile;
     let mut sources = Vec::new();
     let mut dependencies: Vec<SourceFile> = Vec::new();
     for path in paths {
         if path.is_dir() {
+            let root = std::fs::canonicalize(path).with_context(|| format!("could not read {}", path.display()))?;
             let mut found = Vec::new();
+            let mut visited = HashSet::new();
+            let mut seen_files = HashSet::new();
             let build = path.join("smithy-build.json");
             if build.is_file() {
                 let text = std::fs::read_to_string(&build)?;
@@ -281,15 +285,27 @@ fn import_smithy_model(paths: &[PathBuf]) -> Result<(Option<String>, ternarywire
                     }
                 }
                 for entry in entries {
+                    if found.len() >= MAX_SMITHY_FILES {
+                        break;
+                    }
+                    if Path::new(&entry).is_absolute() {
+                        bail!("smithy-build.json entry {entry:?} must be a relative path inside {}", path.display());
+                    }
                     let p = path.join(&entry);
-                    if p.is_dir() {
-                        smithy_files_in(&p, &mut found).with_context(|| format!("could not read {}", p.display()))?;
-                    } else {
+                    let canon = std::fs::canonicalize(&p).with_context(|| format!("could not read {}", p.display()))?;
+                    if !canon.starts_with(&root) {
+                        bail!("smithy-build.json entry {entry:?} escapes {}", path.display());
+                    }
+                    if canon.is_dir() {
+                        smithy_files_in(&root, &p, &mut found, &mut visited, &mut seen_files, 0)
+                            .with_context(|| format!("could not read {}", p.display()))?;
+                    } else if seen_files.insert(canon) {
                         found.extend(smithy_file(&p)?);
                     }
                 }
             } else {
-                smithy_files_in(path, &mut found).with_context(|| format!("could not read {}", path.display()))?;
+                smithy_files_in(&root, path, &mut found, &mut visited, &mut seen_files, 0)
+                    .with_context(|| format!("could not read {}", path.display()))?;
             }
             if found.is_empty() {
                 bail!("no Smithy files (.smithy or JSON AST) in {}", path.display());
@@ -316,21 +332,50 @@ fn import_smithy_model(paths: &[PathBuf]) -> Result<(Option<String>, ternarywire
     Ok((Some(label), ternarywire_convert::Imported { collections: vec![c], warnings, ..Default::default() }))
 }
 
-/// Smithy files under `dir`, sorted, skipping hidden and `build` directories
-/// (Smithy build output repeats the model).
-fn smithy_files_in(dir: &Path, out: &mut Vec<ternarywire_convert::smithy::SourceFile>) -> Result<()> {
+const MAX_SMITHY_DEPTH: usize = 32;
+const MAX_SMITHY_FILES: usize = 1_000;
+
+/// Smithy files under `dir`, sorted, confined to `root`, stopping on symlink
+/// cycles, and skipping hidden and `build` directories (Smithy build output
+/// repeats the model).
+fn smithy_files_in(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<ternarywire_convert::smithy::SourceFile>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    seen_files: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_SMITHY_DEPTH || out.len() >= MAX_SMITHY_FILES {
+        return Ok(());
+    }
+    let Ok(canon_dir) = std::fs::canonicalize(dir) else {
+        return Ok(());
+    };
+    if !canon_dir.starts_with(root) || !visited.insert(canon_dir) {
+        return Ok(());
+    }
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?.flatten().map(|e| e.path()).collect();
     entries.sort();
     for path in entries {
+        if out.len() >= MAX_SMITHY_FILES {
+            break;
+        }
+        let Ok(canon) = std::fs::canonicalize(&path) else {
+            continue;
+        };
+        if !canon.starts_with(root) {
+            continue;
+        }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if path.is_dir() {
+        if canon.is_dir() {
             if !name.starts_with('.') && name != "build" {
-                smithy_files_in(&path, out)?;
+                smithy_files_in(root, &path, out, visited, seen_files, depth + 1)?;
             }
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if (ext == "smithy" || ext == "json") && name != "smithy-build.json" {
+        if (ext == "smithy" || ext == "json") && name != "smithy-build.json" && seen_files.insert(canon) {
             out.extend(smithy_file(&path)?);
         }
     }

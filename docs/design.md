@@ -124,8 +124,6 @@ egui notes:
 - Every icon-only control has a tooltip and an accessible name.
 - Empty, loading and error states are designed (empty state with an action,
   spinner with text, error with icon, cause and next step).
-- Text that users read goes through `tr()`/`trf()` with an Indonesian entry in
-  `crates/ternarywire-app/i18n/id.tsv`.
 - Check both themes and a narrow window: `design/redesign/fixture/compare.sh
   <screen-id> light|dark [WxH]` (e.g. `900x640`) writes the app and the
   prototype side by side.

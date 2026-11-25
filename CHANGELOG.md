@@ -2,6 +2,21 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.5 — 2026-11-26
+
+Deep end-to-end verification, filesystem confinement hardening across CLI/Flows/Spec Hub, and stale i18n cleanup.
+
+### Security
+- **CLI Smithy import confinement.** `ternarywire import` on Smithy directories now rejects absolute or parent-escaping `smithy-build.json` `sources`/`imports` entries, skips symlinks escaping the project root, deduplicates canonical files, and stops on symlink cycles (`MAX_SMITHY_DEPTH = 32`, `MAX_SMITHY_FILES = 1,000`).
+- **Flow storage symlink confinement.** `ternarywire_flows::storage` now uses `write_atomic_confined`, rejects symlinked `flows/` directories or external flow files on save/delete, and ignores escaping symlinks when listing workspace flows.
+- **Spec Hub workspace confinement.** `list_specs`, `new_spec`, and spec deletion in the GUI now confine `specs/` operations to the canonical workspace root and refuse symlink escapes.
+
+### Fixed
+- **Obsolete automation fixture and docs cleanup.** Removed the broken `design/redesign/fixture/steps/readme-indonesian.json` automation script (and obsolete `docs/screenshots/indonesian.png`) left over from the v0.3.3 English-only change, and updated `README.md`, `README.id.md`, and `docs/design.md`.
+
+### Testing
+- Added permanent cross-crate end-to-end tests covering CLI Smithy traversal/cycle rejection, `flow run -r json` secret redaction vs `--show-secrets`, `docs` query-credential masking, pre-request script variable-mutation file exfiltration blocking, Digest `qop=auth-int` and OAuth 1.0 `includeBodyHash` with `PreparedBody::File`, AI inherited collection auth in Runner and Flows, MCP stdio literal command isolation, isolated script worker `Intl`/`ReadableStream`/prototype restoration, GUI Flow variable disk persistence across workspace reopen, and Flow/Spec symlink confinement.
+
 ## 0.3.4 — 2026-11-25
 
 Comprehensive security hardening, stability, and correctness release across all 18 workspace crates.

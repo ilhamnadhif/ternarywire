@@ -3910,5 +3910,16 @@ mod tests {
         let env = app.ws.data.environment(&env_id).unwrap();
         assert_eq!(env.variables.iter().find(|v| v.key == "token").unwrap().effective(), "from-flow");
         assert_eq!(app.ws.data.globals.iter().find(|v| v.key == "global_from_flow").unwrap().effective(), "hello");
+
+        // Flushing and reopening the workspace from disk keeps the persisted values.
+        app.shutdown();
+        let (_, reopened) = ternarywire_core::storage::WorkspaceStore::open(
+            dir.path(),
+            &ternarywire_core::secrets::SecretStore::memory(),
+        )
+        .unwrap();
+        let env = reopened.environment(&env_id).unwrap();
+        assert_eq!(env.variables.iter().find(|v| v.key == "token").unwrap().effective(), "from-flow");
+        assert_eq!(reopened.globals.iter().find(|v| v.key == "global_from_flow").unwrap().effective(), "hello");
     }
 }

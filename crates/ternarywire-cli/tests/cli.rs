@@ -512,3 +512,107 @@ async fn verbose_network_lines_mask_credentials_unless_asked() {
     let t = text(&out);
     assert!(t.contains("access_token=sekrit&page=2 → 401"), "{t}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn docs_masks_credential_query_params_in_markdown_and_html() {
+    let dir = tempfile::tempdir().unwrap();
+    let col_path = dir.path().join("docs.postman_collection.json");
+    let collection = json!({
+        "info": {"name": "Docs API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "variable": [{"key": "apiSecret", "value": "TOP_SECRET_DOC_VAR", "type": "secret"}],
+        "item": [{
+            "name": "Get",
+            "request": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer {{apiSecret}}"}],
+                "url": {
+                    "raw": "https://api.example.test/v1/items?api_key=RAW_DOC_SECRET_999&page=1",
+                    "host": ["https://api.example.test"],
+                    "path": ["v1", "items"],
+                    "query": [
+                        {"key": "api_key", "value": "RAW_DOC_SECRET_999"},
+                        {"key": "page", "value": "1"}
+                    ]
+                }
+            }
+        }]
+    });
+    std::fs::write(&col_path, collection.to_string()).unwrap();
+
+    let md = dir.path().join("API.md");
+    let out = ternarywire(
+        &["docs", col_path.to_str().unwrap(), "--markdown", "-o", md.to_str().unwrap(), "--languages", "curl,python"],
+        dir.path(),
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let md_txt = std::fs::read_to_string(&md).unwrap();
+    assert!(!md_txt.contains("RAW_DOC_SECRET_999"), "query secret leaked in md: {md_txt}");
+    assert!(!md_txt.contains("TOP_SECRET_DOC_VAR"), "secret var leaked in md: {md_txt}");
+
+    let site = dir.path().join("site");
+    let out = ternarywire(
+        &["docs", col_path.to_str().unwrap(), "-o", site.to_str().unwrap(), "--languages", "curl,python"],
+        dir.path(),
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let html_txt = std::fs::read_to_string(site.join("index.html")).unwrap();
+    assert!(!html_txt.contains("RAW_DOC_SECRET_999"), "query secret leaked in html");
+    assert!(!html_txt.contains("TOP_SECRET_DOC_VAR"), "secret var leaked in html");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_blocks_pre_request_script_variable_mutation_file_exfil() {
+    use std::sync::{Arc, Mutex};
+
+    let bodies: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = bodies.clone();
+    let app = Router::new().route(
+        "/upload",
+        post(move |body: String| async move {
+            seen.lock().unwrap().push(body);
+            (StatusCode::OK, "ok")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside_secret.txt");
+    std::fs::write(&outside, "DO_NOT_EXFILTRATE_SECRET").unwrap();
+    let workdir = dir.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("allowed.txt"), "allowed-content").unwrap();
+
+    let col_path = dir.path().join("exfil.postman_collection.json");
+    let outside_js = serde_json::to_string(&outside.display().to_string()).unwrap();
+    let collection = json!({
+        "info": {"name": "Exfil", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "variable": [
+            {"key": "baseUrl", "value": format!("http://{addr}")},
+            {"key": "targetFile", "value": "allowed.txt"}
+        ],
+        "item": [{
+            "name": "Upload",
+            "request": {
+                "method": "POST",
+                "url": {"raw": "{{baseUrl}}/upload", "host": ["{{baseUrl}}"], "path": ["upload"]},
+                "body": {"mode": "file", "file": {"src": "{{targetFile}}"}}
+            },
+            "event": [{
+                "listen": "prerequest",
+                "script": {"exec": [format!("pm.variables.set('targetFile', {outside_js});")]}
+            }]
+        }]
+    });
+    std::fs::write(&col_path, collection.to_string()).unwrap();
+
+    let out =
+        ternarywire(&["run", col_path.to_str().unwrap(), "--working-dir", workdir.to_str().unwrap()], dir.path()).await;
+    assert_eq!(out.status.code(), Some(1), "exfiltration request must fail: {}", text(&out));
+    for b in bodies.lock().unwrap().iter() {
+        assert!(!b.contains("DO_NOT_EXFILTRATE_SECRET"), "outside file content was exfiltrated!");
+    }
+}

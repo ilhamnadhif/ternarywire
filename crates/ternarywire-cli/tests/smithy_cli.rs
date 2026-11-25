@@ -215,3 +215,56 @@ operation Greet {
     let out = ternarywire(&["export", "-w", ws.to_str().unwrap(), "-c", "App"], dir.path());
     assert!(String::from_utf8_lossy(&out.stdout).contains("text"), "{}", text(&out));
 }
+
+#[test]
+fn import_rejects_smithy_traversal_and_symlink_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let outside = dir.path().join("outside.smithy");
+    std::fs::write(
+        &outside,
+        "$version: \"2\"\nnamespace example.ok\n@http(method: \"GET\", uri: \"/leaked\")\noperation Leaked {}\n",
+    )
+    .unwrap();
+
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("main.smithy"),
+        "$version: \"2\"\nnamespace example.ok\nuse aws.protocols#restJson1\n@restJson1\nservice Ok { version: \"1\", operations: [Ping] }\n@http(method: \"GET\", uri: \"/ping\")\noperation Ping {}\n",
+    )
+    .unwrap();
+
+    // Traversal in smithy-build.json is rejected.
+    std::fs::write(
+        project.join("smithy-build.json"),
+        r#"{"version": "1.0", "sources": ["main.smithy", "../outside.smithy"]}"#,
+    )
+    .unwrap();
+    let out = ternarywire(&["import", project.to_str().unwrap(), "-w", ws.to_str().unwrap()], dir.path());
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("escapes"), "{}", text(&out));
+
+    // Absolute paths in smithy-build.json are rejected.
+    let abs = outside.display().to_string().replace('\\', "/");
+    std::fs::write(
+        project.join("smithy-build.json"),
+        format!(r#"{{"version": "1.0", "sources": ["main.smithy", "{abs}"]}}"#),
+    )
+    .unwrap();
+    let out = ternarywire(&["import", project.to_str().unwrap(), "-w", ws.to_str().unwrap()], dir.path());
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("relative path"), "{}", text(&out));
+
+    // Directory walk without smithy-build.json skips escaping symlinks and stops on cycles.
+    std::fs::remove_file(project.join("smithy-build.json")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, project.join("escape.smithy")).unwrap();
+        std::os::unix::fs::symlink(&project, project.join("loop")).unwrap();
+    }
+    let out = ternarywire(&["import", project.to_str().unwrap(), "-w", ws.to_str().unwrap()], dir.path());
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{t}");
+    assert!(t.contains("Detected Smithy (1 files)"), "{t}");
+}

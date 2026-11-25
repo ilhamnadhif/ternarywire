@@ -85,9 +85,67 @@ pub fn load(path: &Path) -> Result<Flow, StoreError> {
     Ok(flow)
 }
 
-fn flow_paths(dir: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut paths: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| is_flow_file(p)).collect();
+fn confined_flows_dir(workspace_root: &Path) -> Result<PathBuf, StoreError> {
+    let dir = flows_dir(workspace_root);
+    let canon_root = std::fs::canonicalize(workspace_root).map_err(|e| io(workspace_root, e))?;
+    if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+        if meta.file_type().is_symlink() {
+            return Err(io(
+                &dir,
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("refusing to use symlinked flows directory: {}", dir.display()),
+                ),
+            ));
+        }
+        let canon = std::fs::canonicalize(&dir).map_err(|e| io(&dir, e))?;
+        if !canon.starts_with(&canon_root) {
+            return Err(io(
+                &dir,
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("refusing to access flows directory outside workspace: {}", dir.display()),
+                ),
+            ));
+        }
+    }
+    Ok(dir)
+}
+
+fn ensure_confined_flow_file(workspace_root: &Path, path: &Path) -> Result<(), StoreError> {
+    let canon_root = std::fs::canonicalize(workspace_root).map_err(|e| io(workspace_root, e))?;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to modify symlinked flow file: {}", path.display()),
+            ),
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        let canon_parent = std::fs::canonicalize(parent).map_err(|e| io(parent, e))?;
+        if !canon_parent.starts_with(&canon_root) {
+            return Err(io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("refusing to modify flow file outside workspace: {}", path.display()),
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn flow_paths(workspace_root: &Path) -> Vec<PathBuf> {
+    let Ok(dir) = confined_flows_dir(workspace_root) else { return Vec::new() };
+    let Ok(canon_root) = std::fs::canonicalize(workspace_root) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| is_flow_file(p) && std::fs::canonicalize(p).is_ok_and(|c| c.starts_with(&canon_root)))
+        .collect();
     paths.sort();
     paths
 }
@@ -97,7 +155,7 @@ fn flow_paths(dir: &Path) -> Vec<PathBuf> {
 pub fn list(workspace_root: &Path) -> (Vec<FlowFile>, Vec<String>) {
     let mut flows = Vec::new();
     let mut errors = Vec::new();
-    for path in flow_paths(&flows_dir(workspace_root)) {
+    for path in flow_paths(workspace_root) {
         match load(&path) {
             Ok(flow) => flows.push(FlowFile { path, flow }),
             Err(e) => errors.push(e.to_string()),
@@ -113,7 +171,7 @@ fn file_id(path: &Path) -> Option<String> {
 
 /// The file currently holding the flow with `id`.
 pub fn path_of(workspace_root: &Path, id: &str) -> Option<PathBuf> {
-    flow_paths(&flows_dir(workspace_root)).into_iter().find(|p| file_id(p).as_deref() == Some(id))
+    flow_paths(workspace_root).into_iter().find(|p| file_id(p).as_deref() == Some(id))
 }
 
 fn slug_for(name: &str) -> String {
@@ -139,7 +197,7 @@ fn stem_matches(stem: &str, slug: &str) -> bool {
 /// when the name changed the old file is replaced by the new one. Another
 /// flow's file is never overwritten (`name-2.flow.json` is used instead).
 pub fn save(workspace_root: &Path, flow: &Flow) -> Result<PathBuf, StoreError> {
-    let dir = flows_dir(workspace_root);
+    let dir = confined_flows_dir(workspace_root)?;
     std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
     let existing = path_of(workspace_root, &flow.id);
     let slug = slug_for(&flow.name);
@@ -150,17 +208,21 @@ pub fn save(workspace_root: &Path, flow: &Flow) -> Result<PathBuf, StoreError> {
             loop {
                 let name = if n == 1 { format!("{slug}{FLOW_SUFFIX}") } else { format!("{slug}-{n}{FLOW_SUFFIX}") };
                 let candidate = dir.join(name);
-                if !candidate.exists() || file_id(&candidate).as_deref() == Some(flow.id.as_str()) {
+                if (!candidate.exists() && std::fs::symlink_metadata(&candidate).is_err())
+                    || file_id(&candidate).as_deref() == Some(flow.id.as_str())
+                {
                     break candidate;
                 }
                 n += 1;
             }
         }
     };
-    ternarywire_core::storage::write_atomic(&target, to_json(flow).as_bytes()).map_err(|e| io(&target, e))?;
+    ternarywire_core::storage::write_atomic_confined(workspace_root, &target, to_json(flow).as_bytes(), true)
+        .map_err(|e| io(&target, e))?;
     if let Some(old) = existing
         && old != target
     {
+        ensure_confined_flow_file(workspace_root, &old)?;
         std::fs::remove_file(&old).map_err(|e| io(&old, e))?;
     }
     Ok(target)
@@ -168,8 +230,10 @@ pub fn save(workspace_root: &Path, flow: &Flow) -> Result<PathBuf, StoreError> {
 
 /// Deletes the flow's file. Returns false when no file had that id.
 pub fn delete(workspace_root: &Path, id: &str) -> Result<bool, StoreError> {
+    let _ = confined_flows_dir(workspace_root)?;
     match path_of(workspace_root, id) {
         Some(p) => {
+            ensure_confined_flow_file(workspace_root, &p)?;
             std::fs::remove_file(&p).map_err(|e| io(&p, e))?;
             Ok(true)
         }

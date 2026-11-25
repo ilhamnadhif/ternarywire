@@ -33,8 +33,7 @@ run unchanged for common use.
   response.
 - **Mock server, webhook listener and capture proxy**, all local.
 - Twelve auth types, from Basic and OAuth 2.0 to AWS SigV4, NTLM and Akamai EdgeGrid.
-- English and Indonesian UI, light and dark themes, keyboard and screen-reader friendly, no
-  telemetry.
+- Light and dark themes, keyboard and screen-reader friendly, no telemetry.
 - **Native everywhere**: a real macOS menu bar, a Windows installer, `.deb`, `.rpm` and AppImage
   packages for Linux (x86_64 and ARM64).
 - **Updates** from GitHub releases; on macOS and with the AppImage one click installs the new
@@ -366,11 +365,8 @@ Flows are saved as `flows/*.flow.json` in the workspace and run from the CLI wit
   coral accent, browser-like tabs, a command palette (`⇧⌘P`) and quick search (`⌘K`).
 - Open tabs, including unsaved ones, are restored after a restart or a crash. Closing an edited new
   request or spec asks first.
-- English and Indonesian (Settings › General › Language).
 - Accessible: keyboard navigation, and every button, tab, sidebar row and field has a name for
   screen readers (via AccessKit).
-
-![The Indonesian interface, with test results](docs/screenshots/indonesian.png)
 
 ## Keyboard shortcuts
 
@@ -570,7 +566,7 @@ resolution, auth, send (with Digest and NTLM challenge retries), then post-respo
 tests. A run in the terminal behaves like a run in the app.
 
 Also in the repository: `docs/` (status of every requirement, [design guide](docs/design.md),
-[scripting](docs/scripting.md)), `scripts/` (packaging, installer, benchmarks, i18n and
+[scripting](docs/scripting.md)), `scripts/` (packaging, installer, benchmarks and
 accessibility checks), `packaging/` (Info.plist, icon, Homebrew cask, Linux `.desktop`), `docker/`
 and `action.yml`.
 
@@ -581,7 +577,6 @@ cargo test --workspace                       # about 1,270 tests, with local HTT
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 scripts/bench.sh                             # the performance targets above (macOS)
-python3 scripts/i18n-scan.py                 # UI text that bypasses the translation system
 swift scripts/ax-audit.swift <pid>           # the accessibility tree as VoiceOver reads it
 ```
 
@@ -590,8 +585,6 @@ need real services (socket.io, mosquitto, HashiCorp Vault, Ollama, the npm regis
 `#[ignore]`d; run them with `-- --ignored` after starting the service they name.
 
 - **UI**: read [docs/design.md](docs/design.md) first; screens use shared tokens and components.
-- **Translations**: text users read goes through `tr()`/`trf()` with an Indonesian entry in
-  `crates/ternarywire-app/i18n/id.tsv` (about 2,200 entries); a test fails when one is missing.
 - **Environment variables**: `TERNARYWIRE_CONFIG_DIR` (another settings folder),
   `TERNARYWIRE_SECRETS=file|memory` (no Keychain prompts with unsigned builds) and
   `TERNARYWIRE_AUTOMATION=steps.json` (drive the app from a list of steps and take screenshots; see

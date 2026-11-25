@@ -11,10 +11,10 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use base64::Engine;
 use md5::{Digest, Md5};
-use sha2::Sha384;
+use sha2::{Sha256, Sha384};
 
 use ternarywire_auth::challenge::parse_challenges;
 use ternarywire_auth::{AuthContext, apply, handle_challenge};
@@ -327,4 +327,87 @@ async fn ntlm_over_https_through_a_proxy_binds_the_server_certificate() {
     // certificate for the binding.
     let target = base.trim_start_matches("https://");
     assert_eq!(proxy.log(), vec![format!("CONNECT {target}"); 2]);
+}
+
+#[tokio::test]
+async fn digest_auth_int_and_oauth1_body_hash_with_file_body_e2e() {
+    use ternarywire_core::prepared::PreparedBody;
+
+    async fn digest_int(headers: HeaderMap, body: axum::body::Bytes) -> Response {
+        let challenge = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(
+                    "www-authenticate",
+                    r#"Digest realm="test", qop="auth-int", nonce="n1", opaque="op1", algorithm=MD5"#,
+                )],
+            )
+                .into_response()
+        };
+        let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) else {
+            return challenge();
+        };
+        let c = parse_challenges([auth]);
+        let Some(d) = c.iter().find(|c| c.scheme == "digest") else { return challenge() };
+        let p = |k: &str| d.param(k).unwrap_or_default().to_string();
+        let body_hash = hex::encode(Md5::digest(&body));
+        let ha1 = h(&format!("{}:{}:{}", p("username"), "test", "s3cret"));
+        let ha2 = h(&format!("POST:{}:{body_hash}", p("uri")));
+        let expected = h(&format!("{ha1}:{}:{}:{}:{}:{ha2}", p("nonce"), p("nc"), p("cnonce"), p("qop")));
+        if p("qop") == "auth-int" && p("response") == expected && body.as_ref() == b"file-payload-bytes" {
+            (StatusCode::OK, "digest-int-ok").into_response()
+        } else {
+            challenge()
+        }
+    }
+
+    async fn oauth1_hash(headers: HeaderMap, body: axum::body::Bytes) -> Response {
+        let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let want = B64.encode(Sha256::digest(&body));
+        let want_encoded = want.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D");
+        let ok = auth.starts_with("OAuth ")
+            && (auth.contains(&format!("oauth_body_hash=\"{want_encoded}\""))
+                || auth.contains(&format!("oauth_body_hash=\"{want}\"")));
+        if ok && body.as_ref() == b"file-payload-bytes" {
+            (StatusCode::OK, "oauth1-ok").into_response()
+        } else {
+            (StatusCode::UNAUTHORIZED, format!("bad oauth_body_hash: {auth}")).into_response()
+        }
+    }
+
+    let router = Router::new().route("/digest-int", post(digest_int)).route("/oauth1", post(oauth1_hash));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let payload_file = dir.path().join("payload.bin");
+    std::fs::write(&payload_file, b"file-payload-bytes").unwrap();
+    let e = engine(None, &dir);
+
+    let digest_req = PreparedRequest {
+        method: "POST".into(),
+        url: format!("{base}/digest-int"),
+        body: PreparedBody::File(payload_file.clone()),
+        auth: Auth::new(AuthType::Digest).with("username", "alice").with("password", "s3cret"),
+        ..Default::default()
+    };
+    let (status, body, sends) = run(&e, digest_req).await;
+    assert_eq!((status, body.as_str(), sends), (200, "digest-int-ok", 2));
+
+    let oauth1_req = PreparedRequest {
+        method: "POST".into(),
+        url: format!("{base}/oauth1"),
+        body: PreparedBody::File(payload_file),
+        auth: Auth::new(AuthType::OAuth1)
+            .with("consumerKey", "ck")
+            .with("consumerSecret", "cs")
+            .with("signatureMethod", "HMAC-SHA256")
+            .with("includeBodyHash", true)
+            .with("addParamsToHeader", true),
+        ..Default::default()
+    };
+    let (status, body, sends) = run(&e, oauth1_req).await;
+    assert_eq!((status, body.as_str(), sends), (200, "oauth1-ok", 1));
 }
