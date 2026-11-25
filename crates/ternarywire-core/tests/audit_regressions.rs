@@ -3,12 +3,14 @@
 
 use std::time::Instant;
 
+#[cfg(unix)]
 use indexmap::IndexMap;
 use serde_json::json;
 
 use ternarywire_core::auth::{Auth, AuthType};
 use ternarywire_core::environment::Environment;
 use ternarywire_core::fork::{self, ChangeKind};
+#[cfg(unix)]
 use ternarywire_core::history::{HistoryEntry, HistoryStore};
 use ternarywire_core::jsonpath;
 use ternarywire_core::model::{BodyMode, Collection, Folder, FormField, HttpRequest, Item, KeyValue, RequestItem};
@@ -17,7 +19,9 @@ use ternarywire_core::prepared::{PrepareContext, PreparedBody, prepare};
 use ternarywire_core::protocols::{McpRequest, McpTransport, SocketIoArg};
 use ternarywire_core::response::BodyLanguage;
 use ternarywire_core::script::protocol as proto;
-use ternarywire_core::secrets::{FileBackend, SecretBackend, SecretStore};
+use ternarywire_core::secrets::SecretStore;
+#[cfg(unix)]
+use ternarywire_core::secrets::{FileBackend, SecretBackend};
 use ternarywire_core::settings::{ClientCertificate, RequestDefaults};
 use ternarywire_core::storage::WorkspaceStore;
 use ternarywire_core::urlutil;
