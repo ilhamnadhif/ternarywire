@@ -411,6 +411,8 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
             s.scroll.floating_allocated_width = 0.0;
             // Content is cut at the edge of a scroll area, without a fade.
             s.scroll.fade.strength = 0.0;
+            // Stop hard at content edges without elastic rubber-band bounce.
+            s.scroll.kinetic.rubber_band = false;
 
             let v: &mut Visuals = &mut style.visuals;
             v.text_options.subpixel_binning = false;
@@ -499,5 +501,104 @@ pub fn apply(ctx: &egui::Context, font_size: f32) {
                 };
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_rubber_band_bounce_is_disabled_in_both_themes() {
+        let ctx = egui::Context::default();
+        apply(&ctx, 13.0);
+
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let style = ctx.style_of(theme);
+            assert!(!style.spacing.scroll.kinetic.rubber_band, "rubber_band should be disabled for {theme:?}");
+        }
+
+        // Behavioral E2E check: trackpad & momentum scroll past top or bottom edge
+        // must clamp hard at 0..=max_offset with zero rubber-band overscroll.
+        let mut time = 0.0_f64;
+        let mut run_frame = |ctx: &egui::Context, events: Vec<egui::Event>, max_out: &mut f32, off_out: &mut f32| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let out =
+                        egui::ScrollArea::vertical().id_salt("no-bounce-test").auto_shrink([false; 2]).show(ui, |ui| {
+                            ui.allocate_space(egui::vec2(200.0, 1000.0));
+                        });
+                    *max_out = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                    *off_out = out.state.unclamped_offset().y;
+                });
+            });
+            full.textures_delta.clear();
+        };
+
+        let (mut max_off, mut off) = (0.0, 0.0);
+        // Prime layout with pointer inside scroll area.
+        let move_in = egui::Event::PointerMoved(egui::pos2(100.0, 100.0));
+        run_frame(&ctx, vec![move_in.clone()], &mut max_off, &mut off);
+        run_frame(&ctx, vec![move_in.clone()], &mut max_off, &mut off);
+        assert!(max_off > 500.0, "expected scrollable content, max_off={max_off}");
+        assert_eq!(off, 0.0);
+
+        // Scroll UP past top edge (positive y delta in egui scrolls content down -> offset decreases).
+        for source in [egui::MouseWheelSource::Trackpad, egui::MouseWheelSource::Momentum] {
+            for _ in 0..3 {
+                run_frame(
+                    &ctx,
+                    vec![
+                        move_in.clone(),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, 120.0),
+                            phase: egui::TouchPhase::Move,
+                            source,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    &mut max_off,
+                    &mut off,
+                );
+                assert_eq!(off, 0.0, "top edge must not bounce/overscroll (source={source:?}): {off}");
+            }
+        }
+
+        // Scroll DOWN far past bottom edge and settle for several frames.
+        for source in [egui::MouseWheelSource::Trackpad, egui::MouseWheelSource::Momentum] {
+            for _ in 0..5 {
+                run_frame(
+                    &ctx,
+                    vec![
+                        move_in.clone(),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -5000.0),
+                            phase: egui::TouchPhase::Move,
+                            source,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    &mut max_off,
+                    &mut off,
+                );
+                assert!(
+                    off <= max_off + 0.001,
+                    "bottom edge must never exceed {max_off} (source={source:?}): got {off}"
+                );
+            }
+            assert!(
+                (off - max_off).abs() < 0.01,
+                "bottom edge must clamp hard at {max_off} without bounce (source={source:?}): got {off}"
+            );
+        }
     }
 }

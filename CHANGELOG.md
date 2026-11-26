@@ -2,6 +2,14 @@
 
 All notable changes to TernaryWire. The newest version comes first.
 
+## 0.3.6 — 2026-11-26
+
+Scroll UX polish and macOS Dock icon sizing alignment with the Ternary family.
+
+### Fixed
+- **No scroll overscroll bounce.** Disabled elastic rubber-band overscroll (`ScrollStyle.kinetic.rubber_band = false`) globally across Dark and Light themes so all scrollable views (API/history sidebar lists, response bodies, headers, editors, logs, and dialogs) stop cleanly at top, bottom, and side edges with zero bounce animation.
+- **macOS Dock icon sizing.** Stopped overriding the macOS `.app` bundle icon at runtime via `NSApp.setApplicationIconImage` (matching TernaryShell and TernaryCode), so TernaryWire keeps its native bundle `.icns` framing and renders at the exact same size in the Dock and app switcher without changing the icon design.
+
 ## 0.3.5 — 2026-11-26
 
 Deep end-to-end verification, filesystem confinement hardening across CLI/Flows/Spec Hub, and stale i18n cleanup.

@@ -72,7 +72,7 @@ fn main() -> eframe::Result {
         .with_app_id("ternarywire")
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([760.0, 480.0])
-        .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default());
+        .with_icon(window_icon());
     // macOS: the title bar is the app's own (44 px, app.rs `top_bar`); the
     // window content runs under the transparent native title bar, whose
     // traffic lights sit over the bar's left end.
@@ -95,4 +95,31 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(app::TernaryWireApp::new(cc, settings, settings_path, open_path)))),
     )
+}
+
+/// The window and taskbar icon. On macOS the `.app` bundle provides the Dock
+/// icon: an empty [`egui::IconData`] keeps it (otherwise eframe calls
+/// `setApplicationIconImage:` with a raw 256 px bitmap that renders at a
+/// different size than native bundle `.icns` icons like TernaryShell/TernaryCode).
+fn window_icon() -> egui::IconData {
+    if cfg!(target_os = "macos") {
+        return egui::IconData::default();
+    }
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::window_icon;
+
+    #[test]
+    fn window_icon_preserves_macos_bundle_icon_and_loads_on_other_os() {
+        let icon = window_icon();
+        if cfg!(target_os = "macos") {
+            assert_eq!(icon, egui::IconData::default());
+        } else {
+            assert_eq!((icon.width, icon.height), (256, 256));
+            assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        }
+    }
 }
